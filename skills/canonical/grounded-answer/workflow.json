@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "workflow_id": "grounded-answer",
+  "category": "answer",
+  "entry_intents": [
+    "answer a grounded question",
+    "respond from the published knowledge base",
+    "produce a supported answer with provenance"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect structured JSON output",
+    "ability to inspect rendered images when required"
+  ],
+  "defaults": {
+    "default_target": "current",
+    "default_mode": "answer-question"
+  },
+  "execution_hints": {
+    "mutability": "read-only",
+    "parallelism": "read-only-safe",
+    "background_commands": [
+      "docmason retrieve \"<query>\" --json",
+      "docmason trace --answer-file <path> --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the final answer text, answer state, and support boundary to the main agent.",
+    "artifacts": [
+      "runtime/logs/query-sessions/<session_id>.json",
+      "runtime/logs/retrieval-traces/<trace_id>.json"
+    ],
+    "follow_up": [
+      "provenance-trace",
+      "runtime-log-review"
+    ]
+  }
+}

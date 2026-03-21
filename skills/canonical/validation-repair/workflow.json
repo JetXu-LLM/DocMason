@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "workflow_id": "validation-repair",
+  "category": "knowledge-base",
+  "entry_intents": [
+    "repair validation failures",
+    "fix the staged knowledge base",
+    "clear publication blockers"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect machine-readable validation output"
+  ],
+  "defaults": {
+    "default_target": "staging",
+    "default_mode": "repair-until-valid"
+  },
+  "execution_hints": {
+    "mutability": "workspace-write",
+    "parallelism": "per-source-safe",
+    "background_commands": [
+      "docmason validate-kb --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the final validation status and remaining blockers to the main agent.",
+    "artifacts": [
+      "knowledge_base/staging/validation_report.json"
+    ],
+    "follow_up": [
+      "knowledge-base-sync"
+    ]
+  }
+}

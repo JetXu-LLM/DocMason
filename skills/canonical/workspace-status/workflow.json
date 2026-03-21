@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "workflow_id": "workspace-status",
+  "category": "foundation",
+  "entry_intents": [
+    "inspect workspace status",
+    "check the current stage",
+    "see what should happen next"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to reason about staged workflow state"
+  ],
+  "defaults": {
+    "default_target": "workspace",
+    "default_mode": "stage-inspection"
+  },
+  "execution_hints": {
+    "mutability": "read-only",
+    "parallelism": "read-only-safe",
+    "background_commands": [
+      "docmason status --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the authoritative workspace stage and pending actions to the main agent.",
+    "artifacts": [],
+    "follow_up": [
+      "workspace-bootstrap",
+      "adapter-sync",
+      "knowledge-base-sync"
+    ]
+  }
+}

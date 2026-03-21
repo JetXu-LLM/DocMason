@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "rubric_id": "example-rubric",
+  "title": "Example Rubric",
+  "trial_count": 3,
+  "judge_instructions": [
+    "Score only the active dimensions using the supplied evidence boundary."
+  ],
+  "acceptance_thresholds": {
+    "deterministic_pass_rate": 1.0,
+    "answer_mean_score": 1.5,
+    "aggregate_rubric_regression_limit": 0.2
+  },
+  "dimensions": {
+    "factual_alignment": {
+      "description": "Correctness relative to the intended support basis.",
+      "score_0": "Incorrect or unsupported.",
+      "score_1": "Partially correct.",
+      "score_2": "Correct."
+    },
+    "coverage": {
+      "description": "Coverage of the required answer boundary.",
+      "score_0": "Misses key requirements.",
+      "score_1": "Partial coverage.",
+      "score_2": "Covers the expected boundary."
+    },
+    "source_discipline": {
+      "description": "Stays within the declared support basis.",
+      "score_0": "Violates the support boundary.",
+      "score_1": "Mostly disciplined.",
+      "score_2": "Fully disciplined."
+    },
+    "uncertainty_discipline": {
+      "description": "Qualifies or abstains when required.",
+      "score_0": "Overclaims.",
+      "score_1": "Partially qualified.",
+      "score_2": "Appropriately qualified."
+    },
+    "visual_evidence_handling": {
+      "description": "Escalates to visual evidence when needed.",
+      "score_0": "Misses required visual handling.",
+      "score_1": "Partial visual handling.",
+      "score_2": "Correct visual handling."
+    }
+  }
+}

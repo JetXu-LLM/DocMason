@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "workflow_id": "runtime-log-review",
+  "category": "review",
+  "entry_intents": [
+    "review recent runtime logs",
+    "inspect no-result or degraded sessions",
+    "summarize repeated failure patterns"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "ability to inspect structured JSON output"
+  ],
+  "defaults": {
+    "default_target": "runtime/logs",
+    "default_mode": "review-summary"
+  },
+  "execution_hints": {
+    "mutability": "read-only",
+    "parallelism": "read-only-safe",
+    "background_commands": [],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the operator-facing log review summary and follow-up recommendations to the main agent.",
+    "artifacts": [
+      "runtime/logs/review/summary.json",
+      "runtime/logs/review/benchmark-candidates.json",
+      "runtime/logs/query-sessions/<session_id>.json",
+      "runtime/logs/retrieval-traces/<trace_id>.json"
+    ],
+    "follow_up": [
+      "retrieval-workflow",
+      "provenance-trace",
+      "grounded-answer",
+      "grounded-composition"
+    ]
+  }
+}

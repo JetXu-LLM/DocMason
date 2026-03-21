@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "suite_id": "example-local-suite",
+  "title": "Example Local Suite",
+  "description": "Illustrative local benchmark suite shape.",
+  "target": "current",
+  "corpus_signature": "replace-with-local-corpus-signature",
+  "retrieval_strategy_id": "phase4b-lexical-plus-graph-v1",
+  "answer_workflow_id": "phase4b-grounded-answer-v1",
+  "cases": [
+    {
+      "case_id": "example-answer-case",
+      "family": "example-regression",
+      "execution_mode": "trace-answer",
+      "query_or_prompt": "Example answer text for replay.",
+      "expected_primary_sources": [],
+      "required_sources_or_units": [],
+      "minimum_support_overlap": 0,
+      "forbidden_sources_or_units": [],
+      "expected_status": "degraded",
+      "expected_answer_state": "abstained",
+      "expected_support_basis": "kb-grounded",
+      "expected_render_inspection_required": false,
+      "reference_facts": [
+        "Replace with local reference facts."
+      ],
+      "active_rubric_dimensions": [],
+      "feedback_tags": [
+        "should_abstain"
+      ],
+      "critical": true,
+      "top": 3,
+      "graph_hops": 1,
+      "include_renders": true,
+      "declared_answer_state": "abstained",
+      "execution_support_basis": "kb-grounded",
+      "execution_inner_workflow_id": "grounded-answer"
+    }
+  ]
+}

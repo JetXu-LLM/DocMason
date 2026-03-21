@@ -1,0 +1,109 @@
+# DocMason workspace configuration
+# This file defines the committed configuration surface for the repository.
+# Secret or machine-local overrides should live outside versioned defaults.
+
+workspace:
+  source_dir: original_doc
+  knowledge_base_dir: knowledge_base
+  runtime_dir: runtime
+
+reference_environment:
+  native_agent: codex
+  platform: macos
+  python_requires: ">=3.11"
+  package_workflow:
+    primary: uv
+    fallback: pip
+
+project:
+  language_policy: english-only
+  implementation_bias: python-first
+  persistence_model: file-only
+
+knowledge_base:
+  multimodal: true
+  primary_artifact_shape: json-plus-markdown
+  bilingual_outputs: true
+  human_readable_views: optional
+  preserve_unknown_boundaries: true
+  publish_model: immutable-snapshot-plus-atomic-current-switch
+  evidence_retention:
+    strategy: adaptive
+    render_during_analysis: almost-everything
+    prefer_joint_text_plus_image_reading: true
+  renderers:
+    pdf:
+      - pypdfium2
+      - pypdf
+    office:
+      - libreoffice-pdf
+      - png-renders
+
+trust_model:
+  strategy: heuristic-only
+  path_scope: local-branch-relative
+  inputs:
+    - local_branch_depth
+    - first_level_subtree_context
+    - shared_ancestor_proximity
+    - source_stability
+    - corroboration
+    - extraction_confidence
+    - recency
+    - graph_centrality
+    - inferred_document_role
+
+agents:
+  canonical_contract: AGENTS.md
+  canonical_skills_dir: skills/canonical
+  generated_adapters_dir: adapters
+  native_reference_workflow: codex-macos
+  compatibility_targets:
+    - claude-code
+    - github-copilot
+
+ingestion:
+  supported_inputs:
+    - pdf
+    - pptx
+    - docx
+    - xlsx
+    - md
+    - markdown
+    - txt
+    - mdx
+    - yaml
+    - yml
+    - tex
+    - csv
+    - tsv
+  supported_input_tiers:
+    office_pdf:
+      - pdf
+      - pptx
+      - docx
+      - xlsx
+    first_class_text:
+      - md
+      - markdown
+      - txt
+    lightweight_text:
+      - mdx
+      - yaml
+      - yml
+      - tex
+      - csv
+      - tsv
+  policy:
+    multimodal_first: true
+    deterministic_preprocessing: true
+    partial_failure_tolerant: true
+
+quality:
+  validation_gate_required: true
+  publish_on_validation_success: true
+  prefer_explicit_failure_over_weak_fallback: true
+
+roadmap:
+  current_completed_phase: phase-2-workspace-coordination-atomic-publish-and-projection-discipline
+  next_phase: phase-3-spreadsheet-and-multimodal-evidence-compiler-deepening

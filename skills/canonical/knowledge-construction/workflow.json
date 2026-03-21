@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "workflow_id": "knowledge-construction",
+  "category": "knowledge-base",
+  "entry_intents": [
+    "author staged knowledge objects",
+    "complete pending synthesis work",
+    "write knowledge.json and summary.md"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect rendered images"
+  ],
+  "defaults": {
+    "default_target": "staging",
+    "default_mode": "pending-synthesis"
+  },
+  "execution_hints": {
+    "mutability": "workspace-write",
+    "parallelism": "per-source-safe",
+    "background_commands": [],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return completed staged source IDs or a concrete capability blocker to the main agent.",
+    "artifacts": [
+      "knowledge_base/staging/pending_work.json",
+      "knowledge_base/staging/sources/<source_id>/knowledge.json",
+      "knowledge_base/staging/sources/<source_id>/summary.md"
+    ],
+    "follow_up": [
+      "knowledge-base-sync",
+      "validation-repair"
+    ]
+  }
+}

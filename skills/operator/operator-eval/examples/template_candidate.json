@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "draft_id": "candidate-example-conversation-turn-001",
+  "generated_at": "2026-03-18T00:00:00Z",
+  "suite": "regression",
+  "candidate": {
+    "candidate_id": "candidate-example-conversation-turn-001",
+    "recorded_at": "2026-03-18T00:00:00Z",
+    "conversation_id": "example-conversation",
+    "turn_id": "turn-001",
+    "session_id": "example-session",
+    "trace_id": "example-trace",
+    "session_ids": [
+      "example-session"
+    ],
+    "trace_ids": [
+      "example-trace"
+    ],
+    "original_user_question": "Example question.",
+    "routed_workflow": "ask",
+    "inner_workflow_id": "grounded-answer",
+    "suggested_benchmark_family": "degraded-grounded-answer",
+    "suggested_expected_status": "degraded",
+    "suggested_expected_answer_state": "abstained",
+    "suggested_feedback_tags": [
+      "should_abstain"
+    ],
+    "requires_render_inspection": false,
+    "candidate_priority": "high",
+    "feedback_match_count": 1,
+    "log_origin": "interactive-ask",
+    "reason": "Example reason.",
+    "support_basis": "kb-grounded",
+    "question_class": "answer",
+    "question_domain": "workspace-corpus",
+    "support_strategy": "kb-first",
+    "analysis_origin": "agent-supplied",
+    "answer_file_path": "runtime/answers/example-conversation/turn-001.md"
+  },
+  "proposed_case": {
+    "case_id": "example-conversation-turn-001",
+    "family": "degraded-grounded-answer",
+    "execution_mode": "trace-answer",
+    "query_or_prompt": "Example answer text.",
+    "expected_primary_sources": [],
+    "required_sources_or_units": [],
+    "minimum_support_overlap": 0,
+    "forbidden_sources_or_units": [],
+    "expected_status": "degraded",
+    "expected_answer_state": "abstained",
+    "expected_support_basis": "kb-grounded",
+    "expected_render_inspection_required": false,
+    "reference_facts": [
+      "Example promoted regression case."
+    ],
+    "active_rubric_dimensions": [],
+    "feedback_tags": [
+      "should_abstain"
+    ],
+    "critical": true,
+    "top": 3,
+    "graph_hops": 1,
+    "include_renders": true,
+    "declared_answer_state": "abstained",
+    "execution_support_basis": "kb-grounded",
+    "execution_inner_workflow_id": "grounded-answer"
+  },
+  "operator_notes": "Optional operator note."
+}

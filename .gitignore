@@ -1,0 +1,47 @@
+# Private source material and compiled knowledge
+/original_doc/*
+!/original_doc/.gitkeep
+/knowledge_base/*
+!/knowledge_base/.gitkeep
+/runtime/*
+!/runtime/.gitkeep
+/adapters/*
+!/adapters/.gitkeep
+/planning/
+/skills/private/
+/IMPLEMENTATION_PLAN.md
+
+# Generated agent adapters
+/CLAUDE.md
+/.github/copilot-instructions.md
+/.github/skills/
+
+# Claude Code runtime-created symlink (first-use adaptation artifact)
+/.claude/skills
+
+# Python environments and packaging artifacts
+/.venv/
+/venv/
+/env/
+/build/
+/dist/
+/*.egg-info/
+/.pytest_cache/
+/.ruff_cache/
+/.mypy_cache/
+/.coverage
+/coverage.xml
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# macOS and editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and local scratch files
+*.log
+*.tmp
+*.swp

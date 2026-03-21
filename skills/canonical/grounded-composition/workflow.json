@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "workflow_id": "grounded-composition",
+  "category": "answer",
+  "entry_intents": [
+    "draft evidence-backed content",
+    "plan a deliverable from the knowledge base",
+    "produce a research-backed composition output"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect structured JSON output",
+    "ability to inspect rendered images when required"
+  ],
+  "defaults": {
+    "default_target": "current",
+    "default_mode": "compose-from-evidence"
+  },
+  "execution_hints": {
+    "mutability": "workspace-write",
+    "parallelism": "read-only-safe",
+    "background_commands": [
+      "docmason retrieve \"<query>\" --json",
+      "docmason trace --answer-file <path> --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the main composition output, bundle artifacts when present, and the explicit support boundary to the main agent.",
+    "artifacts": [
+      "runtime/answers/<conversation_id>/<turn_id>.md",
+      "runtime/agent-work/<conversation_id>/<turn_id>/bundle-manifest.json",
+      "runtime/agent-work/<conversation_id>/<turn_id>/research-notes.md",
+      "runtime/logs/retrieval-traces/<trace_id>.json"
+    ],
+    "follow_up": [
+      "provenance-trace",
+      "runtime-log-review"
+    ]
+  }
+}

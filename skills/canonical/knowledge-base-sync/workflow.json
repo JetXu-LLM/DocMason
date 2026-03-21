@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "workflow_id": "knowledge-base-sync",
+  "category": "knowledge-base",
+  "entry_intents": [
+    "build the knowledge base",
+    "refresh the knowledge base",
+    "publish the latest workspace corpus"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect structured JSON output"
+  ],
+  "defaults": {
+    "default_target": "current",
+    "default_mode": "build-or-refresh"
+  },
+  "execution_hints": {
+    "mutability": "workspace-write",
+    "parallelism": "per-source-safe",
+    "background_commands": [
+      "docmason status --json",
+      "docmason sync --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the final sync status and publication outcome to the main agent.",
+    "artifacts": [
+      "knowledge_base/staging/pending_work.json",
+      "knowledge_base/staging/validation_report.json",
+      "knowledge_base/current/publish_manifest.json"
+    ],
+    "follow_up": [
+      "knowledge-construction",
+      "validation-repair"
+    ]
+  }
+}

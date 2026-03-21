@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "action": "run-suite",
+  "suite": "broad",
+  "target_ids": [],
+  "run_label": "Broad suite verification",
+  "operator_notes": "Optional operator note."
+}

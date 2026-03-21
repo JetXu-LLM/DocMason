@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "workflow_id": "adapter-sync",
+  "category": "adapter",
+  "entry_intents": [
+    "sync the agent adapter surface",
+    "refresh the Claude adapter",
+    "regenerate the local adapter"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to regenerate derived files"
+  ],
+  "defaults": {
+    "default_target": "claude",
+    "default_mode": "sync-adapter"
+  },
+  "execution_hints": {
+    "mutability": "workspace-write",
+    "parallelism": "none",
+    "background_commands": [
+      "docmason sync-adapters --json",
+      "docmason status --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the final adapter sync status and freshness outcome to the main agent.",
+    "artifacts": [
+      "CLAUDE.md",
+      "adapters/claude/project-memory.md",
+      "adapters/claude/workflow-routing.md"
+    ],
+    "follow_up": [
+      "workspace-status"
+    ]
+  }
+}

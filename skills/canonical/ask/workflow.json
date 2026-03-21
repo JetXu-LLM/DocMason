@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "workflow_id": "ask",
+  "category": "answer",
+  "entry_intents": [
+    "answer a business question from the workspace",
+    "help me understand the documents",
+    "respond naturally from the published knowledge base"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect structured JSON output",
+    "ability to inspect rendered images when required"
+  ],
+  "defaults": {
+    "default_target": "current",
+    "default_mode": "natural-ask"
+  },
+  "execution_hints": {
+    "mutability": "read-only",
+    "parallelism": "read-only-safe",
+    "background_commands": [
+      "docmason status --json",
+      "docmason retrieve \"<query>\" --json",
+      "docmason trace --answer-file <path> --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the routed answer outcome, answer state when applicable, and the linked conversation turn artifacts to the main agent.",
+    "artifacts": [
+      "runtime/logs/conversations/<conversation_id>.json",
+      "runtime/answers/<conversation_id>/<turn_id>.md",
+      "runtime/agent-work/<conversation_id>/<turn_id>/bundle-manifest.json",
+      "runtime/logs/query-sessions/<session_id>.json",
+      "runtime/logs/retrieval-traces/<trace_id>.json"
+    ],
+    "follow_up": [
+      "grounded-answer",
+      "grounded-composition",
+      "retrieval-workflow",
+      "provenance-trace",
+      "runtime-log-review"
+    ]
+  },
+  "user_entry": {
+    "primary_user_label": "ask",
+    "user_aliases": [
+      "answer",
+      "ask-doc"
+    ],
+    "supports_natural_routing": true,
+    "platform_shortcut_policy": "best-effort",
+    "natural_entry_examples": [
+      "What does the AI data readiness deck actually say?",
+      "Which document supports this claim?",
+      "Can you review why my last answer was degraded?"
+    ]
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "workflow_id": "retrieval-workflow",
+  "category": "evidence-access",
+  "entry_intents": [
+    "retrieve evidence for a question",
+    "find relevant source bundles",
+    "search the published knowledge base"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect structured JSON output"
+  ],
+  "defaults": {
+    "default_target": "current",
+    "default_mode": "retrieve-evidence"
+  },
+  "execution_hints": {
+    "mutability": "read-only",
+    "parallelism": "read-only-safe",
+    "background_commands": [
+      "docmason status --json",
+      "docmason retrieve \"<query>\" --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return ranked evidence bundles or an explicit no-results boundary to the main agent.",
+    "artifacts": [
+      "runtime/logs/query-sessions/<session_id>.json",
+      "knowledge_base/current/retrieval/manifest.json"
+    ],
+    "follow_up": [
+      "provenance-trace",
+      "grounded-answer",
+      "grounded-composition",
+      "runtime-log-review"
+    ]
+  }
+}

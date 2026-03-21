@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "workflow_id": "provenance-trace",
+  "category": "evidence-access",
+  "entry_intents": [
+    "trace evidence provenance",
+    "prove where an answer came from",
+    "inspect supporting citations"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect structured JSON output"
+  ],
+  "defaults": {
+    "default_target": "current",
+    "default_mode": "trace-provenance"
+  },
+  "execution_hints": {
+    "mutability": "read-only",
+    "parallelism": "read-only-safe",
+    "background_commands": [
+      "docmason trace --source-id <source_id> --json",
+      "docmason trace --answer-file <path> --json",
+      "docmason trace --session-id <session_id> --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the final provenance summary, answer_state, and any render-escalation requirements to the main agent.",
+    "artifacts": [
+      "runtime/logs/retrieval-traces/<trace_id>.json",
+      "knowledge_base/current/trace/manifest.json"
+    ],
+    "follow_up": [
+      "grounded-answer",
+      "grounded-composition",
+      "runtime-log-review"
+    ]
+  }
+}

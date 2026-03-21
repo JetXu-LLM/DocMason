@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "workflow_id": "workspace-bootstrap",
+  "category": "foundation",
+  "entry_intents": [
+    "prepare the workspace",
+    "bootstrap the environment",
+    "make DocMason ready to run"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect command output"
+  ],
+  "defaults": {
+    "default_target": "workspace",
+    "default_mode": "bootstrap"
+  },
+  "execution_hints": {
+    "mutability": "workspace-write",
+    "parallelism": "none",
+    "background_commands": [
+      "docmason doctor --json",
+      "docmason prepare --json",
+      "docmason status --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the final prepare status, readiness judgment, and next steps to the main agent.",
+    "artifacts": [
+      "runtime/bootstrap_state.json"
+    ],
+    "follow_up": [
+      "workspace-status",
+      "adapter-sync"
+    ]
+  }
+}

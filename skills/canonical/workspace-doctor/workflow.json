@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "workflow_id": "workspace-doctor",
+  "category": "foundation",
+  "entry_intents": [
+    "inspect workspace readiness",
+    "diagnose what is missing",
+    "run DocMason doctor"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to summarize structured diagnostics"
+  ],
+  "defaults": {
+    "default_target": "workspace",
+    "default_mode": "readiness-check"
+  },
+  "execution_hints": {
+    "mutability": "read-only",
+    "parallelism": "read-only-safe",
+    "background_commands": [
+      "docmason doctor --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the blocker summary, degraded conditions, and next steps to the main agent.",
+    "artifacts": [],
+    "follow_up": [
+      "workspace-bootstrap",
+      "workspace-status"
+    ]
+  }
+}

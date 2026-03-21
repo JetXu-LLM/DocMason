@@ -1,0 +1,66 @@
+---
+name: workspace-bootstrap
+description: Prepare a DocMason repository for local operation by bootstrapping the environment, creating required directories, and recording runtime state.
+---
+
+# Workspace Bootstrap
+
+Use this skill when the task is to make a DocMason workspace ready for use, or when `ask` has discovered that the workspace is not yet ready for a safe answer path.
+
+This is also the correct first explicit setup workflow when the current agent is not running on the native Codex path and needs to determine whether adapter-specific guidance should be refreshed.
+
+## Required Capabilities
+
+- local file access
+- shell or command execution
+- ability to inspect command output
+
+If the agent cannot perform these capabilities, stop and explain that the environment is not capable enough for the workflow.
+
+## Procedure
+
+1. If `.venv` is absent or `docmason` is not yet runnable from the repo-local environment, start with:
+   - `./scripts/bootstrap-workspace.sh --yes`
+   - add `--json` when machine-readable output helps
+2. Once the launcher succeeds, prefer the repo-local environment for subsequent commands:
+   - `./.venv/bin/python -m docmason doctor --json`
+   - `./.venv/bin/python -m docmason prepare --json --yes`
+   - or the `docmason` executable installed inside `.venv`
+3. Run `docmason doctor --json` when you need a readiness snapshot after launcher completion or on an already prepared workspace.
+4. Run `docmason prepare --json --yes` when the launcher was not used, or when bootstrap needs an explicit rerun to repair or complete the repo-local environment.
+5. If `prepare` reports a degraded result, follow the reported next steps and rerun only the necessary deterministic command.
+6. If the corpus already contains PPTX, DOCX, or XLSX files and LibreOffice is missing:
+   - on macOS with Homebrew, run `brew install --cask libreoffice`
+   - on macOS without Homebrew, install LibreOffice from `https://www.libreoffice.org/download/download/`
+   - on Linux, install LibreOffice with the distro package manager or the official packages, then ensure `soffice` is on `PATH`
+7. Run `docmason status --json` when you need to confirm the resulting workspace stage.
+8. Recommend `docmason sync --json` when source files are present and the user needs a usable knowledge base next.
+9. If the current agent ecosystem is a compatibility target such as Claude Code rather than the native Codex path, decide here whether generated adapter guidance is needed.
+10. Recommend `docmason sync-adapters --json` only when the current agent ecosystem depends on generated adapter files or those files are missing or stale.
+11. Once `.venv` exists, prefer the repo-local interpreter for subsequent repository commands instead of switching back to an arbitrary system Python.
+12. Return the final readiness judgment to the main agent. Do not delegate environment sign-off.
+
+## Escalation Rules
+
+- If the platform or Python version is unsupported, stop and surface that blocker directly.
+- If `prepare` can only proceed through a higher-intrusion install step, explain it explicitly rather than hiding it inside automation.
+- If system-level installation requires additional permissions, request them when the current platform supports that flow; otherwise give the user the exact command or GUI step to run.
+- Deterministic shell setup steps may run as background or main-agent commands, but the final environment judgment returns to the main agent.
+
+## Completion Signal
+
+- The workflow is complete when `prepare` and follow-up readiness checks leave the workspace ready, or when an actionable environment blocker has been surfaced to the main agent.
+
+## Notes
+
+- `prepare` bootstraps repo-local state only.
+- `./scripts/bootstrap-workspace.sh --yes` is the preferred zero-to-working launcher from a raw checkout because it can prepare `.venv` before the package is importable from the `src/` layout.
+- The preferred package workflow is `uv`, but `venv` plus `pip` is the supported fallback.
+- On macOS, prefer installing `uv` with Homebrew when Homebrew is already available because that usually gives the cleanest PATH behavior for non-technical users.
+- When Homebrew is not available, a user-scoped `pip` installation for `uv` is an acceptable fallback.
+- On the native macOS path, `prepare --yes` should auto-attempt supported installs such as uv and LibreOffice rather than pushing those steps back to the user.
+- After preparation, prefer `./.venv/bin/python -m docmason ...` or the CLI installed inside `.venv` for ordinary workspace operations.
+- For Office rendering, DocMason detects the standard macOS `soffice` path inside `/Applications/LibreOffice.app/Contents/MacOS/soffice`, so shell-profile changes are usually unnecessary.
+- Not every Codex-first first-answer path requires `sync-adapters` before work can proceed.
+- Avoid shell-profile mutation unless it is clearly required and explicitly explained to the user.
+- Do not silently install Python or heavy system dependencies.

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "suite_id": "example-local-suite",
+  "frozen_at": "2026-03-18T00:00:00Z",
+  "run_id": "example-run-id",
+  "version_context": {
+    "captured_at": "2026-03-18T00:00:00Z",
+    "corpus_signature": "replace-with-local-corpus-signature",
+    "suite_id": "example-local-suite",
+    "suite_fingerprint": "replace-with-local-fingerprint",
+    "rubric_fingerprint": "replace-with-local-fingerprint",
+    "judge_trials_fingerprint": "replace-with-local-fingerprint",
+    "baseline_fingerprint": null,
+    "retrieval_strategy_id": "phase4b-lexical-plus-graph-v1",
+    "answer_workflow_id": "phase4b-grounded-answer-v1",
+    "canonical_artifact_fingerprints": {},
+    "judge_profile": {
+      "mode": "agent-judge",
+      "agent_name": "codex",
+      "model_name": "example-model",
+      "workflow_id": "example-judge",
+      "trial_count": 3
+    }
+  },
+  "summary": {
+    "case_count": 1,
+    "deterministic_pass_rate": 1.0,
+    "answer_mean_score": null,
+    "failed_cases": [],
+    "review_recommended_cases": [],
+    "critical_case_ids": [
+      "example-answer-case"
+    ],
+    "overall_status": "passed"
+  },
+  "cases": [
+    {
+      "case_id": "example-answer-case",
+      "critical": true,
+      "deterministic_passed": true,
+      "answer_state": "abstained",
+      "support_basis": "kb-grounded",
+      "render_inspection_required": false,
+      "primary_source_ids": [],
+      "rubric_mean_score": null,
+      "rubric_dimension_scores": {}
+    }
+  ]
+}

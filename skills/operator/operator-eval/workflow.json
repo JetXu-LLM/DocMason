@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "workflow_id": "operator-eval",
+  "category": "review",
+  "entry_intents": [
+    "run the hidden operator eval loop",
+    "review regressions from local evaluation runs",
+    "promote runtime benchmark candidates",
+    "freeze a local evaluation baseline"
+  ],
+  "required_capabilities": [
+    "local file access",
+    "shell or command execution",
+    "ability to inspect structured JSON output"
+  ],
+  "defaults": {
+    "default_target": "runtime/eval",
+    "default_mode": "operator-request"
+  },
+  "execution_hints": {
+    "mutability": "workspace-write",
+    "parallelism": "none",
+    "background_commands": [
+      "docmason workflow operator-eval --json"
+    ],
+    "must_return_to_main_agent": true
+  },
+  "handoff": {
+    "completion_signal": "Return the operator-facing evaluation result, artifacts, and follow-up recommendation to the main agent.",
+    "artifacts": [
+      "runtime/eval/requests/current.json",
+      "runtime/eval/benchmarks/",
+      "runtime/eval/drafts/candidates/",
+      "runtime/eval/runs/",
+      "runtime/eval/reviews/",
+      "runtime/eval/feedback/"
+    ],
+    "follow_up": [
+      "runtime-log-review",
+      "operator-eval"
+    ]
+  }
+}
