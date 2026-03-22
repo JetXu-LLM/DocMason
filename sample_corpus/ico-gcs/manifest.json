@@ -1,0 +1,207 @@
+{
+  "corpus_id": "ico-gcs",
+  "domains": [
+    "governance-risk-compliance",
+    "execution-communications-evaluation"
+  ],
+  "license": {
+    "name": "Open Government Licence v3.0",
+    "url": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
+  },
+  "sources": [
+    {
+      "axis": "governance",
+      "managed_outputs": [
+        {
+          "document_type": "markdown",
+          "local_path": "ico/about-the-ico.md",
+          "origin": "html-snapshot",
+          "sha256": "b7230b563117e8a1527f88f03a1f2f4b200612c64642a5e19b1d5ed4712cf188",
+          "size_bytes": 320,
+          "upstream_url": "https://ico.org.uk/about-the-ico/"
+        }
+      ],
+      "organization": "ICO",
+      "source_id": "ico-about",
+      "title": "About the ICO",
+      "upstream_url": "https://ico.org.uk/about-the-ico/"
+    },
+    {
+      "axis": "governance",
+      "managed_outputs": [
+        {
+          "document_type": "markdown",
+          "local_path": "ico/data-protection-audit-framework.md",
+          "origin": "html-snapshot",
+          "sha256": "8bd4d9492042982851468db92a8239427735cf0160685fe013d781062d2fdcda",
+          "size_bytes": 4882,
+          "upstream_url": "https://ico.org.uk/for-organisations/advice-and-services/audits/data-protection-audit-framework/"
+        }
+      ],
+      "organization": "ICO",
+      "source_id": "ico-audit-framework",
+      "title": "Data Protection Audit Framework",
+      "upstream_url": "https://ico.org.uk/for-organisations/advice-and-services/audits/data-protection-audit-framework/"
+    },
+    {
+      "axis": "governance",
+      "managed_outputs": [
+        {
+          "document_type": "markdown",
+          "local_path": "ico/ai-and-data-protection-risk-toolkit.md",
+          "origin": "html-snapshot",
+          "sha256": "3d40f358f33df20122057d9ce99c38e67b884be7cbb8b596f12ca18065522b43",
+          "size_bytes": 1965,
+          "upstream_url": "https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/artificial-intelligence/guidance-on-ai-and-data-protection/ai-and-data-protection-risk-toolkit/"
+        },
+        {
+          "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "document_type": "xlsx",
+          "local_path": "ico/ico-ai-risk-toolkit--ai-and-data-protection-risk-toolkit-v11.xlsx",
+          "origin": "attachment",
+          "sha256": "8be24fe6526ce1698e2c6f8353a43a3304bb8ccf0369f3b3b10cb5d37967720b",
+          "size_bytes": 54194,
+          "upstream_url": "https://ico.org.uk/media2/kr3mveig/ai_and_data_protection_risk_toolkit_v11.xlsx"
+        }
+      ],
+      "organization": "ICO",
+      "source_id": "ico-ai-risk-toolkit",
+      "title": "AI and Data Protection Risk Toolkit",
+      "upstream_url": "https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/artificial-intelligence/guidance-on-ai-and-data-protection/ai-and-data-protection-risk-toolkit/"
+    },
+    {
+      "axis": "execution",
+      "managed_outputs": [
+        {
+          "document_type": "markdown",
+          "local_path": "gcs/about-gcs.md",
+          "origin": "html-snapshot",
+          "sha256": "b52ac3f8816628819d95c4f141373ce5dc681053d194f77f0fecdfb97b864cf2",
+          "size_bytes": 3321,
+          "upstream_url": "https://www.communications.gov.uk/about-us/what-we-do/"
+        }
+      ],
+      "organization": "GCS",
+      "source_id": "gcs-about",
+      "title": "What We Do",
+      "upstream_url": "https://www.communications.gov.uk/about-us/what-we-do/"
+    },
+    {
+      "axis": "execution",
+      "managed_outputs": [
+        {
+          "document_type": "markdown",
+          "local_path": "gcs/oasis-campaign-planning.md",
+          "origin": "html-snapshot",
+          "sha256": "442032b99e6b7e32756f5e1976eb246cc24a7c44c2713ba60e3c82964906f91a",
+          "size_bytes": 10563,
+          "upstream_url": "https://www.communications.gov.uk/guidance/marketing/delivering-government-campaigns/guide-to-campaign-planning-oasis/"
+        },
+        {
+          "content_type": "application/pdf",
+          "document_type": "pdf",
+          "local_path": "gcs/gcs-oasis--guide-to-campaign-planning-oasis-framework.pdf",
+          "origin": "attachment",
+          "sha256": "5286101805d48ba1b8d0bed3963031e62c4e4556bd62e349c9453d8280c14af9",
+          "size_bytes": 216330,
+          "upstream_url": "https://www.communications.gov.uk/wp-content/uploads/2020/03/Guide-to-Campaign-Planning-OASIS-Framework.pdf"
+        },
+        {
+          "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "document_type": "pptx",
+          "local_path": "gcs/gcs-oasis--oasis-template.pptx",
+          "origin": "attachment",
+          "sha256": "e134ba86c89e8ecc60e199dccb63fb4301409f7ef8299bdf9395490ca27ab039",
+          "size_bytes": 108732,
+          "upstream_url": "https://www.communications.gov.uk/wp-content/uploads/2020/03/OASIS-template.pptx"
+        }
+      ],
+      "organization": "GCS",
+      "source_id": "gcs-oasis",
+      "title": "Guide to Campaign Planning: OASIS",
+      "upstream_url": "https://www.communications.gov.uk/guidance/marketing/delivering-government-campaigns/guide-to-campaign-planning-oasis/"
+    },
+    {
+      "axis": "execution",
+      "managed_outputs": [
+        {
+          "document_type": "markdown",
+          "local_path": "gcs/evaluation-cycle.md",
+          "origin": "html-snapshot",
+          "sha256": "2d2a1b90c2d97276736fc71370ae07ac6c81a6fcb3a5081cd23a8b50d8dfd5e5",
+          "size_bytes": 49594,
+          "upstream_url": "https://www.communications.gov.uk/publications/gcs-evaluation-cycle/"
+        },
+        {
+          "content_type": "application/pdf",
+          "document_type": "pdf",
+          "local_path": "gcs/gcs-evaluation-cycle--2024-02-13-gcs-evaluation-cycle-final-official.pdf",
+          "origin": "attachment",
+          "sha256": "2cb8739e17fe863d17084e3ebec5c578f8ed0be0b6fe9017f4443b9c914494e3",
+          "size_bytes": 7320349,
+          "upstream_url": "https://www.communications.gov.uk/wp-content/uploads/2024/02/2024-02-13-GCS-Evaluation-Cycle-FINAL-OFFICIAL.pdf"
+        },
+        {
+          "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "document_type": "pptx",
+          "local_path": "gcs/gcs-evaluation-cycle--2024-08-22-evaluation-cycle-campaign-template-off-sen.pptx",
+          "origin": "attachment",
+          "sha256": "249aaafb6473c48d888ff909d607fad255062aa0a1732ee55bde110d5afb034d",
+          "size_bytes": 2665202,
+          "upstream_url": "https://www.communications.gov.uk/wp-content/uploads/2024/02/2024-08-22-Evaluation-Cycle-Campaign-Template-OFF-SEN.pptx"
+        },
+        {
+          "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "document_type": "pptx",
+          "local_path": "gcs/gcs-evaluation-cycle--2025-03-26-evaluation-cycle-low-no-cost-comms-template-off-sen.pptx",
+          "origin": "attachment",
+          "sha256": "725d0cd6b2546bb6afd8ca24c3958c3bacc68da292d7a52b4184674ac5eaf3a7",
+          "size_bytes": 2478703,
+          "upstream_url": "https://www.communications.gov.uk/wp-content/uploads/2024/02/2025-03-26-Evaluation-Cycle-Low_No-Cost-Comms-Template-%E2%80%93-OFF-SEN.pptx"
+        }
+      ],
+      "organization": "GCS",
+      "source_id": "gcs-evaluation-cycle",
+      "title": "GCS Evaluation Cycle",
+      "upstream_url": "https://www.communications.gov.uk/publications/gcs-evaluation-cycle/"
+    },
+    {
+      "axis": "execution",
+      "managed_outputs": [
+        {
+          "document_type": "markdown",
+          "local_path": "gcs/modern-media-operations.md",
+          "origin": "html-snapshot",
+          "sha256": "8dc07b8b734f589f2f51fab00d25e930d2be73efda8794594a1b910286a4eee4",
+          "size_bytes": 37621,
+          "upstream_url": "https://www.communications.gov.uk/publications/modern-media-operations-guide/"
+        },
+        {
+          "content_type": "application/pdf",
+          "document_type": "pdf",
+          "local_path": "gcs/gcs-modern-media-operations--modern-media-operation-a-guide-gcs.pdf",
+          "origin": "attachment",
+          "sha256": "3aca02fee5b97872ca9bdd7c88a6da76a4039e13ffb884f9a9fc7eee1e0d0108",
+          "size_bytes": 1027105,
+          "upstream_url": "https://www.communications.gov.uk/wp-content/uploads/2020/05/Modern_Media_Operation_A_Guide_GCS.pdf"
+        },
+        {
+          "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "document_type": "docx",
+          "local_path": "gcs/gcs-modern-media-operations--modern-media-operation-guide-word-accessible.docx",
+          "origin": "attachment",
+          "sha256": "5aa69f73c46110f0a47d02fcdfb82cd6b2f6564c032d351f8142d8cdb7ce857f",
+          "size_bytes": 168029,
+          "upstream_url": "https://www.communications.gov.uk/wp-content/uploads/2021/06/Modern-Media-Operation-guide-Word-accessible.docx"
+        }
+      ],
+      "organization": "GCS",
+      "source_id": "gcs-modern-media-operations",
+      "title": "Modern Media Operations Guide",
+      "upstream_url": "https://www.communications.gov.uk/publications/modern-media-operations-guide/"
+    }
+  ],
+  "title": "ICO + GCS Public Sample Corpus",
+  "updated_at": "2026-03-21T17:55:15.775115Z",
+  "version": "2026-03-21"
+}

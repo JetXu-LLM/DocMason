@@ -22,10 +22,13 @@ If the agent cannot inspect local files or run commands, stop and explain that t
 3. If the environment is not ready and `.venv` is absent, direct the next action to `./scripts/bootstrap-workspace.sh --yes`.
 4. Otherwise, if the environment is not ready, direct the next action to `docmason prepare --yes`.
 5. If `office-renderer` is blocked:
-   - on macOS with Homebrew, recommend `brew install --cask libreoffice`
+   - on macOS with Homebrew, recommend `brew install --cask libreoffice-still`
    - on macOS without Homebrew, recommend the official installer from `https://www.libreoffice.org/download/download/`
    - on Linux, recommend the distro package manager or official packages, then re-run `doctor`
-6. Return the diagnosis to the main agent without mutating workspace state.
+6. If the normal launcher or `prepare` path cannot complete because the current shell or platform
+   falls outside the native path, point the deeper fallback to
+   `docs/setup/manual-workspace-recovery.md`.
+7. Return the diagnosis to the main agent without mutating workspace state.
 
 ## Escalation Rules
 

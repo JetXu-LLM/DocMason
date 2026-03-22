@@ -37,6 +37,14 @@ If `.venv` is absent or the workspace is not yet runnable, prefer the zero-to-wo
 
 - `./scripts/bootstrap-workspace.sh --yes`
 
+Treat `runtime/bootstrap_state.json` as the cached readiness marker for ordinary ask-time work.
+If that marker says the current workspace root is ready and `.venv` still exists, do not rerun
+deep bootstrap checks by default.
+If the marker is missing, stale after a repo move, or clearly non-ready, a workspace-dependent
+first ask may silently trigger bootstrap or repair before surfacing manual setup work.
+On the native Codex path, keep any repo-local skill discovery shim under `.agents/skills/`.
+Do not migrate or symlink repository skills into `~/.codex/skills`.
+
 If you are not operating on the native Codex path:
 
 - do not guess how this repository should map onto your platform
@@ -79,6 +87,8 @@ Treat other workflows as inner or follow-on workflows discovered from those top-
 - If no published knowledge base exists, do not bluff a workspace- or corpus-grounded answer.
 - For `workspace-corpus` questions, the routed ask path may run an internal sync before answering when the environment is ready and fresh local state is actually required.
 - If the environment is not ready, guide or route to workspace bootstrap.
+- If a workspace-dependent ask encounters a stale or missing bootstrap marker, a safe silent
+  bootstrap attempt is preferable to immediately pushing setup work back to the user.
 - If the environment is ready but no published corpus exists, guide or route to knowledge-base sync for workspace- or corpus-dependent questions.
 - If the published knowledge base is stale but still usable, answer from the published corpus and attach one concise freshness notice.
 - If the user explicitly needs the latest local document state, prefer a routed auto-sync before answering when the workspace question truly depends on it.

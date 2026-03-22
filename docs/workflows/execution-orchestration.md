@@ -116,5 +116,6 @@ The canonical workflow semantics still live in:
 - `CLAUDE.md`
 - `adapters/claude/project-memory.md`
 - `adapters/claude/workflow-routing.md`
+- `.claude/skills/` repo-local thin shims that point back to the canonical skills
 
 `workflow-routing.md` groups workflows by tier and category so a fresh capable agent can infer the intended product surface without relying on a hidden chat transcript.

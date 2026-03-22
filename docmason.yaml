@@ -4,6 +4,7 @@
 
 workspace:
   source_dir: original_doc
+  sample_corpus_dir: sample_corpus
   knowledge_base_dir: knowledge_base
   runtime_dir: runtime
 

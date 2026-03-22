@@ -9,6 +9,7 @@ Current policy priorities:
 - file-only persistent knowledge
 - privacy-aware local operation
 - no commitment of confidential corpora or compiled private knowledge
+- explicit separation between live workspace boundaries and tracked public sample fixtures
 - cautious adoption of heavy system dependencies
 - confirmation-first behavior for material ambiguous decisions
 - validation-gated publication of staged knowledge-base outputs
@@ -16,6 +17,7 @@ Current policy priorities:
 - explicit execution-orchestration policy for main-agent ownership, bounded delegation, and background command use
 - review-friendly but still local-only runtime log summaries
 - explicit separation between source-derived knowledge and interaction-derived knowledge
+- public benchmark fairness and no mirroring of organizer-restricted test assets by default
 - hybrid deterministic-plus-agent design discipline when deterministic rules would otherwise drift toward patch-heavy special casing
 - no new public commands merely to mirror every agent-facing workflow
 

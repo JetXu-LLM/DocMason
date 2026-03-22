@@ -28,6 +28,12 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - Answer in the user's language by default unless they ask for another output language.
    - When retrieval or trace quality would improve, reformulate the working query in the user language, the likely source-document language, or both.
 3. Use the repository helpers in `docmason.ask`, `docmason.front_controller`, and `docmason.conversation` to:
+   - treat `runtime/bootstrap_state.json` as the cached environment-ready marker for
+     workspace-dependent asks
+   - if that marker says the current root is ready and `.venv` still exists, continue without a
+     deep bootstrap check
+   - if it is missing, stale after a repo move, or clearly non-ready, let the ask path trigger a
+     silent bootstrap or repair attempt before surfacing manual setup work
    - reconcile any active native thread when available
    - open or continue exactly one canonical turn for the user question
    - obtain the canonical answer-file path
@@ -119,6 +125,8 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 ## Escalation Rules
 
 - Do not require the user to name a skill or repository command before this workflow can run.
+- Do not push a workspace-dependent first ask into manual setup immediately when a safe silent
+  bootstrap or repair attempt can finish the work.
 - Do not require the user to pivot into internal source IDs when a normal file-plus-locator reference is enough for the shared resolver to work.
 - Do not push natural-language semantic routing down into large deterministic keyword lists. The main agent should make the semantic judgment and pass it into the repo helpers explicitly.
 - Do not build a growing odd-question taxonomy. Route those questions by evidence needs and published evidence channels instead.

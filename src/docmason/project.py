@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, cast
 
 MINIMUM_PYTHON = (3, 11)
+BOOTSTRAP_STATE_SCHEMA_VERSION = 2
+MANUAL_WORKSPACE_RECOVERY_DOC = "docs/setup/manual-workspace-recovery.md"
 
 
 @dataclass(frozen=True)
@@ -227,6 +229,10 @@ class WorkspacePaths:
         return self.root / "skills" / "operator"
 
     @property
+    def optional_skills_dir(self) -> Path:
+        return self.root / "skills" / "optional"
+
+    @property
     def venv_dir(self) -> Path:
         return self.root / ".venv"
 
@@ -431,12 +437,28 @@ class WorkspacePaths:
         return self.logs_dir / "usage-history.jsonl"
 
     @property
+    def agents_dir(self) -> Path:
+        return self.root / ".agents"
+
+    @property
+    def repo_skill_shim_dir(self) -> Path:
+        return self.agents_dir / "skills"
+
+    @property
     def agents_path(self) -> Path:
         return self.root / "AGENTS.md"
 
     @property
+    def claude_dir(self) -> Path:
+        return self.root / ".claude"
+
+    @property
     def claude_root_path(self) -> Path:
         return self.root / "CLAUDE.md"
+
+    @property
+    def claude_skill_shim_dir(self) -> Path:
+        return self.claude_dir / "skills"
 
     @property
     def claude_adapter_dir(self) -> Path:
@@ -464,11 +486,29 @@ class WorkspacePaths:
             path.parent for path in self.operator_skills_dir.rglob("SKILL.md") if path.is_file()
         )
 
-    def workflow_skill_directories(self, *, include_operator: bool = False) -> list[Path]:
+    def optional_skill_directories(self) -> list[Path]:
+        manifest = self.root / "sample_corpus" / "ico-gcs" / "manifest.json"
+        skill_dir = self.optional_skills_dir / "public-sample-workspace"
+        skill_path = skill_dir / "SKILL.md"
+        if skill_path.exists() and manifest.exists():
+            return [skill_dir]
+        return []
+
+    def agent_skill_directories(
+        self,
+        *,
+        include_operator: bool = False,
+        include_optional: bool = False,
+    ) -> list[Path]:
         directories = list(self.canonical_skill_directories())
         if include_operator:
             directories.extend(self.operator_skill_directories())
+        if include_optional:
+            directories.extend(self.optional_skill_directories())
         return sorted(dict.fromkeys(directories))
+
+    def workflow_skill_directories(self, *, include_operator: bool = False) -> list[Path]:
+        return self.agent_skill_directories(include_operator=include_operator)
 
     def canonical_skill_files(self) -> list[Path]:
         return [directory / "SKILL.md" for directory in self.canonical_skill_directories()]
@@ -482,11 +522,17 @@ class WorkspacePaths:
     def operator_workflow_metadata_files(self) -> list[Path]:
         return [directory / "workflow.json" for directory in self.operator_skill_directories()]
 
+    def optional_skill_files(self) -> list[Path]:
+        return [directory / "SKILL.md" for directory in self.optional_skill_directories()]
+
     def adapter_source_inputs(self) -> list[Path]:
         return [
             self.agents_path,
             *self.canonical_skill_files(),
             *self.canonical_workflow_metadata_files(),
+            *self.operator_skill_files(),
+            *self.operator_workflow_metadata_files(),
+            *self.optional_skill_files(),
         ]
 
     def generated_claude_files(self) -> list[Path]:
@@ -494,6 +540,7 @@ class WorkspacePaths:
             self.claude_root_path,
             self.claude_project_memory_path,
             self.claude_workflow_routing_path,
+            self.claude_skill_shim_dir,
         ]
 
     @property
@@ -831,6 +878,168 @@ def adapter_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
 def bootstrap_state(paths: WorkspacePaths) -> dict[str, Any]:
     """Load the persisted bootstrap state for the workspace."""
     return read_json(paths.bootstrap_state_path)
+
+
+def manual_workspace_recovery_doc() -> str:
+    """Return the tracked deep-fallback document for manual workspace setup and repair."""
+    return MANUAL_WORKSPACE_RECOVERY_DOC
+
+
+def source_runtime_requirements(paths: WorkspacePaths) -> dict[str, bool]:
+    """Summarize which renderer capabilities the current source corpus requires."""
+    requires_office_renderer = False
+    requires_pdf_renderer = False
+    for path in supported_source_documents(paths):
+        definition = source_type_definition_for_path(path)
+        if definition is None:
+            continue
+        requires_office_renderer = requires_office_renderer or definition.requires_office_renderer
+        requires_pdf_renderer = requires_pdf_renderer or definition.requires_pdf_renderer
+    return {
+        "requires_office_renderer": requires_office_renderer,
+        "requires_pdf_renderer": requires_pdf_renderer,
+    }
+
+
+def cached_bootstrap_readiness(
+    paths: WorkspacePaths,
+    *,
+    require_sync_capability: bool = False,
+) -> dict[str, Any]:
+    """Evaluate the lightweight cached bootstrap marker without running deep diagnostics."""
+    state = bootstrap_state(paths)
+    manual_doc = manual_workspace_recovery_doc()
+    if not state:
+        return {
+            "ready": False,
+            "reason": "missing-bootstrap-state",
+            "detail": "No cached bootstrap marker is recorded yet.",
+            "manual_recovery_doc": manual_doc,
+            "state": {},
+        }
+
+    schema_version = int(state.get("schema_version", 0) or 0)
+    if schema_version < BOOTSTRAP_STATE_SCHEMA_VERSION:
+        if require_sync_capability:
+            return {
+                "ready": False,
+                "reason": "legacy-bootstrap-state-sync-capability-unknown",
+                "detail": (
+                    "The cached bootstrap marker predates the current sync-capability contract "
+                    "and must be refreshed before sync can run safely."
+                ),
+                "manual_recovery_doc": manual_doc,
+                "state": state,
+            }
+        if bool(state.get("editable_install")) and paths.venv_python.exists():
+            return {
+                "ready": True,
+                "reason": "legacy-compatible-ready",
+                "detail": (
+                    "The cached bootstrap marker predates the current contract but still proves "
+                    "a usable repo-local editable install."
+                ),
+                "manual_recovery_doc": manual_doc,
+                "state": state,
+            }
+        return {
+            "ready": False,
+            "reason": "legacy-bootstrap-state",
+            "detail": "The cached bootstrap marker predates the current readiness contract.",
+            "manual_recovery_doc": manual_doc,
+            "state": state,
+        }
+
+    expected_root = str(paths.root.resolve())
+    recorded_root = str(state.get("workspace_root") or "")
+    if recorded_root != expected_root:
+        return {
+            "ready": False,
+            "reason": "workspace-root-drift",
+            "detail": (
+                "The cached bootstrap marker belongs to a different workspace root and must be "
+                "repaired after the repository move."
+            ),
+            "manual_recovery_doc": manual_doc,
+            "state": state,
+        }
+
+    if not paths.venv_python.exists():
+        return {
+            "ready": False,
+            "reason": "missing-venv",
+            "detail": "The repo-local virtual environment interpreter is missing.",
+            "manual_recovery_doc": manual_doc,
+            "state": state,
+        }
+
+    if not bool(state.get("environment_ready")) or not bool(state.get("editable_install")):
+        return {
+            "ready": False,
+            "reason": "environment-not-ready",
+            "detail": str(
+                state.get("editable_install_detail")
+                or "The cached bootstrap marker does not describe a ready editable install."
+            ),
+            "manual_recovery_doc": manual_doc,
+            "state": state,
+        }
+
+    if require_sync_capability:
+        requirements = source_runtime_requirements(paths)
+        if requirements["requires_office_renderer"] and not bool(
+            state.get("office_renderer_ready")
+        ):
+            return {
+                "ready": False,
+                "reason": "office-renderer-required",
+                "detail": (
+                    "The current source corpus needs LibreOffice-backed rendering before sync can "
+                    "run safely."
+                ),
+                "manual_recovery_doc": manual_doc,
+                "state": state,
+            }
+        if requirements["requires_pdf_renderer"] and not bool(state.get("pdf_renderer_ready")):
+            return {
+                "ready": False,
+                "reason": "pdf-renderer-required",
+                "detail": (
+                    "The current source corpus needs the configured PDF renderer before sync can "
+                    "run safely."
+                ),
+                "manual_recovery_doc": manual_doc,
+                "state": state,
+            }
+
+    return {
+        "ready": True,
+        "reason": "cached-ready",
+        "detail": "The cached bootstrap marker is valid for the current workspace root.",
+        "manual_recovery_doc": manual_doc,
+        "state": state,
+    }
+
+
+def bootstrap_state_summary(
+    paths: WorkspacePaths,
+    *,
+    require_sync_capability: bool = False,
+) -> dict[str, Any]:
+    """Summarize bootstrap-marker visibility for status and doctor surfaces."""
+    state = bootstrap_state(paths)
+    readiness = cached_bootstrap_readiness(
+        paths,
+        require_sync_capability=require_sync_capability,
+    )
+    return {
+        "present": bool(state),
+        "schema_version": int(state.get("schema_version", 0) or 0) if state else None,
+        "cached_ready": bool(readiness.get("ready")),
+        "reason": readiness.get("reason"),
+        "detail": readiness.get("detail"),
+        "manual_recovery_doc": readiness.get("manual_recovery_doc") or manual_workspace_recovery_doc(),
+    }
 
 
 def relative_paths(paths: WorkspacePaths, values: Iterable[Path]) -> list[str]:

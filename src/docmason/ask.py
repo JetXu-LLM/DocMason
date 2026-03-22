@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .commands import prepare_workspace
 from .conversation import (
     build_log_context,
     load_turn_record,
@@ -22,8 +23,9 @@ from .knowledge import preview_source_changes
 from .knowledge import sync_workspace as sync_knowledge_base
 from .project import (
     WorkspacePaths,
-    bootstrap_state,
+    cached_bootstrap_readiness,
     knowledge_base_snapshot,
+    manual_workspace_recovery_doc,
     read_json,
     write_json,
 )
@@ -238,6 +240,41 @@ def _auto_sync_summary(sync_result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _auto_prepare_summary(report: Any) -> dict[str, Any]:
+    payload = getattr(report, "payload", {}) or {}
+    raw_environment = payload.get("environment")
+    environment: dict[str, Any] = raw_environment if isinstance(raw_environment, dict) else {}
+    return {
+        "status": payload.get("status"),
+        "actions_performed": list(payload.get("actions_performed", [])),
+        "actions_skipped": list(payload.get("actions_skipped", [])),
+        "next_steps": list(payload.get("next_steps", [])),
+        "package_manager": environment.get("package_manager"),
+        "manual_recovery_doc": (
+            payload.get("manual_recovery_doc")
+            or environment.get("manual_recovery_doc")
+            or manual_workspace_recovery_doc()
+        ),
+    }
+
+
+def _ensure_workspace_environment(
+    paths: WorkspacePaths,
+    *,
+    require_sync_capability: bool = False,
+) -> tuple[bool, dict[str, Any], bool, str | None, dict[str, Any] | None]:
+    """Use the cached bootstrap marker first, then silently repair the workspace when needed."""
+    cached = cached_bootstrap_readiness(paths, require_sync_capability=require_sync_capability)
+    if cached["ready"]:
+        return True, cached, False, None, None
+
+    reason = str(cached.get("detail") or "The cached bootstrap marker is missing or invalid.")
+    report = prepare_workspace(paths, assume_yes=True, interactive=False)
+    summary = _auto_prepare_summary(report)
+    refreshed = cached_bootstrap_readiness(paths, require_sync_capability=require_sync_capability)
+    return bool(refreshed["ready"]), refreshed, True, reason, summary
+
+
 def prepare_ask_turn(
     paths: WorkspacePaths,
     *,
@@ -256,9 +293,6 @@ def prepare_ask_turn(
     )
     run_id = str(run_payload["run_id"])
     knowledge_base = opened["workspace_snapshot"]["knowledge_base"]
-    environment_ready = bool(bootstrap_state(paths).get("editable_install")) and bool(
-        paths.venv_python.exists()
-    )
     interaction_snapshot = interaction_ingest_snapshot(paths)
     profile = question_execution_profile(
         paths,
@@ -306,20 +340,39 @@ def prepare_ask_turn(
         reference_resolution = None
     reference_resolution_summary = build_reference_resolution_summary(reference_resolution)
 
+    environment_state = cached_bootstrap_readiness(paths)
+    environment_ready = bool(environment_state["ready"])
     action_required = False
     sync_suggested = False
     prefer_sync_before_answer = False
     freshness_notice = None
+    auto_prepare_triggered = False
+    auto_prepare_reason = None
+    auto_prepare_summary = None
     auto_sync_triggered = False
     auto_sync_reason = None
     auto_sync_summary = None
+
+    if workspace_notices_enabled:
+        (
+            environment_ready,
+            environment_state,
+            auto_prepare_triggered,
+            auto_prepare_reason,
+            auto_prepare_summary,
+        ) = _ensure_workspace_environment(paths)
 
     if not knowledge_base["present"] and workspace_notices_enabled and not environment_ready:
         action_required = True
         inner_workflow_id = "workspace-bootstrap"
         route_reason = (
-            "A published knowledge base is missing and the workspace environment is not ready "
-            "for an automatic sync."
+            "The ask path could not complete the automatic workspace bootstrap required before "
+            "a missing knowledge base can be built and answered safely."
+            if auto_prepare_triggered
+            else (
+                "A published knowledge base is missing and the workspace environment is not ready "
+                "for an automatic sync."
+            )
         )
         freshness_notice = "No published knowledge base is available yet."
     elif workspace_notices_enabled and question_domain == "workspace-corpus" and environment_ready:
@@ -327,7 +380,9 @@ def prepare_ask_turn(
         candidate_reason = None
         if not knowledge_base["present"]:
             should_auto_sync = True
-            candidate_reason = "A published knowledge base is missing for this workspace-corpus question."
+            candidate_reason = (
+                "A published knowledge base is missing for this workspace-corpus question."
+            )
         elif knowledge_base["stale"]:
             _index_preview, _active_preview, _ambiguous_preview, preview_change_set = (
                 preview_source_changes(paths)
@@ -404,35 +459,68 @@ def prepare_ask_turn(
                 auto_sync_reason = candidate_reason
             else:
                 auto_sync_reason = (
-                    "Relevant pending interaction-derived knowledge still awaits sync-time promotion."
+                    "Relevant pending interaction-derived knowledge still awaits "
+                    "sync-time promotion."
                 )
-        sync_result = sync_knowledge_base(paths)
-        auto_sync_triggered = True
-        auto_sync_summary = _auto_sync_summary(sync_result)
-        knowledge_base = knowledge_base_snapshot(paths)
-        interaction_snapshot = interaction_ingest_snapshot(paths)
-        if sync_result.get("status") in {"valid", "warnings"} and bool(sync_result.get("published")):
-            freshness_notice = "The knowledge base was refreshed automatically before answering."
-            sync_suggested = False
-            prefer_sync_before_answer = False
-            if knowledge_base["present"]:
-                reference_resolution = resolve_workspace_reference(paths, query=question)
-                if (
-                    isinstance(reference_resolution, dict)
-                    and not reference_resolution.get("detected")
-                ):
-                    reference_resolution = None
-                reference_resolution_summary = build_reference_resolution_summary(
-                    reference_resolution
-                )
-        else:
+        (
+            sync_environment_ready,
+            sync_environment_state,
+            sync_auto_prepare_triggered,
+            sync_auto_prepare_reason,
+            sync_auto_prepare_summary,
+        ) = _ensure_workspace_environment(paths, require_sync_capability=True)
+        if sync_auto_prepare_triggered:
+            auto_prepare_triggered = True
+            auto_prepare_reason = sync_auto_prepare_reason
+            auto_prepare_summary = sync_auto_prepare_summary
+            environment_state = sync_environment_state
+            environment_ready = sync_environment_ready
+        if not sync_environment_ready:
             action_required = True
-            inner_workflow_id = "knowledge-base-sync"
+            inner_workflow_id = "workspace-bootstrap"
             route_reason = (
-                "The ask path attempted an automatic sync because the question needs fresh "
-                "workspace evidence, but final publication did not succeed."
+                "The ask path attempted an automatic workspace repair because fresh workspace "
+                "evidence is required, but the environment still lacks the capabilities needed "
+                "for sync."
             )
-            freshness_notice = str(sync_result.get("detail") or "Automatic sync did not complete.")
+            freshness_notice = str(
+                sync_environment_state.get("detail")
+                or "The workspace is not ready for an automatic sync."
+            )
+        else:
+            sync_result = sync_knowledge_base(paths)
+            auto_sync_triggered = True
+            auto_sync_summary = _auto_sync_summary(sync_result)
+            knowledge_base = knowledge_base_snapshot(paths)
+            interaction_snapshot = interaction_ingest_snapshot(paths)
+            if sync_result.get("status") in {"valid", "warnings"} and bool(
+                sync_result.get("published")
+            ):
+                freshness_notice = (
+                    "The knowledge base was refreshed automatically before answering."
+                )
+                sync_suggested = False
+                prefer_sync_before_answer = False
+                if knowledge_base["present"]:
+                    reference_resolution = resolve_workspace_reference(paths, query=question)
+                    if (
+                        isinstance(reference_resolution, dict)
+                        and not reference_resolution.get("detected")
+                    ):
+                        reference_resolution = None
+                    reference_resolution_summary = build_reference_resolution_summary(
+                        reference_resolution
+                    )
+            else:
+                action_required = True
+                inner_workflow_id = "knowledge-base-sync"
+                route_reason = (
+                    "The ask path attempted an automatic sync because the question needs fresh "
+                    "workspace evidence, but final publication did not succeed."
+                )
+                freshness_notice = str(
+                    sync_result.get("detail") or "Automatic sync did not complete."
+                )
     elif not knowledge_base["present"] and workspace_notices_enabled:
         action_required = True
         inner_workflow_id = "knowledge-base-sync" if environment_ready else "workspace-bootstrap"
@@ -468,6 +556,9 @@ def prepare_ask_turn(
             "question_domain": question_domain,
             "knowledge_base_missing": not knowledge_base["present"],
             "knowledge_base_stale": knowledge_base["stale"],
+            "auto_prepare_triggered": auto_prepare_triggered,
+            "auto_prepare_reason": auto_prepare_reason,
+            "auto_prepare_summary": auto_prepare_summary,
             "sync_suggested": sync_suggested,
             "sync_requested": auto_sync_triggered,
             "auto_sync_triggered": auto_sync_triggered,
@@ -499,6 +590,7 @@ def prepare_ask_turn(
             "question_domain": question_domain,
             "inner_workflow_id": inner_workflow_id,
             "status": status,
+            "auto_prepare_triggered": auto_prepare_triggered,
             "auto_sync_triggered": auto_sync_triggered,
         },
     )
@@ -512,6 +604,9 @@ def prepare_ask_turn(
         "route_reason": route_reason,
         "knowledge_base_missing": not knowledge_base["present"],
         "knowledge_base_stale": knowledge_base["stale"],
+        "auto_prepare_triggered": auto_prepare_triggered,
+        "auto_prepare_reason": auto_prepare_reason,
+        "auto_prepare_summary": auto_prepare_summary,
         "sync_suggested": sync_suggested,
         "sync_requested": auto_sync_triggered,
         "auto_sync_triggered": auto_sync_triggered,

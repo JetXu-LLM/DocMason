@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import site
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,16 +30,21 @@ from .knowledge import (
 )
 from .operator_eval import run_operator_eval
 from .project import (
+    BOOTSTRAP_STATE_SCHEMA_VERSION,
     MINIMUM_PYTHON,
     SUPPORTED_INPUTS,
     WorkspacePaths,
     adapter_snapshot,
     bootstrap_state,
+    bootstrap_state_summary,
+    cached_bootstrap_readiness,
     count_source_documents,
     isoformat_timestamp,
     knowledge_base_snapshot,
     locate_workspace,
+    manual_workspace_recovery_doc,
     read_json,
+    source_runtime_requirements,
     supported_input_tiers,
     supported_source_documents,
     write_json,
@@ -143,10 +150,179 @@ def preferred_libreoffice_install_command() -> tuple[list[str] | None, str | Non
     """Choose the preferred supported LibreOffice install command when automation is possible."""
     brew_binary = find_brew_binary()
     if sys.platform == "darwin" and brew_binary is not None:
-        return [brew_binary, "install", "--cask", "libreoffice"], (
-            "`brew install --cask libreoffice`"
+        return [brew_binary, "install", "--cask", "libreoffice-still"], (
+            "`brew install --cask libreoffice-still`"
         )
     return None, None
+
+
+def ensure_python_pip(
+    python_executable: str,
+    *,
+    cwd: Path,
+    command_runner: CommandRunner,
+) -> tuple[bool, str]:
+    """Ensure that a Python interpreter exposes pip, using ensurepip when needed."""
+    pip_check = command_runner([python_executable, "-m", "pip", "--version"], cwd)
+    if pip_check.exit_code == 0:
+        return True, "pip is available."
+
+    ensurepip = command_runner([python_executable, "-m", "ensurepip", "--upgrade"], cwd)
+    if ensurepip.exit_code != 0:
+        return (
+            False,
+            summarize_command_failure([python_executable, "-m", "ensurepip"], ensurepip),
+        )
+
+    pip_verify = command_runner([python_executable, "-m", "pip", "--version"], cwd)
+    if pip_verify.exit_code == 0:
+        return True, "Restored pip with ensurepip."
+    return (
+        False,
+        summarize_command_failure([python_executable, "-m", "pip", "--version"], pip_verify),
+    )
+
+
+def homebrew_auto_install_plan(
+    *,
+    command_runner: CommandRunner,
+    cwd: Path,
+) -> dict[str, Any]:
+    """Return whether the official unattended Homebrew install path is viable."""
+    if sys.platform != "darwin":
+        return {"feasible": False, "detail": "Homebrew automation is only supported on macOS."}
+    if find_brew_binary() is not None:
+        return {"feasible": False, "detail": "Homebrew is already installed."}
+
+    machine = platform.machine().lower()
+    if machine not in {"arm64", "x86_64"}:
+        return {
+            "feasible": False,
+            "detail": f"Homebrew automation is not configured for machine type `{machine}`.",
+        }
+
+    bash_path = Path("/bin/bash")
+    curl_path = Path("/usr/bin/curl")
+    xcode_select_path = Path("/usr/bin/xcode-select")
+    if not bash_path.exists() or not os.access(bash_path, os.X_OK):
+        return {
+            "feasible": False,
+            "detail": "The official Homebrew installer requires `/bin/bash`.",
+        }
+    if not curl_path.exists() or not os.access(curl_path, os.X_OK):
+        return {
+            "feasible": False,
+            "detail": "The official Homebrew installer requires `/usr/bin/curl`.",
+        }
+    if not xcode_select_path.exists() or command_runner(
+        [str(xcode_select_path), "-p"],
+        cwd,
+    ).exit_code != 0:
+        return {
+            "feasible": False,
+            "detail": (
+                "The official Homebrew installer requires Xcode Command Line Tools to be "
+                "available first."
+            ),
+        }
+
+    prefix = Path("/opt/homebrew" if machine == "arm64" else "/usr/local")
+    writable_probe = prefix if prefix.exists() else prefix.parent
+    if not os.access(writable_probe, os.W_OK):
+        return {
+            "feasible": False,
+            "detail": (
+                "The default Homebrew prefix is not writable non-interactively on this host, so "
+                "silent Homebrew installation is not viable."
+            ),
+        }
+
+    install_command = [
+        "/usr/bin/env",
+        "NONINTERACTIVE=1",
+        str(bash_path),
+        "-c",
+        '"$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
+    ]
+    return {
+        "feasible": True,
+        "detail": "The official unattended Homebrew install path is available.",
+        "expected_brew": str(prefix / "bin" / "brew"),
+        "install_command": install_command,
+        "install_display": (
+            '`NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL '
+            'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`'
+        ),
+    }
+
+
+def refresh_brew_binary_after_install(plan: dict[str, Any]) -> str | None:
+    """Resolve Homebrew again after a successful unattended install attempt."""
+    brew_binary = find_brew_binary()
+    if brew_binary is not None:
+        return brew_binary
+    expected_brew = plan.get("expected_brew")
+    if isinstance(expected_brew, str) and expected_brew and Path(expected_brew).exists():
+        return expected_brew
+    return None
+
+
+def remove_generated_path(path: Path) -> None:
+    """Remove a generated file, directory, or symlink so it can be recreated cleanly."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+
+
+def skill_shim_sources(paths: WorkspacePaths) -> list[Path]:
+    """Return the authored skill directories that thin repo-local shims should expose."""
+    directories = paths.agent_skill_directories(include_operator=True, include_optional=True)
+    names = [directory.name for directory in directories]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        duplicate_list = ", ".join(duplicates)
+        raise ValueError(
+            f"Cannot generate repo-local skill shims because skill names collide: {duplicate_list}."
+        )
+    return directories
+
+
+def sync_skill_shim_root(root: Path, skill_directories: list[Path]) -> list[Path]:
+    """Mirror authored skill directories into a flat symlink shim root."""
+    if root.is_symlink() or root.is_file():
+        remove_generated_path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    generated: list[Path] = []
+    expected_names = {directory.name for directory in skill_directories}
+
+    for existing in list(root.iterdir()):
+        if existing.name not in expected_names:
+            remove_generated_path(existing)
+
+    for source_dir in skill_directories:
+        destination = root / source_dir.name
+        relative_target = os.path.relpath(source_dir, root)
+        if destination.is_symlink():
+            current_target = os.readlink(destination)
+            if current_target == relative_target:
+                generated.append(destination)
+                continue
+            destination.unlink()
+        elif destination.exists():
+            remove_generated_path(destination)
+        os.symlink(relative_target, destination)
+        generated.append(destination)
+    return generated
+
+
+def sync_repo_local_skill_shims(paths: WorkspacePaths) -> list[Path]:
+    """Generate the thin repo-local skill shim layers for supported agent surfaces."""
+    skill_directories = skill_shim_sources(paths)
+    generated = sync_skill_shim_root(paths.repo_skill_shim_dir, skill_directories)
+    generated.extend(sync_skill_shim_root(paths.claude_skill_shim_dir, skill_directories))
+    return generated
 
 
 def inspect_editable_install(paths: WorkspacePaths) -> tuple[bool, str]:
@@ -212,21 +388,74 @@ def office_renderer_next_step() -> str:
     if sys.platform == "darwin":
         if find_brew_binary():
             return (
-                "Install LibreOffice with `brew install --cask libreoffice`, or download "
+                "Install LibreOffice with `brew install --cask libreoffice-still`, or download "
                 "the official macOS installer from https://www.libreoffice.org/download/download/, "
                 "then rerun `docmason doctor`."
             )
         return (
-            "Download and install LibreOffice from "
-            "https://www.libreoffice.org/download/download/. On macOS, drag the app into "
-            "`/Applications`; DocMason will detect the standard `soffice` path there. "
-            "Then rerun `docmason doctor`."
+            "Run `docmason prepare --yes` to let the workspace attempt the managed Homebrew plus "
+            "LibreOffice install path when the host supports silent automation, or download and "
+            "install LibreOffice from https://www.libreoffice.org/download/download/. On macOS, "
+            "drag the app into `/Applications`; DocMason will detect the standard `soffice` path "
+            "there. Then rerun `docmason doctor`."
         )
     return (
         "Install LibreOffice with your Linux distribution's package manager or from "
         "https://www.libreoffice.org/download/download/, ensure `soffice` is on PATH, "
         "then rerun `docmason doctor`."
     )
+
+
+def manual_workspace_recovery_step() -> str:
+    """Return the canonical deeper fallback reference for manual bootstrap or repair."""
+    return (
+        f"Follow `{manual_workspace_recovery_doc()}` for the manual workspace bootstrap and "
+        "repair fallback."
+    )
+
+
+def bootstrap_checked_at() -> str:
+    """Return the current UTC timestamp for bootstrap-marker writes."""
+    return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def write_bootstrap_ready_marker(
+    workspace: WorkspacePaths,
+    *,
+    status: str,
+    package_manager: str,
+    bootstrap_python: str,
+    editable_install: bool,
+    editable_detail: str,
+    office_snapshot: dict[str, Any],
+    pdf_snapshot: dict[str, Any],
+) -> None:
+    """Persist the lightweight cached ready marker used by ordinary ask flows."""
+    requirements = source_runtime_requirements(workspace)
+    state = {
+        "schema_version": BOOTSTRAP_STATE_SCHEMA_VERSION,
+        "status": status,
+        "environment_ready": bool(workspace.venv_python.exists() and editable_install),
+        "checked_at": bootstrap_checked_at(),
+        "prepared_at": (
+            isoformat_timestamp(workspace.venv_python.stat().st_mtime)
+            if workspace.venv_python.exists()
+            else None
+        ),
+        "workspace_root": str(workspace.root.resolve()),
+        "package_manager": package_manager,
+        "python_executable": bootstrap_python,
+        "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
+        "editable_install": editable_install,
+        "editable_install_detail": editable_detail,
+        "pdf_renderer_ready": bool(pdf_snapshot.get("ready", False)),
+        "office_renderer_ready": bool(office_snapshot.get("ready", False)),
+        "office_renderer_required": bool(office_snapshot.get("required", False)),
+        "requires_pdf_renderer": requirements["requires_pdf_renderer"],
+        "requires_office_renderer": requirements["requires_office_renderer"],
+        "manual_recovery_doc": manual_workspace_recovery_doc(),
+    }
+    write_json(workspace.bootstrap_state_path, state)
 
 
 def environment_snapshot(
@@ -237,6 +466,7 @@ def environment_snapshot(
     """Summarize repo-local environment readiness for status and doctor flows."""
     editable_install, editable_detail = editable_install_probe(paths)
     state = bootstrap_state(paths)
+    cached = cached_bootstrap_readiness(paths)
     return {
         "ready": bool(paths.venv_python.exists() and editable_install),
         "venv_python": str(paths.venv_python.relative_to(paths.root)),
@@ -245,6 +475,11 @@ def environment_snapshot(
         "bootstrap_state_present": bool(state),
         "package_manager": state.get("package_manager"),
         "prepared_at": state.get("prepared_at"),
+        "manual_recovery_doc": manual_workspace_recovery_doc(),
+        "cached_ready": bool(cached.get("ready")),
+        "cached_ready_reason": cached.get("reason"),
+        "cached_ready_detail": cached.get("detail"),
+        "bootstrap_state": bootstrap_state_summary(paths),
     }
 
 
@@ -304,6 +539,7 @@ def workspace_stage(
     payload = {
         "stage": stage,
         "environment_ready": environment["ready"],
+        "bootstrap_state": dict(environment["bootstrap_state"]),
         "source_documents": {
             "path": str(paths.source_dir.relative_to(paths.root)),
             "counts": source_counts,
@@ -332,6 +568,7 @@ def prepare_workspace(
     actions_performed: list[str] = []
     actions_skipped: list[str] = []
     next_steps: list[str] = []
+    manual_recovery_next_step = manual_workspace_recovery_step()
 
     if not platform_supported():
         payload = {
@@ -339,12 +576,17 @@ def prepare_workspace(
             "actions_performed": actions_performed,
             "actions_skipped": actions_skipped,
             "environment": {"platform": sys.platform},
-            "next_steps": ["Use macOS or Linux for the supported DocMason workflow."],
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "next_steps": [
+                "Use macOS or Linux for the supported DocMason workflow.",
+                manual_recovery_next_step,
+            ],
         }
         lines = [
             f"Prepare status: {ACTION_REQUIRED}",
             f"Unsupported platform: {sys.platform}",
             "Next step: use macOS or Linux for DocMason.",
+            manual_recovery_next_step,
         ]
         return make_report(ACTION_REQUIRED, payload, lines)
 
@@ -354,7 +596,11 @@ def prepare_workspace(
             "actions_performed": actions_performed,
             "actions_skipped": actions_skipped,
             "environment": {"python_version": ".".join(str(part) for part in sys.version_info[:3])},
-            "next_steps": ["Install Python 3.11 or newer and rerun `docmason prepare`."],
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "next_steps": [
+                "Install Python 3.11 or newer and rerun `docmason prepare`.",
+                manual_recovery_next_step,
+            ],
         }
         lines = [
             f"Prepare status: {ACTION_REQUIRED}",
@@ -363,6 +609,7 @@ def prepare_workspace(
                 "is below the supported minimum."
             ),
             "Next step: install Python 3.11 or newer and rerun the command.",
+            manual_recovery_next_step,
         ]
         return make_report(ACTION_REQUIRED, payload, lines)
 
@@ -409,27 +656,44 @@ def prepare_workspace(
             next_steps.append(f"Recommended: install uv with {uv_install_display}.")
 
     if uv_binary is None and should_attempt_uv_install:
-        execution = command_runner(uv_install_command, workspace.root)
-        if execution.exit_code == 0:
-            uv_binary = find_uv_binary()
-            uv_candidate = user_scoped_uv_path()
-            if uv_binary is not None:
-                actions_performed.append(f"Installed uv with {uv_install_display}.")
-            elif uv_candidate is not None and uv_candidate.exists():
-                uv_binary = str(uv_candidate)
-                actions_performed.append(f"Installed uv with {uv_install_display}.")
+        pip_ready, pip_detail = ensure_python_pip(
+            bootstrap_python,
+            cwd=workspace.root,
+            command_runner=command_runner,
+        )
+        if not pip_ready:
+            actions_skipped.append(
+                "pip is unavailable for the bootstrap interpreter; falling back to venv + pip. "
+                f"Details: {pip_detail}"
+            )
+            next_steps.append(
+                "Repair the bootstrap interpreter so `python -m pip` works, or continue with the "
+                "repo-local venv + pip fallback."
+            )
+        else:
+            if pip_detail == "Restored pip with ensurepip.":
+                actions_performed.append("Restored bootstrap pip with ensurepip.")
+            execution = command_runner(uv_install_command, workspace.root)
+            if execution.exit_code == 0:
+                uv_binary = find_uv_binary()
+                uv_candidate = user_scoped_uv_path()
+                if uv_binary is not None:
+                    actions_performed.append(f"Installed uv with {uv_install_display}.")
+                elif uv_candidate is not None and uv_candidate.exists():
+                    uv_binary = str(uv_candidate)
+                    actions_performed.append(f"Installed uv with {uv_install_display}.")
+                else:
+                    actions_skipped.append(
+                        "Completed a uv install attempt, but the uv executable was not found "
+                        "on the current PATH; "
+                        "falling back to venv + pip."
+                    )
             else:
                 actions_skipped.append(
-                    "Completed a uv install attempt, but the uv executable was not found "
-                    "on the current PATH; "
-                    "falling back to venv + pip."
+                    f"uv installation failed; falling back to venv + pip. "
+                    f"Details: {execution.stderr or execution.stdout or 'no output'}"
                 )
-        else:
-            actions_skipped.append(
-                f"uv installation failed; falling back to venv + pip. "
-                f"Details: {execution.stderr or execution.stdout or 'no output'}"
-            )
-            next_steps.append(f"Retry uv installation with {uv_install_display}.")
+                next_steps.append(f"Retry uv installation with {uv_install_display}.")
 
     if uv_binary is not None:
         package_manager = "uv"
@@ -454,11 +718,16 @@ def prepare_workspace(
                 "actions_performed": actions_performed,
                 "actions_skipped": actions_skipped,
                 "environment": environment,
-                "next_steps": [summarize_command_failure(["uv", "venv"], creation)],
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
+                "next_steps": [
+                    summarize_command_failure(["uv", "venv"], creation),
+                    manual_recovery_next_step,
+                ],
             }
             lines = [
                 f"Prepare status: {ACTION_REQUIRED}",
                 summarize_command_failure([uv_binary, "venv"], creation),
+                manual_recovery_next_step,
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
         actions_performed.append("Created or repaired .venv with uv.")
@@ -477,11 +746,16 @@ def prepare_workspace(
                 "actions_performed": actions_performed,
                 "actions_skipped": actions_skipped,
                 "environment": environment,
-                "next_steps": [summarize_command_failure([uv_binary, "pip", "install"], install)],
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
+                "next_steps": [
+                    summarize_command_failure([uv_binary, "pip", "install"], install),
+                    manual_recovery_next_step,
+                ],
             }
             lines = [
                 f"Prepare status: {ACTION_REQUIRED}",
                 summarize_command_failure([uv_binary, "pip", "install"], install),
+                manual_recovery_next_step,
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
         actions_performed.append(
@@ -510,15 +784,48 @@ def prepare_workspace(
                     summarize_command_failure(
                         [bootstrap_python, "-m", "venv"],
                         creation,
-                    )
+                    ),
+                    manual_recovery_next_step,
                 ],
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
             }
             lines = [
                 f"Prepare status: {ACTION_REQUIRED}",
                 summarize_command_failure([bootstrap_python, "-m", "venv"], creation),
+                manual_recovery_next_step,
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
         actions_performed.append("Created or repaired .venv with venv.")
+
+        venv_pip_ready, venv_pip_detail = ensure_python_pip(
+            str(workspace.venv_python),
+            cwd=workspace.root,
+            command_runner=command_runner,
+        )
+        if not venv_pip_ready:
+            environment = {
+                "package_manager": package_manager,
+                "python_executable": bootstrap_python,
+            }
+            payload = {
+                "status": ACTION_REQUIRED,
+                "actions_performed": actions_performed,
+                "actions_skipped": actions_skipped,
+                "environment": environment,
+                "next_steps": [
+                    f"Repair pip inside `.venv`. Details: {venv_pip_detail}",
+                    manual_recovery_next_step,
+                ],
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
+            }
+            lines = [
+                f"Prepare status: {ACTION_REQUIRED}",
+                f"Repair pip inside `.venv`. Details: {venv_pip_detail}",
+                manual_recovery_next_step,
+            ]
+            return make_report(ACTION_REQUIRED, payload, lines)
+        if venv_pip_detail == "Restored pip with ensurepip.":
+            actions_performed.append("Restored `.venv` pip with ensurepip.")
 
         upgrade = command_runner(
             [str(workspace.venv_python), "-m", "pip", "install", "--upgrade", "pip"],
@@ -538,12 +845,15 @@ def prepare_workspace(
                     summarize_command_failure(
                         [str(workspace.venv_python), "-m", "pip"],
                         upgrade,
-                    )
+                    ),
+                    manual_recovery_next_step,
                 ],
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
             }
             lines = [
                 f"Prepare status: {ACTION_REQUIRED}",
                 summarize_command_failure([str(workspace.venv_python), "-m", "pip"], upgrade),
+                manual_recovery_next_step,
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
         actions_performed.append("Upgraded pip inside .venv.")
@@ -566,12 +876,15 @@ def prepare_workspace(
                     summarize_command_failure(
                         [str(workspace.venv_python), "-m", "pip"],
                         install,
-                    )
+                    ),
+                    manual_recovery_next_step,
                 ],
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
             }
             lines = [
                 f"Prepare status: {ACTION_REQUIRED}",
                 summarize_command_failure([str(workspace.venv_python), "-m", "pip"], install),
+                manual_recovery_next_step,
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
         actions_performed.append(
@@ -591,30 +904,83 @@ def prepare_workspace(
                 "editable_install": editable_install,
                 "editable_install_detail": editable_detail,
             },
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
             "next_steps": [
-                "Repair the editable install inside .venv and rerun `docmason prepare`."
+                "Repair the editable install inside .venv and rerun `docmason prepare`.",
+                manual_recovery_next_step,
             ],
         }
         lines = [
             f"Prepare status: {ACTION_REQUIRED}",
             editable_detail,
             "Next step: repair the editable install inside .venv and rerun the command.",
+            manual_recovery_next_step,
         ]
         return make_report(ACTION_REQUIRED, payload, lines)
 
-    state = {
-        "prepared_at": isoformat_timestamp(Path(workspace.venv_python).stat().st_mtime),
-        "package_manager": package_manager,
-        "python_executable": bootstrap_python,
-        "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
-        "editable_install": editable_install,
-    }
-    write_json(workspace.bootstrap_state_path, state)
-    refresh_generated_connector_manifests(workspace)
-    actions_performed.append("Recorded bootstrap state in runtime/bootstrap_state.json.")
+    try:
+        generated_skill_shims = sync_repo_local_skill_shims(workspace)
+    except ValueError as exc:
+        payload = {
+            "status": ACTION_REQUIRED,
+            "actions_performed": actions_performed,
+            "actions_skipped": actions_skipped,
+            "environment": {
+                "package_manager": package_manager,
+                "python_executable": bootstrap_python,
+                "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
+                "editable_install": editable_install,
+                "editable_install_detail": editable_detail,
+            },
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "next_steps": [
+                str(exc),
+                "Resolve the skill shim generation issue and rerun `docmason prepare`.",
+            ],
+        }
+        lines = [
+            f"Prepare status: {ACTION_REQUIRED}",
+            str(exc),
+            "Next step: resolve the skill shim generation issue and rerun the command.",
+        ]
+        return make_report(ACTION_REQUIRED, payload, lines)
+    if generated_skill_shims:
+        actions_performed.append(
+            "Refreshed repo-local skill shims under .agents/skills and .claude/skills."
+        )
 
     office_snapshot = office_renderer_snapshot(workspace)
     if office_snapshot["required"] and not office_snapshot["ready"] and assume_yes:
+        brew_plan = homebrew_auto_install_plan(command_runner=command_runner, cwd=workspace.root)
+        if find_brew_binary() is None and brew_plan["feasible"]:
+            brew_install = command_runner(brew_plan["install_command"], workspace.root)
+            if brew_install.exit_code == 0:
+                refreshed_brew = refresh_brew_binary_after_install(brew_plan)
+                if refreshed_brew is not None:
+                    brew_bin_dir = str(Path(refreshed_brew).parent)
+                    os.environ["PATH"] = f"{brew_bin_dir}:{os.environ.get('PATH', '')}"
+                    actions_performed.append(
+                        "Installed Homebrew with the official unattended installer."
+                    )
+                else:
+                    actions_skipped.append(
+                        "Homebrew install completed, but the brew executable was not found "
+                        "afterward."
+                    )
+            else:
+                actions_skipped.append(
+                    "Homebrew installation failed during prepare. Details: "
+                    f"{brew_install.stderr or brew_install.stdout or 'no output'}"
+                )
+                next_steps.append(
+                    "Install Homebrew manually or install LibreOffice from the official "
+                    "macOS installer, then rerun `docmason prepare --yes`."
+                )
+        elif find_brew_binary() is None and not brew_plan["feasible"]:
+            actions_skipped.append(
+                "Skipped Homebrew installation because the host does not satisfy the official "
+                f"unattended install preconditions. Details: {brew_plan['detail']}"
+            )
         install_command, install_display = preferred_libreoffice_install_command()
         if install_command is not None and install_display is not None:
             execution = command_runner(install_command, workspace.root)
@@ -630,10 +996,25 @@ def prepare_workspace(
         status = DEGRADED
         next_steps.append(office_renderer_next_step())
 
+    pdf_snapshot = pdf_renderer_snapshot()
+    write_bootstrap_ready_marker(
+        workspace,
+        status=status,
+        package_manager=package_manager,
+        bootstrap_python=bootstrap_python,
+        editable_install=editable_install,
+        editable_detail=editable_detail,
+        office_snapshot=office_snapshot,
+        pdf_snapshot=pdf_snapshot,
+    )
+    refresh_generated_connector_manifests(workspace)
+    actions_performed.append("Recorded bootstrap state in runtime/bootstrap_state.json.")
+
     payload = {
         "status": status,
         "actions_performed": actions_performed,
         "actions_skipped": actions_skipped,
+        "manual_recovery_doc": manual_workspace_recovery_doc(),
         "environment": {
             "python_executable": bootstrap_python,
             "python_version": ".".join(str(part) for part in sys.version_info[:3]),
@@ -642,6 +1023,7 @@ def prepare_workspace(
             "editable_install": editable_install,
             "editable_install_detail": editable_detail,
             "bootstrap_state": str(workspace.bootstrap_state_path.relative_to(workspace.root)),
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
         },
         "next_steps": deduplicate(next_steps),
     }
@@ -693,6 +1075,44 @@ def doctor_workspace(
             ACTION_REQUIRED,
             f"Python {version_string} is below the supported minimum of 3.11.",
             "Install Python 3.11 or newer and rerun `docmason doctor`.",
+        )
+
+    bootstrap_snapshot = bootstrap_state_summary(workspace)
+    bootstrap_reason = str(bootstrap_snapshot.get("reason") or "")
+    bootstrap_detail = str(bootstrap_snapshot.get("detail") or "Bootstrap state is unavailable.")
+    if bootstrap_reason == "cached-ready":
+        add_check("bootstrap-state", READY, bootstrap_detail)
+    elif bootstrap_reason == "workspace-root-drift":
+        add_check(
+            "bootstrap-state",
+            ACTION_REQUIRED,
+            bootstrap_detail,
+            "Run `docmason prepare --yes` from the current workspace root to refresh the cached bootstrap marker.",
+        )
+    elif bootstrap_reason in {
+        "missing-venv",
+        "environment-not-ready",
+        "legacy-bootstrap-state-sync-capability-unknown",
+    }:
+        add_check(
+            "bootstrap-state",
+            ACTION_REQUIRED,
+            bootstrap_detail,
+            "Run `docmason prepare --yes` to refresh the cached bootstrap marker.",
+        )
+    elif bootstrap_reason in {"legacy-compatible-ready", "legacy-bootstrap-state"}:
+        add_check(
+            "bootstrap-state",
+            DEGRADED,
+            bootstrap_detail,
+            "Run `docmason prepare --yes` to refresh the cached bootstrap marker to the current contract.",
+        )
+    else:
+        add_check(
+            "bootstrap-state",
+            DEGRADED,
+            bootstrap_detail,
+            "Run `docmason prepare --yes` to record the current bootstrap marker.",
         )
 
     uv_binary = find_uv_binary()
@@ -897,11 +1317,17 @@ def doctor_workspace(
     elif any(check["status"] == DEGRADED for check in checks):
         overall = DEGRADED
 
+    if any(
+        check["name"] == "platform" and check["status"] != READY for check in checks
+    ):
+        next_steps.append(manual_workspace_recovery_step())
+
     payload = {
         "status": overall,
         "checks": checks,
         "supported_inputs": list(SUPPORTED_INPUTS),
         "supported_input_tiers": supported_input_tiers(),
+        "manual_recovery_doc": manual_workspace_recovery_doc(),
         "next_steps": deduplicate(next_steps),
     }
     lines = [f"Doctor status: {overall}"]
@@ -931,6 +1357,14 @@ def status_workspace(
     lines = [
         f"Stage: {stage}",
         f"Environment ready: {'yes' if environment_ready else 'no'}",
+        (
+            "Bootstrap state: "
+            + (
+                "ready"
+                if payload["bootstrap_state"]["cached_ready"]
+                else str(payload["bootstrap_state"]["reason"] or "not-recorded")
+            )
+        ),
         (
             "Source documents: "
             + ", ".join(
@@ -1523,6 +1957,21 @@ def sync_adapters(
         build_claude_project_memory(workspace, workflow_metadata),
         encoding="utf-8",
     )
+    try:
+        sync_repo_local_skill_shims(workspace)
+    except ValueError as exc:
+        payload = {
+            "status": ACTION_REQUIRED,
+            "target": target,
+            "generated_files": [],
+            "source_inputs": [str(path.relative_to(workspace.root)) for path in source_inputs],
+            "detail": str(exc),
+        }
+        lines = [
+            f"Adapter sync status: {ACTION_REQUIRED}",
+            str(exc),
+        ]
+        return make_report(ACTION_REQUIRED, payload, lines)
 
     generated_files = workspace.generated_claude_files()
     payload = {

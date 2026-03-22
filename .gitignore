@@ -8,15 +8,18 @@
 /adapters/*
 !/adapters/.gitkeep
 /planning/
+/evals/
+/scripts/private/
 /skills/private/
 /IMPLEMENTATION_PLAN.md
 
 # Generated agent adapters
 /CLAUDE.md
+/.agents/
 /.github/copilot-instructions.md
 /.github/skills/
 
-# Claude Code runtime-created symlink (first-use adaptation artifact)
+# Repo-local generated skill shims
 /.claude/skills
 
 # Python environments and packaging artifacts
@@ -30,11 +33,24 @@
 /.ruff_cache/
 /.mypy_cache/
 /.coverage
+/.coverage.*
 /coverage.xml
+/htmlcov/
+/.hypothesis/
+/.tox/
+/.nox/
+/.cache/
 
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# Local environment and machine-specific config
+.env
+.env.*
+.python-version
+.direnv/
+.envrc
 
 # macOS and editor noise
 .DS_Store
@@ -45,3 +61,8 @@ __pycache__/
 *.log
 *.tmp
 *.swp
+*.download
+*.part
+*.orig
+*.rej
+*.bak

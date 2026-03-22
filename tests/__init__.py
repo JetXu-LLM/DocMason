@@ -1,0 +1,1 @@
+"""DocMason test package."""

@@ -70,6 +70,8 @@ the normal operator end state.
 
 `docmason sync-adapters` is not a required step before every first question.
 Use it when the chosen agent ecosystem needs generated adapter files or when those files are missing or stale.
+If the normal launcher or `prepare` path cannot finish in the current shell or platform, continue
+with [`docs/setup/manual-workspace-recovery.md`](../setup/manual-workspace-recovery.md).
 
 ### Ordinary Ongoing Usage
 
@@ -81,8 +83,10 @@ Use it when the chosen agent ecosystem needs generated adapter files or when tho
    - external factual or latest-state question -> web-first
    - stable low-risk general knowledge -> model knowledge first with honest boundaries
 5. If a workspace-dependent question has no published knowledge base, route to workspace bootstrap or knowledge-base sync instead of bluffing.
-6. If the published knowledge base is stale but still usable, answer with one concise freshness notice only when the answer path actually depends on the workspace corpus.
-7. If the question is `workspace-corpus`, the environment is ready, and fresh local state is genuinely needed, let the ask path run its concise auto-sync before answering.
+6. For workspace-dependent asks, reuse `runtime/bootstrap_state.json` as the cached ready marker instead of rerunning deep setup checks every time.
+7. If that marker is missing, stale after a repo move, or clearly non-ready, let the ask path attempt silent bootstrap or repair before surfacing manual setup work.
+8. If the published knowledge base is stale but still usable, answer with one concise freshness notice only when the answer path actually depends on the workspace corpus.
+9. If the question is `workspace-corpus`, the environment is ready, and fresh local state is genuinely needed, let the ask path run its concise auto-sync before answering.
 
 ## Odd Question Handling
 
@@ -127,7 +131,7 @@ This keeps the product surface compact while still supporting non-typical white-
 - Once `.venv` exists, prefer `./.venv/bin/python -m docmason ...` or the CLI inside `.venv` for ordinary workspace operations.
 - For Office rendering, install LibreOffice before syncing PowerPoint, Word, or Excel sources, including legacy `.ppt`, `.doc`, and `.xls` files.
 - Markdown, plain text, `.eml`, and the lightweight-compatible text-like inputs do not require LibreOffice.
-- On macOS with Homebrew, prefer letting the bootstrap launcher or `docmason prepare --yes` auto-install LibreOffice when required, or use `brew install --cask libreoffice`.
+- On macOS with Homebrew, prefer letting the bootstrap launcher or `docmason prepare --yes` auto-install LibreOffice when required, or use `brew install --cask libreoffice-still`.
 - On macOS without Homebrew, download the official installer from `https://www.libreoffice.org/download/download/`, open the `.dmg`, and drag LibreOffice into `/Applications`.
 - On Linux, install LibreOffice with your distribution's preferred package manager flow or the official download page, then ensure `soffice` is on `PATH`.
 

@@ -1,0 +1,63 @@
+name: Release Distributions
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string recorded in bundle manifests."
+        required: true
+        default: "manual-build"
+      publish_release:
+        description: "Publish or update a GitHub release with the generated bundles."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build release bundles
+        run: |
+          python scripts/build-distributions.py \
+            --version "${{ steps.version.outputs.value }}" \
+            --github-repo "${{ github.repository }}" \
+            --source-commit "${{ github.sha }}" \
+            --source-ref "${{ github.ref }}"
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-bundles
+          path: |
+            dist/DocMason-clean.zip
+            dist/DocMason-clean.zip.sha256
+            dist/DocMason-demo-ico-gcs.zip
+            dist/DocMason-demo-ico-gcs.zip.sha256
+      - name: Publish release assets
+        if: github.event_name == 'push' || inputs.publish_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.value }}
+          files: |
+            dist/DocMason-clean.zip
+            dist/DocMason-clean.zip.sha256
+            dist/DocMason-demo-ico-gcs.zip
+            dist/DocMason-demo-ico-gcs.zip.sha256

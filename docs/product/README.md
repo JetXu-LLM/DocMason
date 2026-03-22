@@ -16,6 +16,15 @@ The product surface is intentionally layered:
 - a smaller set of explicit top-level operator workflows handles setup, sync, status, adapter refresh, and runtime review
 - inner specialist workflows handle grounded answering, grounded composition, retrieval, provenance tracing, staged authoring, and repair
 
+The public distribution shape is now also intentionally layered:
+
+- the canonical source repository is the contributor surface
+- the clean release bundle is the safest private-workspace start
+- the demo release bundle is the fastest public product-evaluation start
+- tracked public sample fixtures live under `sample_corpus/`, not under live `original_doc/`
+
+See [Distribution Strategy](distribution-and-benchmarks.md) for the deeper rationale.
+
 Phase 4 and Phase 4b established the core operating model:
 
 - deterministic evidence preparation

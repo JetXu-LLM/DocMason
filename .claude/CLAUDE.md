@@ -6,11 +6,9 @@ This is a DocMason workspace. Read the full agent contract below.
 
 ## Claude Code First-Use Adaptation
 
-If `.claude/skills` does not exist yet, create it as a symlink to the repo skills directory:
-
-    ln -s ../skills .claude/skills
-
-This enables native Claude Code slash-command invocation for all canonical and operator skills.
+If `.claude/skills` is present, it should be a repo-local thin shim layer generated from the
+canonical repository skills during workspace bootstrap or repair.
+Do not create global skill links or hand-maintained parallel skill copies.
 
 ## Richer Workflow Routing
 

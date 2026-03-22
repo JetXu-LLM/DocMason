@@ -18,7 +18,7 @@ If the agent cannot inspect the filesystem, stop and explain that the current wo
 ## Procedure
 
 1. Run `docmason status --json`.
-2. Use the reported `stage` and `pending_actions` as the authoritative workspace status summary.
+2. Use the reported `stage`, `bootstrap_state`, and `pending_actions` as the authoritative workspace status summary.
 3. Do not claim that a knowledge base exists unless `status` reports it as present.
 4. If the task is ambiguous, interpret `pending_actions` in context rather than as a rigid universal order.
    - missing or stale adapter guidance matters only when the current flow depends on generated adapter files
@@ -37,6 +37,7 @@ If the agent cannot inspect the filesystem, stop and explain that the current wo
 ## Notes
 
 - `status` is derived from the filesystem and runtime state. There is no daemon or database.
+- `bootstrap_state` is the explicit cached-ready summary for ordinary ask-time reuse.
 - Pending actions may include `prepare`, `sync-adapters`, `sync`, and `validate-kb`.
 - A staged knowledge base with pending synthesis or blocking validation is reported as `knowledge-base-invalid`.
 - `sync-adapters` is an operator-maintenance action, not a universal prerequisite before every `ask` turn.

@@ -12,6 +12,8 @@ Current documentation areas:
 
 - [Architecture](architecture/README.md)
 - [Product](product/README.md)
+- [Distribution Strategy](product/distribution-and-benchmarks.md)
+- [Setup](setup/manual-workspace-recovery.md)
 - [Workflows](workflows/README.md)
 - [Execution Orchestration](workflows/execution-orchestration.md)
 - [Policies](policies/README.md)
@@ -24,4 +26,4 @@ The current documentation set explains:
 - the inner specialist workflows that support answering, composition, retrieval, and trace
 - the explicit execution-orchestration policy
 - the interaction-derived knowledge boundary
-- the fact that evaluation remains private-first rather than a new public command
+- the one-repo distribution model and public sample-corpus boundary

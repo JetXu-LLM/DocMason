@@ -24,6 +24,14 @@ The current repository also supports a narrower but important extension beyond p
 odd or non-typical document questions can stay KB-native when the published corpus already exposes
 the needed text, render, structure, notes, or media evidence.
 
+## Choose Your Start
+
+Pick the entry point that matches what you want to do on minute one:
+
+- [Use Privately](../../releases/latest/download/DocMason-clean.zip): download the clean workspace bundle with no `.git`, no `tests/`, and empty live workspace directories.
+- [Try ICO + GCS Demo](../../releases/latest/download/DocMason-demo-ico-gcs.zip): download the demo workspace bundle with no `.git`, no `tests/`, and a preloaded public sample corpus in `original_doc/`.
+- [Develop / Contribute](CONTRIBUTING.md): clone the canonical source repo, keep `tests/` and the tracked public demo corpus, then materialize the demo corpus locally only when you want it.
+
 ## Why This Exists
 
 Most document pipelines flatten complex business material into weak text dumps.
@@ -54,7 +62,7 @@ flowchart LR
 
 The target experience is simple:
 
-1. Put private files into `original_doc/`.
+1. Put private files into `original_doc/`, or materialize the public sample corpus if you are evaluating the project.
 2. Run one bootstrap command.
 3. Build the knowledge base.
 4. Ask naturally inside your AI agent.
@@ -64,7 +72,13 @@ Inside a valid workspace, natural freeform asking is the primary UX.
 
 ## Zero To Working
 
-From a raw checkout on macOS:
+The project now has three intentional entry modes:
+
+- private real use: download the clean release bundle, then put your own files into `original_doc/`
+- public product evaluation: download the demo release bundle with `ICO + GCS` already materialized in `original_doc/`
+- source-repo development: clone the canonical repo, then ask your agent to use `public-sample-workspace`, or run `python3 scripts/use-sample-corpus.py --preset ico-gcs` if you want the public demo corpus in your local workspace
+
+From a raw checkout or release bundle on macOS:
 
 ```bash
 ./scripts/bootstrap-workspace.sh --yes
@@ -87,10 +101,32 @@ The bootstrap launcher is designed for first-run setup:
 
 - it can prepare `.venv` before the package is importable from the `src/` layout
 - on the native macOS path, it can auto-install supported dependencies such as Python via Homebrew, uv, and LibreOffice when automation is available
+- if `uv` is unavailable, it falls back cleanly to repo-local `venv` plus `pip`
+- it refreshes repo-local skill shims under `.agents/skills` and `.claude/skills` instead of touching a global Codex skills directory
 - after bootstrap, ordinary repository commands should prefer the repo-local `.venv`
+
+If your shell, platform, or agent environment cannot run the normal launcher path cleanly, use the
+deeper fallback guide in [`docs/setup/manual-workspace-recovery.md`](docs/setup/manual-workspace-recovery.md).
 
 If you are using the generated Claude adapter surface, run `./.venv/bin/python -m docmason sync-adapters` when you need it.
 That adapter step is important for that ecosystem, but it is not part of the default first-answer path for every user.
+
+## Distribution Model
+
+DocMason intentionally separates the canonical source repository from the end-user release bundles.
+
+- The canonical `main` branch is the contributor surface.
+  It keeps `tests/`, the tracked public demo corpus under `sample_corpus/`, and the scripts that
+  build clean/demo release bundles.
+- The clean release bundle is the safest private-workspace start.
+- The demo release bundle is the fastest product-evaluation start.
+
+This boundary is deliberate:
+
+- live `original_doc/` is the writable user-managed corpus boundary
+- `sample_corpus/` is the tracked public fixture boundary used to build demo experiences and contributor regressions
+
+The deeper rationale lives in [`docs/product/distribution-and-benchmarks.md`](docs/product/distribution-and-benchmarks.md).
 
 ## What You Get Today
 
@@ -106,6 +142,10 @@ That adapter step is important for that ecosystem, but it is not part of the def
 
 A capable agent should also behave honestly on first contact:
 
+- if a workspace-dependent first ask arrives before the environment is ready, it should silently
+  attempt workspace bootstrap or repair before asking the user for manual help
+- once `runtime/bootstrap_state.json` says the current root is ready, repeated asks should reuse
+  that cached readiness marker instead of rerunning deep setup checks every time
 - if no published knowledge base exists yet, it should guide the user toward setup or sync instead of bluffing an answer
 - if the knowledge base is stale, it should say so
 - if the user explicitly needs the latest local document state, it should offer sync before answering
@@ -183,7 +223,7 @@ If your corpus includes PowerPoint, Word, or Excel files such as `.pptx`, `.ppt`
 
 Recommended setup:
 
-- macOS with Homebrew already installed: let `./scripts/bootstrap-workspace.sh --yes` or `docmason prepare --yes` install it automatically when the current corpus needs it, or run `brew install --cask libreoffice`
+- macOS with Homebrew already installed: let `./scripts/bootstrap-workspace.sh --yes` or `docmason prepare --yes` install it automatically when the current corpus needs it, or run `brew install --cask libreoffice-still`
 - macOS without Homebrew: download the official macOS installer from `https://www.libreoffice.org/download/download/`, open the `.dmg`, and drag LibreOffice into `/Applications`
 
 Verification:
@@ -200,6 +240,7 @@ Users may still choose to operate the project through external AI agents, and th
 Choosing an agent that matches the user's privacy requirements remains the user's responsibility.
 
 Do not commit private source documents, compiled knowledge bases, or runtime state to the public repository.
+Tracked public sample fixtures belong under `sample_corpus/`, not under live `original_doc/`.
 
 ## Current Status
 
@@ -235,7 +276,8 @@ This README is intentionally promotional in tone, but it does not claim later-ph
 
 ## Repository Layout
 
-The repository keeps private corpus data and generated artifacts local:
+The canonical source repository keeps live workspace data local while still tracking the public demo
+corpus:
 
 ```text
 DocMason/
@@ -250,11 +292,12 @@ DocMason/
 │   └── docmason/
 ├── tests/
 ├── docs/
+├── sample_corpus/   # tracked public demo fixtures
 ├── scripts/
 ├── skills/
 │   └── canonical/
 ├── adapters/        # local/generated, gitignored
-├── original_doc/    # private source corpus, gitignored
+├── original_doc/    # live user corpus boundary, gitignored
 ├── knowledge_base/  # private/generated, gitignored
 └── runtime/         # private/generated, gitignored
 ```
@@ -265,6 +308,10 @@ DocMason/
 - `skills/canonical/` contains the detailed canonical workflow contracts that agents should follow after first contact.
 - `docs/` contains deeper public notes on product direction, workflows, orchestration, and policies.
 - `scripts/bootstrap-workspace.sh` is the preferred zero-to-working launcher from a raw checkout.
+- `public-sample-workspace` is the contributor-only optional skill for materializing the tracked public demo corpus into live `original_doc/`.
+- `python3 scripts/use-sample-corpus.py --preset ico-gcs` remains the direct script path when you want the same setup without going through an agent skill.
+- `sample_corpus/` is the tracked fixture boundary. Do not replace it with your private corpus.
+- `scripts/install-git-hooks.sh` installs the repo safety hooks that block staged live workspace data.
 
 ## If This Direction Matters
 
