@@ -8,15 +8,13 @@
 /adapters/*
 !/adapters/.gitkeep
 /planning/
-/evals/
+/evals/*
 /scripts/private/
 /skills/private/
 /IMPLEMENTATION_PLAN.md
 
 # Generated agent adapters
-/CLAUDE.md
 /.agents/
-/.github/copilot-instructions.md
 /.github/skills/
 
 # Repo-local generated skill shims

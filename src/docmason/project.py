@@ -453,10 +453,6 @@ class WorkspacePaths:
         return self.root / ".claude"
 
     @property
-    def claude_root_path(self) -> Path:
-        return self.root / "CLAUDE.md"
-
-    @property
     def claude_skill_shim_dir(self) -> Path:
         return self.claude_dir / "skills"
 
@@ -525,21 +521,21 @@ class WorkspacePaths:
     def optional_skill_files(self) -> list[Path]:
         return [directory / "SKILL.md" for directory in self.optional_skill_directories()]
 
-    def adapter_source_inputs(self) -> list[Path]:
+    def claude_adapter_source_inputs(self) -> list[Path]:
         return [
-            self.agents_path,
             *self.canonical_skill_files(),
             *self.canonical_workflow_metadata_files(),
-            *self.operator_skill_files(),
-            *self.operator_workflow_metadata_files(),
-            *self.optional_skill_files(),
+        ]
+
+    def generated_claude_core_files(self) -> list[Path]:
+        return [
+            self.claude_project_memory_path,
+            self.claude_workflow_routing_path,
         ]
 
     def generated_claude_files(self) -> list[Path]:
         return [
-            self.claude_root_path,
-            self.claude_project_memory_path,
-            self.claude_workflow_routing_path,
+            *self.generated_claude_core_files(),
             self.claude_skill_shim_dir,
         ]
 
@@ -558,6 +554,10 @@ class WorkspacePaths:
     @property
     def staging_pending_work_path(self) -> Path:
         return self.knowledge_base_staging_dir / "pending_work.json"
+
+    @property
+    def staging_hybrid_work_path(self) -> Path:
+        return self.knowledge_base_staging_dir / "hybrid_work.json"
 
     @property
     def staging_validation_report_path(self) -> Path:
@@ -600,6 +600,9 @@ class WorkspacePaths:
     def retrieval_dir(self, target: str) -> Path:
         return self.knowledge_target_dir(target) / "retrieval"
 
+    def hybrid_work_path(self, target: str) -> Path:
+        return self.knowledge_target_dir(target) / "hybrid_work.json"
+
     def retrieval_manifest_path(self, target: str) -> Path:
         return self.retrieval_dir(target) / "manifest.json"
 
@@ -608,6 +611,9 @@ class WorkspacePaths:
 
     def retrieval_unit_records_path(self, target: str) -> Path:
         return self.retrieval_dir(target) / "unit_records.json"
+
+    def retrieval_artifact_records_path(self, target: str) -> Path:
+        return self.retrieval_dir(target) / "artifact_records.json"
 
     def trace_dir(self, target: str) -> Path:
         return self.knowledge_target_dir(target) / "trace"
@@ -853,9 +859,9 @@ def knowledge_base_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
 
 def adapter_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     """Summarize generated adapter presence and freshness from canonical inputs."""
-    generated_files = paths.generated_claude_files()
+    generated_files = paths.generated_claude_core_files()
     present = all(path.exists() for path in generated_files)
-    source_inputs = [path for path in paths.adapter_source_inputs() if path.exists()]
+    source_inputs = [path for path in paths.claude_adapter_source_inputs() if path.exists()]
     newest_source = latest_mtime(source_inputs)
     oldest_generated = (
         min(path.stat().st_mtime for path in generated_files if path.exists()) if present else None
@@ -864,13 +870,19 @@ def adapter_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     stale = bool(
         present and newest_source and oldest_generated and newest_source > oldest_generated
     )
+    skill_shims_present = paths.claude_skill_shim_dir.exists() and any(
+        paths.claude_skill_shim_dir.iterdir()
+    )
     return {
         "claude": {
-            "path": str(paths.claude_root_path.relative_to(paths.root)),
+            "path": str(paths.claude_project_memory_path.relative_to(paths.root)),
             "present": present,
             "last_updated": isoformat_timestamp(last_updated),
             "stale": stale,
             "generated_files": [str(path.relative_to(paths.root)) for path in generated_files],
+            "skill_shims_path": str(paths.claude_skill_shim_dir.relative_to(paths.root)),
+            "skill_shims_present": skill_shims_present,
+            "skill_shims_required": False,
         }
     }
 
@@ -1038,7 +1050,8 @@ def bootstrap_state_summary(
         "cached_ready": bool(readiness.get("ready")),
         "reason": readiness.get("reason"),
         "detail": readiness.get("detail"),
-        "manual_recovery_doc": readiness.get("manual_recovery_doc") or manual_workspace_recovery_doc(),
+        "manual_recovery_doc": readiness.get("manual_recovery_doc")
+        or manual_workspace_recovery_doc(),
     }
 
 

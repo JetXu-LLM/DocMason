@@ -33,19 +33,37 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - run retrieval and trace first
    - inspect `reference_resolution` when the user names a document or locator in user-native terms
    - inspect published text, render, structure, notes, or media artifacts first
+   - for spreadsheet, chart, table, diagram, PDF-layout, or slide-structure work, read the artifact-aware payload rather than only the unit summary:
+     - `matched_artifacts`
+     - `focus_render_assets`
+     - `recommended_hybrid_targets`
+     - `artifact_index.json`
+     - `visual_layout/*.json`
+     - `spreadsheet_workbook.json`
+     - `spreadsheet_sheet/*.json`
+     - `pdf_document.json`
+     - `semantic_overlay/*.json` when present
+   - if the composition task still depends on unresolved hard-artifact semantics, prefer a narrowed source-scoped hybrid refresh before source fallback
+     - write the current-turn `hybrid_refresh_work.json`
+     - complete the selected source's current hybrid candidates
+     - rerun retrieve and trace before drafting the final synthesis
    - inspect direct source files or rerender only when the published-artifact plan says the knowledge base is insufficient for style, visual structure, or low-level detail
    - bring in external verification or stable model knowledge only when the composition task genuinely needs it, and keep the support basis explicit
 3. Start complex work with a visible method or plan summary before diving into the deeper evidence loop.
 4. Keep the work evidence-backed rather than speculative.
-5. Do not route simple direct factual questions into composition just because the wording is polite or open-ended.
-6. Write the main user-facing result to the canonical answer file under `runtime/answers/`.
+5. For compare or synthesis tasks, keep an explicit support ledger while drafting:
+   - which source or unit supports each major claim
+   - which artifact supports each visual, tabular, or layout-sensitive claim
+   - whether the current support set still lacks balance across compared documents
+6. Do not route simple direct factual questions into composition just because the wording is polite or open-ended.
+7. Write the main user-facing result to the canonical answer file under `runtime/answers/`.
    - keep that canonical answer file for the final result only, not process chatter
-7. When structured drafting or research artifacts help, place them under `runtime/agent-work/<conversation_id>/<turn_id>/`.
+8. When structured drafting or research artifacts help, place them under `runtime/agent-work/<conversation_id>/<turn_id>/`.
    - keep a bundle manifest
    - keep at least one research-notes artifact
    - add draft artifacts when needed
-8. Run final provenance tracing over the answer file when the result makes source-grounded claims.
-9. Return the main result plus any relevant bundle paths, support boundary, overall support basis, and next steps to the main agent.
+9. Run final provenance tracing over the answer file when the result makes source-grounded claims.
+10. Return the main result plus any relevant bundle paths, support boundary, overall support basis, and next steps to the main agent.
 
 ## Escalation Rules
 
@@ -54,6 +72,7 @@ If the environment cannot inspect the required evidence, stop and explain the bl
 - If style or visual constraints come from screenshots, preserve that boundary and inspect the stored attachments or renders before finalizing.
 - If the result still depends on unresolved design tradeoffs or weak evidence, qualify the output instead of presenting it as settled fact.
 - If source-reference resolution is only approximate or unresolved, keep that notice explicit in the composition boundary rather than pretending the cited source was matched exactly.
+- If visual or tabular claims are really artifact-level, do not cite only a loose source summary in your internal evidence notes. Carry the artifact grounding through the draft.
 - Do not let composition become a catch-all for simple factual lookup. The user should still get the narrowest honest workflow and evidence basis.
 - Do not create a growing list of special composition subtypes for odd questions. Prefer the shared evidence-channel model and published affordance layer instead.
 

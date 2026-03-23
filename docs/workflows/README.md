@@ -58,6 +58,19 @@ Ordinary users should not need to name them before asking questions.
 These are follow-on workflows used by sync when staged authoring or repair work is required.
 Under the current autonomous sync design, they are compatibility or recovery workflows rather than
 the normal operator end state.
+After the latest Phase 3 follow-on work, the deterministic sync lane may also leave staged
+high-value `semantic_overlay/` opportunities for a capable multimodal host agent. The machine-
+readable queue for that work is `knowledge_base/staging/hybrid_work.json`.
+Those overlays remain additive sidecars and do not replace the deterministic `artifact_index`,
+`visual_layout`, `spreadsheet_*`, or `pdf_document` contracts.
+When that queue remains non-empty, treat deterministic publication as successful but hybrid closure
+as still pending. The canonical workflow should surface that boundary explicitly rather than calling
+the multimodal lane completed.
+The current hybrid queue now distinguishes:
+
+- `candidate-prepared` for queued work with no real overlay coverage yet
+- `partially-covered` for sources or units where some required slots are covered or explicitly blocked
+- `covered` only when the current required slots are satisfied without hidden remaining work
 
 ## Default Operating Paths
 
@@ -87,6 +100,8 @@ with [`docs/setup/manual-workspace-recovery.md`](../setup/manual-workspace-recov
 7. If that marker is missing, stale after a repo move, or clearly non-ready, let the ask path attempt silent bootstrap or repair before surfacing manual setup work.
 8. If the published knowledge base is stale but still usable, answer with one concise freshness notice only when the answer path actually depends on the workspace corpus.
 9. If the question is `workspace-corpus`, the environment is ready, and fresh local state is genuinely needed, let the ask path run its concise auto-sync before answering.
+10. If published retrieval says the KB is insufficient because of hard-artifact semantic gaps, prefer a narrowed hybrid refresh over raw source fallback when the environment can inspect renders.
+11. For narrowed hybrid refresh, use `recommended_hybrid_targets` plus the current-turn `hybrid_refresh_work.json` packet rather than inventing an ad hoc multimodal scope.
 
 ## Odd Question Handling
 
@@ -121,6 +136,21 @@ The expected operating rule is:
 
 This keeps the product surface compact while still supporting non-typical white-collar questions.
 
+For artifact-aware work such as spreadsheets, charts, tables, diagrams, PDF layout, slide
+structure, hidden sheets, or compare tasks, agents should keep the user-facing artifact language
+in the working query and inspect the published artifact-aware payload directly:
+
+- `matched_artifacts`
+- `matched_artifact_ids`
+- `focus_render_assets`
+- `recommended_hybrid_targets`
+- artifact `section_path`, `caption_text`, `continuation_group_ids`, `procedure_hints`
+- artifact-aware score details such as `structure_context_bonus`, `semantic_overlay_bonus`, and
+  `compare_coverage_bonus`
+
+Soft document aliases should not collapse these queries to one source when the real task is
+artifact-level retrieval or cross-source comparison.
+
 ## Environment Preparation Notes
 
 - `./scripts/bootstrap-workspace.sh --yes` is the preferred zero-to-working launcher from a raw checkout.
@@ -130,6 +160,7 @@ This keeps the product surface compact while still supporting non-typical white-
 - The project runtime itself remains isolated inside repo-local `.venv`.
 - Once `.venv` exists, prefer `./.venv/bin/python -m docmason ...` or the CLI inside `.venv` for ordinary workspace operations.
 - For Office rendering, install LibreOffice before syncing PowerPoint, Word, or Excel sources, including legacy `.ppt`, `.doc`, and `.xls` files.
+- For PDF corpora, keep the repo-local PDF stack installed: `PyMuPDF`, `pypdfium2`, `pypdf`, and `pillow`.
 - Markdown, plain text, `.eml`, and the lightweight-compatible text-like inputs do not require LibreOffice.
 - On macOS with Homebrew, prefer letting the bootstrap launcher or `docmason prepare --yes` auto-install LibreOffice when required, or use `brew install --cask libreoffice-still`.
 - On macOS without Homebrew, download the official installer from `https://www.libreoffice.org/download/download/`, open the `.dmg`, and drag LibreOffice into `/Applications`.

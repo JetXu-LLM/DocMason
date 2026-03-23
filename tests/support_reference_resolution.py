@@ -14,6 +14,8 @@ from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import _effective_source_ids_from_reference, run_retrieval_query
 from docmason.source_references import (
     build_reference_resolution_summary,
+    build_source_reference_fields,
+    build_unit_reference_fields,
     resolve_reference_query,
 )
 
@@ -287,6 +289,173 @@ class ReferenceResolutionTests(unittest.TestCase):
             all(item["source_id"] == deck_source_id for item in report.payload["results"])
         )
 
+    def test_compare_query_does_not_hard_filter_to_one_resolved_source(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_pdf_corpus(workspace)
+
+        report = retrieve_knowledge(
+            query="compare Campaign Planning Brief and Architecture Strategy Companion",
+            top=5,
+            graph_hops=1,
+            include_renders=False,
+            paths=workspace,
+        )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["filters"]["source_ids"], [])
+        self.assertFalse(report.payload["reference_resolution"]["source_narrowing_allowed"])
+        self.assertGreaterEqual(len(report.payload["results"]), 2)
+
+    def test_compare_query_with_document_hints_still_avoids_source_narrowing(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_pdf_corpus(workspace)
+
+        report = retrieve_knowledge(
+            query="compare Campaign Planning Brief pdf and Architecture Strategy Companion docx",
+            top=5,
+            graph_hops=1,
+            include_renders=False,
+            paths=workspace,
+        )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["filters"]["source_ids"], [])
+        self.assertFalse(report.payload["reference_resolution"]["source_narrowing_allowed"])
+        self.assertGreaterEqual(len(report.payload["results"]), 2)
+
+    def test_artifact_hint_query_does_not_over_narrow_to_soft_source_alias(self) -> None:
+        retrieval_data = {
+            "manifest": {"source_signature": "reference-resolution-test"},
+            "source_records": [
+                {
+                    "source_id": "md-1",
+                    "current_path": "original_doc/gcs/evaluation-cycle.md",
+                    "document_type": "markdown",
+                    "source_family": "corpus",
+                    "title": "GCS Evaluation Cycle",
+                    "summary_en": "A markdown landing page.",
+                    "summary_source": "A markdown landing page.",
+                    "searchable_text": "GCS Evaluation Cycle landing page",
+                    "available_channels": ["text", "structure"],
+                    "channel_descriptors": {},
+                    "citation_density": 0,
+                    "trust_prior": {},
+                },
+                {
+                    "source_id": "pdf-1",
+                    "current_path": "original_doc/gcs/gcs-evaluation-cycle-2024.pdf",
+                    "document_type": "pdf",
+                    "source_family": "corpus",
+                    "title": "GCS Evaluation Cycle February 2024",
+                    "summary_en": "Diagram-rich PDF guide.",
+                    "summary_source": "Diagram-rich PDF guide.",
+                    "searchable_text": "Diagram A illustrates the GCS Evaluation Cycle",
+                    "available_channels": ["text", "render", "structure"],
+                    "channel_descriptors": {},
+                    "citation_density": 0,
+                    "trust_prior": {},
+                },
+            ],
+            "unit_records": [
+                {
+                    "source_id": "md-1",
+                    "current_path": "original_doc/gcs/evaluation-cycle.md",
+                    "document_type": "markdown",
+                    "source_family": "corpus",
+                    "unit_id": "section-001",
+                    "unit_type": "section",
+                    "ordinal": 1,
+                    "title": "GCS Evaluation Cycle",
+                    "text": "Landing page overview",
+                    "structure_summary": '{"heading": "GCS Evaluation Cycle"}',
+                    "available_channels": ["text", "structure"],
+                    "channel_descriptors": {},
+                    "citation_density": 0,
+                    "locator_aliases": ["GCS Evaluation Cycle"],
+                },
+                {
+                    "source_id": "pdf-1",
+                    "current_path": "original_doc/gcs/gcs-evaluation-cycle-2024.pdf",
+                    "document_type": "pdf",
+                    "source_family": "corpus",
+                    "unit_id": "page-009",
+                    "unit_type": "page",
+                    "ordinal": 9,
+                    "title": "Page 9",
+                    "text": "Diagram A illustrates the GCS Evaluation Cycle",
+                    "structure_summary": (
+                        '{"ordinal": 9, "text_excerpt": '
+                        '"Diagram A illustrates the GCS Evaluation Cycle"}'
+                    ),
+                    "available_channels": ["text", "render", "structure"],
+                    "channel_descriptors": {},
+                    "citation_density": 0,
+                    "locator_aliases": ["Page 9", "Diagram A"],
+                },
+            ],
+            "artifact_records": [
+                {
+                    "source_id": "pdf-1",
+                    "current_path": "original_doc/gcs/gcs-evaluation-cycle-2024.pdf",
+                    "document_type": "pdf",
+                    "source_family": "corpus",
+                    "artifact_id": "page-009:chart-001",
+                    "artifact_type": "chart",
+                    "unit_id": "page-009",
+                    "title": "Diagram A chart",
+                    "artifact_path": "visual_layout/page-009.json",
+                    "locator_aliases": ["Diagram A", "GCS Evaluation Cycle chart"],
+                    "available_channels": ["text", "render", "structure"],
+                    "render_references": ["renders/page-009.png"],
+                    "render_page_span": {"start": 9, "end": 9},
+                    "bbox": None,
+                    "normalized_bbox": None,
+                    "graph_promoted": True,
+                    "visual_hints": [],
+                    "linked_text": "Diagram A illustrates the GCS Evaluation Cycle",
+                    "section_path": ["The GCS Evaluation Cycle"],
+                    "caption_text": "Diagram A illustrates the GCS Evaluation Cycle",
+                    "continuation_group_ids": [],
+                    "procedure_hints": [],
+                    "semantic_labels": [],
+                    "semantic_confidence": None,
+                    "derivation_mode": "deterministic",
+                    "semantic_overlay_asset": None,
+                    "searchable_text": "Diagram A illustrates the GCS Evaluation Cycle",
+                }
+            ],
+            "graph_edges": [],
+        }
+
+        reference_resolution = resolve_reference_query(
+            "Diagram A GCS evaluation cycle",
+            source_records=retrieval_data["source_records"],
+            unit_records=retrieval_data["unit_records"],
+        )
+        self.assertFalse(reference_resolution["source_narrowing_allowed"])
+        filtered_source_ids = _effective_source_ids_from_reference([], reference_resolution)
+        self.assertEqual(filtered_source_ids, [])
+
+        result = run_retrieval_query(
+            retrieval_data,
+            query="Diagram A GCS evaluation cycle",
+            top=2,
+            graph_hops=0,
+            document_types=[],
+            source_ids=filtered_source_ids,
+            include_renders=False,
+            reference_resolution=reference_resolution,
+        )
+
+        self.assertEqual(result["results"][0]["source_id"], "pdf-1")
+        self.assertTrue(result["results"][0]["matched_artifact_ids"])
+
     def test_prior_path_still_resolves_after_rename(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -446,6 +615,124 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.assertEqual(resolution["resolved_unit_id"], "sheet-002")
         self.assertIn("A14", str(resolution["parsed_locator_ref"]))
 
+    def test_xlsx_reverse_sheet_alias_narrows_retrieval_to_resolved_source(self) -> None:
+        workbook_source_manifest = {
+            "source_id": "workbook-1",
+            "current_path": (
+                "original_doc/reviews/round1/"
+                "Evaluation Score Card_Round 1_Bravo.xlsx"
+            ),
+            "document_type": "xlsx",
+            "source_family": "corpus",
+            "title": "Evaluation Score Card Round 1 Bravo",
+        }
+        distractor_source_manifest = {
+            "source_id": "other-book",
+            "current_path": "original_doc/other/legend-deck.pdf",
+            "document_type": "pdf",
+            "source_family": "corpus",
+            "title": "Legend Deck",
+        }
+        workbook_unit = {
+            "source_id": "workbook-1",
+            "current_path": workbook_source_manifest["current_path"],
+            "document_type": "xlsx",
+            "source_family": "corpus",
+            "unit_id": "sheet-001",
+            "unit_type": "sheet",
+            "ordinal": 1,
+            "title": "Notice",
+            "sheet_name": "Notice",
+            "text": "Legend ranging from 0 to 5.",
+            "structure_summary": '{"sheet_name": "Notice"}',
+        }
+        distractor_unit = {
+            "source_id": "other-book",
+            "current_path": distractor_source_manifest["current_path"],
+            "document_type": "pdf",
+            "source_family": "corpus",
+            "unit_id": "page-001",
+            "unit_type": "page",
+            "ordinal": 1,
+            "title": "Legend Page",
+            "text": "Red yellow green face icons.",
+            "structure_summary": '{"ordinal": 1}',
+        }
+        source_records = [
+            {
+                **workbook_source_manifest,
+                **build_source_reference_fields(
+                    workbook_source_manifest,
+                    title=str(workbook_source_manifest["title"]),
+                ),
+            },
+            {
+                **distractor_source_manifest,
+                **build_source_reference_fields(
+                    distractor_source_manifest,
+                    title=str(distractor_source_manifest["title"]),
+                ),
+            },
+        ]
+        unit_records = [
+            {
+                **workbook_unit,
+                **build_unit_reference_fields(
+                    workbook_source_manifest,
+                    workbook_unit,
+                    structure_data={"sheet_name": "Notice"},
+                    text_content=str(workbook_unit["text"]),
+                ),
+            },
+            {
+                **distractor_unit,
+                **build_unit_reference_fields(
+                    distractor_source_manifest,
+                    distractor_unit,
+                    structure_data={"ordinal": 1},
+                    text_content=str(distractor_unit["text"]),
+                ),
+            },
+        ]
+
+        resolution = resolve_reference_query(
+            (
+                "In the Bravo evaluation score card notice sheet, what do the red, "
+                "yellow, and green face icons mean?"
+            ),
+            source_records=source_records,
+            unit_records=unit_records,
+        )
+
+        self.assertEqual(resolution["status"], "approximate")
+        self.assertEqual(resolution["resolved_source_id"], "workbook-1")
+        self.assertEqual(resolution["resolved_unit_id"], "sheet-001")
+        self.assertEqual(resolution["unit_match_status"], "exact")
+
+        filtered_source_ids = _effective_source_ids_from_reference([], resolution)
+        self.assertEqual(filtered_source_ids, ["workbook-1"])
+
+        result = run_retrieval_query(
+            {
+                "manifest": {"source_signature": "reference-resolution-xlsx-sheet"},
+                "source_records": source_records,
+                "unit_records": unit_records,
+                "artifact_records": [],
+                "graph_edges": [],
+            },
+            query=(
+                "In the Bravo evaluation score card notice sheet, what do the red, "
+                "yellow, and green face icons mean?"
+            ),
+            top=3,
+            graph_hops=0,
+            document_types=[],
+            source_ids=filtered_source_ids,
+            include_renders=False,
+            reference_resolution=resolution,
+        )
+        self.assertEqual(result["results"][0]["source_id"], "workbook-1")
+
     def test_docx_heading_alias_is_best_effort(self) -> None:
         source_records = [
             {
@@ -489,9 +776,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         rules_engine_path = (
             "original_doc/Architecture documents/Modernize Business Rules Workflow.pdf"
         )
-        rules_engine_searchable = (
-            "Modernize Business Rules Workflow current state pain points"
-        )
+        rules_engine_searchable = "Modernize Business Rules Workflow current state pain points"
         retrieval_data = {
             "manifest": {"source_signature": "reference-resolution-test"},
             "source_records": [
@@ -562,24 +847,22 @@ class ReferenceResolutionTests(unittest.TestCase):
         interaction_title = (
             "Interaction Memory for Architecture Review page-by-page authoring constraints"
         )
-        interaction_summary = (
-            "A related interaction memory with stronger broad lexical overlap."
-        )
+        interaction_summary = "A related interaction memory with stronger broad lexical overlap."
         interaction_searchable = (
-            "WIP Gate 2 Platform Review slide 35 page by page authoring constraints"
+            "WIP Milestone Platform Review slide 35 page by page authoring constraints"
         )
         retrieval_data = {
             "manifest": {"source_signature": "reference-resolution-test"},
             "source_records": [
                 {
                     "source_id": "deck-1",
-                    "current_path": "original_doc/WIP_Gate_2_Platform_Review.pptx",
+                    "current_path": "original_doc/WIP_Milestone_Platform_Review.pptx",
                     "document_type": "pptx",
                     "source_family": "corpus",
-                    "title": "Platform Operations Gate 2 Review",
-                    "summary_en": "Gate 2 review deck for platform operations.",
-                    "summary_source": "Gate 2 review deck for platform operations.",
-                    "searchable_text": "WIP Gate 2 Platform Review slide 35 target deck",
+                    "title": "Platform Operations Milestone Review",
+                    "summary_en": "Milestone review deck for platform operations.",
+                    "summary_source": "Milestone review deck for platform operations.",
+                    "searchable_text": "WIP Milestone Platform Review slide 35 target deck",
                     "available_channels": ["text", "render", "structure"],
                     "channel_descriptors": {},
                     "citation_density": 0,
@@ -607,7 +890,7 @@ class ReferenceResolutionTests(unittest.TestCase):
             "unit_records": [
                 {
                     "source_id": "deck-1",
-                    "current_path": "original_doc/WIP_Gate_2_Platform_Review.pptx",
+                    "current_path": "original_doc/WIP_Milestone_Platform_Review.pptx",
                     "document_type": "pptx",
                     "source_family": "corpus",
                     "unit_id": "slide-035",
@@ -616,8 +899,8 @@ class ReferenceResolutionTests(unittest.TestCase):
                     "logical_ordinal": 35,
                     "render_ordinal": 32,
                     "title": "Slide 35",
-                    "text": "WIP Gate 2 Platform Review target slide detail",
-                    "structure_summary": '{"ordinal": 35, "text_excerpt": "Gate 2 detail"}',
+                    "text": "WIP Milestone Platform Review target slide detail",
+                    "structure_summary": '{"ordinal": 35, "text_excerpt": "Milestone detail"}',
                 },
                 {
                     "source_id": "memory-1",
@@ -628,10 +911,9 @@ class ReferenceResolutionTests(unittest.TestCase):
                     "unit_type": "interaction-turn",
                     "ordinal": 11,
                     "title": "Conversation turn 11",
-                    "text": "WIP Gate 2 Platform Review page by page authoring constraints",
+                    "text": "WIP Milestone Platform Review page by page authoring constraints",
                     "structure_summary": (
-                        '{"ordinal": 11, "text_excerpt": '
-                        '"page by page authoring constraints"}'
+                        '{"ordinal": 11, "text_excerpt": "page by page authoring constraints"}'
                     ),
                 },
             ],
@@ -650,7 +932,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         )
         result = run_retrieval_query(
             retrieval_data,
-            query="WIP Gate 2 Platform Review slide 35",
+            query="WIP Milestone Platform Review slide 35",
             top=5,
             graph_hops=0,
             document_types=None,

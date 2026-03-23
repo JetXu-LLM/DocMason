@@ -42,8 +42,10 @@ class FoundationAndContractTests(unittest.TestCase):
             ROOT / "scripts" / "update-docmason-core.py",
             ROOT / "scripts" / "check-repo-safety.py",
             ROOT / "scripts" / "install-git-hooks.sh",
+            ROOT / ".githooks" / "README.md",
             ROOT / ".githooks" / "pre-commit",
             ROOT / ".githooks" / "pre-push",
+            ROOT / ".github" / "copilot-instructions.md",
             ROOT / ".github" / "workflows" / "repository-checks.yml",
             ROOT / ".github" / "workflows" / "release-distributions.yml",
             ROOT / "sample_corpus" / "README.md",
@@ -144,6 +146,18 @@ class FoundationAndContractTests(unittest.TestCase):
         ]:
             self.assertIn(entry, text)
 
+    def test_committed_git_hooks_are_opt_in_and_layered(self) -> None:
+        hooks_readme = (ROOT / ".githooks" / "README.md").read_text(encoding="utf-8")
+        pre_commit = (ROOT / ".githooks" / "pre-commit").read_text(encoding="utf-8")
+        pre_push = (ROOT / ".githooks" / "pre-push").read_text(encoding="utf-8")
+        install_script = (ROOT / "scripts" / "install-git-hooks.sh").read_text(encoding="utf-8")
+
+        self.assertIn("opt-in", hooks_readme)
+        self.assertIn("./scripts/install-git-hooks.sh", hooks_readme)
+        self.assertIn("--staged-only", pre_commit)
+        self.assertNotIn("--staged-only", pre_push)
+        self.assertIn("config core.hooksPath .githooks", install_script)
+
     def test_config_declares_native_reference_workflow(self) -> None:
         text = (ROOT / "docmason.yaml").read_text(encoding="utf-8")
         required_snippets = [
@@ -156,9 +170,9 @@ class FoundationAndContractTests(unittest.TestCase):
             "publish_model: immutable-snapshot-plus-atomic-current-switch",
             (
                 "current_completed_phase: "
-                "phase-2-workspace-coordination-atomic-publish-and-projection-discipline"
+                "phase-3-spreadsheet-and-multimodal-evidence-compiler-deepening"
             ),
-            "next_phase: phase-3-spreadsheet-and-multimodal-evidence-compiler-deepening",
+            "next_phase: phase-4-governed-interaction-memory-and-operator-control-plane",
             "first_class_text:",
             "lightweight_text:",
         ]
@@ -187,10 +201,7 @@ class FoundationAndContractTests(unittest.TestCase):
             text,
         )
         self.assertIn(
-            (
-                "Phase 6b1, Pre-Learning Boundary, Answer Contract, and "
-                "Regression Closure"
-            ),
+            ("Phase 6b1, Pre-Learning Boundary, Answer Contract, and Regression Closure"),
             text,
         )
         self.assertIn("Phase 6b2, User-Native Source Reference Resolution", text)
@@ -208,7 +219,7 @@ class FoundationAndContractTests(unittest.TestCase):
             text,
         )
         self.assertIn(
-            "Phase 3, Spreadsheet and Multimodal Evidence Compiler Deepening: planned",
+            "Phase 3, Spreadsheet and Multimodal Evidence Compiler Deepening: implemented",
             text,
         )
         self.assertIn(
@@ -233,6 +244,18 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("public-sample-workspace", contributing)
         self.assertNotIn("evals/", readme)
         self.assertNotIn("evals/", contributing)
+
+    def test_copilot_instructions_stay_minimal_and_agents_first(self) -> None:
+        text = (ROOT / ".github" / "copilot-instructions.md").read_text(encoding="utf-8")
+        self.assertIn("Start by reading `AGENTS.md`.", text)
+        self.assertIn("minimal GitHub Copilot adaptation layer", text)
+        self.assertIn("view_image", text)
+        self.assertIn("main and sub agents", text)
+        self.assertIn("Do not assume Claude-specific helpers", text)
+
+    def test_gitignore_does_not_ignore_committed_copilot_instructions(self) -> None:
+        text = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertNotIn("/.github/copilot-instructions.md", text)
 
     def test_banned_private_style_vocabulary_is_absent_from_tests(self) -> None:
         for path in sorted((ROOT / "tests").glob("*.py")):

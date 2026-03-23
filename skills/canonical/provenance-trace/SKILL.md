@@ -23,6 +23,7 @@ If the agent cannot inspect the local trace artifacts or source evidence, stop a
 2. For citation-first tracing, run:
    - `docmason trace --source-id <source_id> --json`
    - optionally add `--unit-id <unit_id>` for unit-level detail
+   - keep DocMason workspace commands sequential inside the same workspace session; do not overlap `trace`, `retrieve`, `sync`, `status`, or `validate-kb` while a lease-owning command is still active
 3. For answer-first tracing, run:
    - `docmason trace --answer-file <path> --json`
    - or `docmason trace --session-id <session_id> --json`
@@ -34,6 +35,13 @@ If the agent cannot inspect the local trace artifacts or source evidence, stop a
    - incoming and outgoing relations
    - `answer_state`
    - grounding status for each answer segment
+   - `supporting_artifact_ids`
+   - segment `artifact_supports`
+   - segment `semantic_supports`
+   - `supporting_overlay_unit_ids`
+   - artifact `focus_render_assets` when present
+   - overlay consumed inputs, covered slots, and blocked slots when present
+   - artifact render refs, `render_page_span`, `bbox`, `normalized_bbox`, and sidecar paths when present
    - render-inspection requirements
    - compact supporting source and unit IDs
 5. If any segment is only partially grounded or unresolved, say so explicitly and avoid pretending stronger provenance than the trace supports.

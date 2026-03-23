@@ -46,6 +46,14 @@ DOCUMENT_HINT_PATTERN = re.compile(
     ),
     re.IGNORECASE,
 )
+ARTIFACT_HINT_PATTERN = re.compile(
+    r"\b(diagram|figure|chart|table|kpi|metric|dashboard|architecture|flow|screenshot|ui|image|picture|photo|caption|legend)\b",
+    re.IGNORECASE,
+)
+COMPARATIVE_HINT_PATTERN = re.compile(
+    r"\b(compare|versus|vs\.?|difference|between)\b",
+    re.IGNORECASE,
+)
 
 
 def _nonempty_string(value: Any) -> str | None:
@@ -372,6 +380,7 @@ def build_unit_reference_fields(
     if unit_type == "sheet" and sheet_name:
         locator_aliases.append(sheet_name)
         locator_aliases.append(f"sheet {sheet_name}")
+        locator_aliases.append(f"{sheet_name} sheet")
     if unit_type == "email-attachment":
         filename = _nonempty_string(structure.get("attachment_filename"))
         if filename is not None:
@@ -518,6 +527,42 @@ def _document_ref_detected(query: str, source_candidates: list[dict[str, Any]]) 
     if DOCUMENT_HINT_PATTERN.search(query):
         return True
     return any(bool(candidate.get("exact_source_match")) for candidate in source_candidates)
+
+
+def _alias_query_coverage(query: str, alias: str | None) -> float:
+    alias_text = _nonempty_string(alias)
+    if alias_text is None:
+        return 0.0
+    query_tokens = set(tokenize_text(query))
+    alias_tokens = set(tokenize_text(alias_text))
+    if not query_tokens or not alias_tokens:
+        return 0.0
+    return len(alias_tokens & query_tokens) / len(query_tokens)
+
+
+def _source_narrowing_allowed(
+    query: str,
+    *,
+    chosen_source: dict[str, Any] | None,
+    chosen_source_status: str | None,
+    parsed_locator: dict[str, Any],
+) -> bool:
+    if not isinstance(chosen_source, dict):
+        return False
+    if chosen_source_status != "exact":
+        return False
+    if COMPARATIVE_HINT_PATTERN.search(query):
+        return False
+    if DOCUMENT_HINT_PATTERN.search(query):
+        return True
+    locator_type = _nonempty_string(parsed_locator.get("locator_type"))
+    if locator_type in {"page", "slide", "sheet", "line", "row", "section"}:
+        return True
+    if _alias_query_coverage(query, chosen_source.get("matched_alias")) >= 0.5:
+        return True
+    if ARTIFACT_HINT_PATTERN.search(query):
+        return False
+    return True
 
 
 def _source_alias_match(
@@ -722,7 +767,11 @@ def _unit_locator_score(
         if alias in heading_aliases or alias in semantic_aliases:
             alias_score = min(alias_score, 31.0)
             alias_basis = alias_basis.replace("exact-", "approx-")
-        if alias_score > best_alias_score:
+        if alias_score > best_alias_score or (
+            alias_score == best_alias_score
+            and alias_basis.startswith("exact-")
+            and not str(best_alias_basis or "").startswith("exact-")
+        ):
             best_alias_score = alias_score
             best_alias_basis = alias_basis
             best_alias_text = alias
@@ -895,6 +944,7 @@ def resolve_reference_query(
             if isinstance(item.get("source_id"), str)
         ],
         "candidate_unit_ids": [],
+        "source_narrowing_allowed": False,
         "continued_with_best_effort": False,
         "notice_text": None,
     }
@@ -931,6 +981,12 @@ def resolve_reference_query(
         top = chosen_source
         match_basis = _string_list(result.get("match_basis"))
         result["match_basis"] = match_basis
+        result["source_narrowing_allowed"] = _source_narrowing_allowed(
+            query,
+            chosen_source=top,
+            chosen_source_status=chosen_source_status,
+            parsed_locator=parsed_locator,
+        )
         result["parsed_document_ref"] = {
             "raw_text": top.get("matched_alias"),
             "match_basis": _string_list(top.get("match_basis")),

@@ -28,7 +28,6 @@
   "handoff": {
     "completion_signal": "Return the final adapter sync status and freshness outcome to the main agent.",
     "artifacts": [
-      "CLAUDE.md",
       "adapters/claude/project-memory.md",
       "adapters/claude/workflow-routing.md"
     ],

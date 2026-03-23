@@ -12,6 +12,19 @@ INSPECTION_SCOPE_VALUES = {"source", "unit", "multi-unit"}
 AFFORDANCE_DERIVATION_MODE_VALUES = {"deterministic", "agent-authored", "hybrid"}
 AFFORDANCE_CONFIDENCE_VALUES = {"high", "medium", "low"}
 DEFAULT_AFFORDANCE_FILENAME = "derived_affordances.json"
+BLOCKING_HARD_ARTIFACT_GAP_HINTS = frozenset(
+    {
+        "image-only-page",
+        "scanned-page-like",
+        "weak-text-layer",
+        "text-layer-mismatch",
+        "rendered-only-picture",
+        "rendered-only-diagram-section",
+        "rendered-only-table",
+        "chart-table-semantic-gap",
+        "page-image-target",
+    }
+)
 
 
 def _deduplicate_strings(values: list[str]) -> list[str]:
@@ -115,9 +128,7 @@ def flatten_channel_descriptors(value: Any) -> str:
     """Collapse channel descriptors into searchable plain text."""
     descriptors = _normalize_channel_descriptors(value)
     return "\n".join(
-        descriptor
-        for channel in PUBLISHED_EVIDENCE_CHANNELS
-        for descriptor in descriptors[channel]
+        descriptor for channel in PUBLISHED_EVIDENCE_CHANNELS for descriptor in descriptors[channel]
     ).strip()
 
 
@@ -165,12 +176,25 @@ def _structure_descriptors(
         if isinstance(blocks, list) and blocks:
             descriptors.append(f"Section structure contains {len(blocks)} extracted blocks.")
         table_count = sum(
-            1
-            for block in blocks
-            if isinstance(block, dict) and str(block.get("kind")) == "table"
+            1 for block in blocks if isinstance(block, dict) and str(block.get("kind")) == "table"
         )
         if table_count:
             descriptors.append(f"Section structure contains {table_count} table blocks.")
+        headings = structure_data.get("headings", [])
+        if isinstance(headings, list) and headings:
+            descriptors.append(
+                "Section headings include: " + ", ".join(str(value) for value in headings[:3])
+            )
+        procedure_spans = structure_data.get("procedure_spans", [])
+        if isinstance(procedure_spans, list) and procedure_spans:
+            descriptors.append(
+                f"Section structure contains {len(procedure_spans)} procedure-like spans."
+            )
+        captions = structure_data.get("captions", [])
+        if isinstance(captions, list) and captions:
+            descriptors.append(
+                "Section captions include: " + ", ".join(str(value) for value in captions[:2])
+            )
     elif unit_type == "sheet":
         max_row = structure_data.get("max_row")
         max_column = structure_data.get("max_column")
@@ -205,16 +229,10 @@ def _unit_affordance(
         render_refs.append(rendered_asset)
     render_reference_ids = unit.get("render_reference_ids", [])
     if isinstance(render_reference_ids, list):
-        render_refs.extend(
-            item for item in render_reference_ids if isinstance(item, str) and item
-        )
+        render_refs.extend(item for item in render_reference_ids if isinstance(item, str) and item)
     render_refs = _deduplicate_strings(render_refs)
     media_refs = _deduplicate_strings(
-        [
-            item
-            for item in unit.get("embedded_media", [])
-            if isinstance(item, str) and item
-        ]
+        [item for item in unit.get("embedded_media", []) if isinstance(item, str) and item]
         + _media_refs_from_structure(structure_data)
     )
     notes_text = _notes_text_from_structure(structure_data)
@@ -222,9 +240,7 @@ def _unit_affordance(
     channel_descriptors: dict[str, list[str]] = {
         channel: [] for channel in PUBLISHED_EVIDENCE_CHANNELS
     }
-    evidence_refs: dict[str, list[str]] = {
-        channel: [] for channel in PUBLISHED_EVIDENCE_CHANNELS
-    }
+    evidence_refs: dict[str, list[str]] = {channel: [] for channel in PUBLISHED_EVIDENCE_CHANNELS}
     available_channels: list[str] = []
 
     if text:
@@ -295,9 +311,7 @@ def derive_source_affordances(
     channel_descriptors: dict[str, list[str]] = {
         channel: [] for channel in PUBLISHED_EVIDENCE_CHANNELS
     }
-    evidence_refs: dict[str, list[str]] = {
-        channel: [] for channel in PUBLISHED_EVIDENCE_CHANNELS
-    }
+    evidence_refs: dict[str, list[str]] = {channel: [] for channel in PUBLISHED_EVIDENCE_CHANNELS}
 
     title = str((knowledge or {}).get("title") or source_manifest.get("current_path") or "")
     summary_en = str((knowledge or {}).get("summary_en") or "").strip()
@@ -469,9 +483,9 @@ def merge_derived_affordances(
                     channel,
                     [],
                 )
-                + _normalize_channel_descriptors(
-                    existing_unit.get("channel_descriptors", {})
-                ).get(channel, [])
+                + _normalize_channel_descriptors(existing_unit.get("channel_descriptors", {})).get(
+                    channel, []
+                )
             )
             for channel in PUBLISHED_EVIDENCE_CHANNELS
         }
@@ -503,9 +517,7 @@ def validate_derived_affordances(
     if payload.get("source_id") != source_manifest.get("source_id"):
         errors.append("derived_affordances.json source_id must match source_manifest.json")
     if payload.get("source_fingerprint") != source_manifest.get("source_fingerprint"):
-        errors.append(
-            "derived_affordances.json source_fingerprint must match source_manifest.json"
-        )
+        errors.append("derived_affordances.json source_fingerprint must match source_manifest.json")
     if payload.get("derivation_mode") not in AFFORDANCE_DERIVATION_MODE_VALUES:
         errors.append("derived_affordances.json must use a supported derivation_mode")
     if payload.get("confidence") not in AFFORDANCE_CONFIDENCE_VALUES:
@@ -583,9 +595,7 @@ def channel_descriptors_from_record(record: dict[str, Any]) -> dict[str, list[st
     explicit = _normalize_channel_descriptors(record.get("channel_descriptors", {}))
     if any(explicit[channel] for channel in PUBLISHED_EVIDENCE_CHANNELS):
         return explicit
-    descriptors: dict[str, list[str]] = {
-        channel: [] for channel in PUBLISHED_EVIDENCE_CHANNELS
-    }
+    descriptors: dict[str, list[str]] = {channel: [] for channel in PUBLISHED_EVIDENCE_CHANNELS}
     title = str(record.get("title") or "").strip()
     if title:
         descriptors["text"].append(title)
@@ -639,23 +649,104 @@ def _channels_from_results(
         for result in results:
             if isinstance(result, dict):
                 channels.extend(available_channels_from_record(result))
+                matched_artifacts = result.get("matched_artifacts", [])
+                if isinstance(matched_artifacts, list):
+                    for artifact in matched_artifacts:
+                        if isinstance(artifact, dict):
+                            channels.extend(available_channels_from_record(artifact))
                 matched_units = result.get("matched_units", [])
                 if isinstance(matched_units, list):
                     for unit in matched_units:
                         if isinstance(unit, dict):
                             channels.extend(available_channels_from_record(unit))
+                            matched_artifacts = unit.get("matched_artifacts", [])
+                            if isinstance(matched_artifacts, list):
+                                for artifact in matched_artifacts:
+                                    if isinstance(artifact, dict):
+                                        channels.extend(available_channels_from_record(artifact))
         return _deduplicate_strings(channels)
     for result in results:
         if not isinstance(result, dict):
             continue
+        matched_artifacts = result.get("matched_artifacts", [])
+        if isinstance(matched_artifacts, list):
+            for artifact in matched_artifacts:
+                if isinstance(artifact, dict):
+                    channels.extend(available_channels_from_record(artifact))
         matched_units = result.get("matched_units", [])
         if isinstance(matched_units, list) and matched_units:
             for unit in matched_units:
                 if isinstance(unit, dict):
                     channels.extend(available_channels_from_record(unit))
+                    matched_artifacts = unit.get("matched_artifacts", [])
+                    if isinstance(matched_artifacts, list):
+                        for artifact in matched_artifacts:
+                            if isinstance(artifact, dict):
+                                channels.extend(available_channels_from_record(artifact))
         else:
             channels.extend(available_channels_from_record(result))
     return _deduplicate_strings(channels)
+
+
+def _semantic_gap_hints_from_record(record: dict[str, Any]) -> list[str]:
+    value = record.get("semantic_gap_hints", [])
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _record_has_overlay_coverage(record: dict[str, Any]) -> bool:
+    semantic_labels = record.get("semantic_labels", [])
+    semantic_overlay_asset = record.get("semantic_overlay_asset")
+    return bool(
+        isinstance(semantic_labels, list)
+        and any(isinstance(item, str) and item.strip() for item in semantic_labels)
+    ) or bool(isinstance(semantic_overlay_asset, str) and semantic_overlay_asset.strip())
+
+
+def _published_hard_artifact_gap_reason(results: list[dict[str, Any]]) -> str:
+    messages: list[str] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        source_label = str(result.get("title") or result.get("source_id") or "source")
+        matched_artifacts = result.get("matched_artifacts", [])
+        if isinstance(matched_artifacts, list):
+            for artifact in matched_artifacts:
+                if not isinstance(artifact, dict):
+                    continue
+                gap_hints = [
+                    hint
+                    for hint in _semantic_gap_hints_from_record(artifact)
+                    if hint in BLOCKING_HARD_ARTIFACT_GAP_HINTS
+                ]
+                if gap_hints and not _record_has_overlay_coverage(artifact):
+                    messages.append(
+                        f"{source_label} artifact "
+                        f"{artifact.get('artifact_id') or artifact.get('title')}: "
+                        + ", ".join(gap_hints[:3])
+                    )
+        matched_units = result.get("matched_units", [])
+        if isinstance(matched_units, list):
+            for unit in matched_units:
+                if not isinstance(unit, dict):
+                    continue
+                gap_hints = [
+                    hint
+                    for hint in _semantic_gap_hints_from_record(unit)
+                    if hint in BLOCKING_HARD_ARTIFACT_GAP_HINTS
+                ]
+                page_image_artifact_id = unit.get("page_image_artifact_id")
+                if isinstance(page_image_artifact_id, str) and page_image_artifact_id:
+                    gap_hints.append("page-image-target")
+                gap_hints = _deduplicate_strings(gap_hints)
+                if gap_hints and not _record_has_overlay_coverage(unit):
+                    messages.append(
+                        f"{source_label} unit {unit.get('unit_id')}: " + ", ".join(gap_hints[:3])
+                    )
+        if messages:
+            break
+    return "; ".join(messages[:2])
 
 
 def plan_published_evidence(
@@ -678,9 +769,20 @@ def plan_published_evidence(
         published_artifacts_sufficient = set(preferred_channels).issubset(set(matched_channels))
     else:
         published_artifacts_sufficient = bool(results)
+    hard_artifact_gap_reason = _published_hard_artifact_gap_reason(results)
+    if published_artifacts_sufficient and hard_artifact_gap_reason:
+        published_artifacts_sufficient = False
 
     source_escalation_required = prefer_published_artifacts and not published_artifacts_sufficient
-    if results and preferred_channels and source_escalation_required:
+    if source_escalation_required and hard_artifact_gap_reason:
+        reason = (
+            "Published deterministic artifacts still expose unresolved "
+            "hard-artifact semantic gaps. Run hybrid multimodal enrichment "
+            "before relying on source-level fallback: "
+            + hard_artifact_gap_reason
+            + "."
+        )
+    elif results and preferred_channels and source_escalation_required:
         missing_channels = [
             channel for channel in preferred_channels if channel not in matched_channels
         ]

@@ -33,9 +33,21 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
 3. Run `docmason retrieve "<query>" --json` for the initial question or sub-question when KB evidence is part of the answer path.
    - prefer published affordance sidecars and already-published evidence channels over ad hoc source inspection
    - inspect `reference_resolution` first when the user has named a document or locator in user-native terms
+   - keep DocMason workspace commands sequential inside the same live answer path; do not overlap `retrieve`, `trace`, `sync`, `status`, or `validate-kb` while a lease-owning step is still running
 4. Inspect the strongest evidence bundles, matched units, graph expansions, render references, and published-evidence sufficiency judgment.
    - when `reference_resolution.status` is `exact`, preserve that narrowing and do not let neighboring documents silently dilute it
+   - when `reference_resolution.status` is `approximate` but `unit_match_status` is `exact`, preserve the approximate notice but still treat the resolved source narrowing as intentional
    - when `reference_resolution.status` is `approximate` or `unresolved`, keep the inline notice and answer wording honest about that boundary
+   - when the question is artifact-sensitive, inspect artifact-aware retrieval payloads explicitly:
+     - `matched_artifacts`
+     - `matched_artifact_ids`
+     - `focus_render_assets`
+     - `recommended_hybrid_targets`
+     - artifact `section_path`, `caption_text`, `continuation_group_ids`, `procedure_hints`, and `semantic_labels`
+     - score details such as `structure_context_bonus`, `semantic_overlay_bonus`, and `compare_coverage_bonus`
+   - when published sufficiency fails because of hard-artifact semantic gaps, route back through `knowledge-base-sync` for a narrowed hybrid refresh before jumping to raw source inspection
+     - use `recommended_hybrid_targets` as the query-aware narrowing entrypoint
+     - once Lane C picks a source, complete that source's current hybrid candidates before treating the ask as ready to answer, unless a concrete blocker remains
 5. Run provenance tracing for the strongest support when you need corroboration, contradiction checks, or answer-state clarification:
    - `docmason trace --source-id <source_id> --json`
    - `docmason trace --answer-file <path> --json`
@@ -45,10 +57,18 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
    - a cited unit has little or no text but does have rendered evidence
    - layout, tables, diagrams, screenshots, or visual style are part of the answer boundary
    - the odd-question plan explicitly prefers `render` or `media`
+   - artifact supports expose `render_page_span`, `bbox`, or `normalized_bbox` that materially narrow what must be checked
+   - artifact or segment supports expose `focus_render_assets`, which should be preferred over full-page renders when present
 7. Draft the canonical answer file under `runtime/answers/` when conversation context exists.
    - if you need auxiliary drafts or exported scratch artifacts and the user did not specify a path, place them under `runtime/agent-work/`
 8. When the answer is externally verified, persist the lightweight external support manifest before or alongside the final trace so the combined support contract stays machine-readable.
 9. Run `docmason trace --answer-file <path> --json` as the final grounding check.
+   - when the answer depends on artifact-level support, inspect:
+     - `supporting_artifact_ids`
+     - segment `artifact_supports`
+     - segment `semantic_supports`
+     - any overlay `covered_slots`, `blocked_slots`, and consumed render inputs when present
+     - render refs, page spans, and region boxes when present
 10. Emit one of these final answer states:
    - `grounded`
    - `partially-grounded`
@@ -63,6 +83,7 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
 - If the final answer trace still requires render inspection, inspect the cited renders before issuing a confident answer.
 - If the evidence is contradictory, ambiguous, or insufficient, qualify the answer or abstain.
 - If source-reference resolution only succeeded approximately, do not phrase the answer as though the cited document or locator was matched exactly.
+- If the answer is comparative, do not finalize it from a support set dominated by one source when the trace or retrieval payload still shows weak comparative coverage.
 - Do not treat retrieval alone as a complete grounded-answer workflow.
 - If published KB artifacts already satisfy the required evidence channels, do not rerender source files or rummage through `original_doc/` as a first reflex.
 

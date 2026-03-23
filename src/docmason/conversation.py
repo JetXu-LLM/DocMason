@@ -78,6 +78,14 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["version_context"] = None
     if "capability_profile" not in turn:
         turn["capability_profile"] = None
+    if "hybrid_refresh_triggered" not in turn:
+        turn["hybrid_refresh_triggered"] = False
+    if "hybrid_refresh_sources" not in turn:
+        turn["hybrid_refresh_sources"] = []
+    if "hybrid_refresh_completion_status" not in turn:
+        turn["hybrid_refresh_completion_status"] = None
+    if "hybrid_refresh_summary" not in turn:
+        turn["hybrid_refresh_summary"] = None
     return turn
 
 
@@ -291,6 +299,10 @@ def base_turn_record(
         "auto_sync_triggered": False,
         "auto_sync_reason": None,
         "auto_sync_summary": None,
+        "hybrid_refresh_triggered": False,
+        "hybrid_refresh_sources": [],
+        "hybrid_refresh_completion_status": None,
+        "hybrid_refresh_summary": None,
         "session_ids": [],
         "trace_ids": [],
         "captured_interaction_ids": [],

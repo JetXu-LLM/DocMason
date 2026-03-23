@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .hybrid import narrowed_hybrid_sources
 from .project import WorkspacePaths, read_json, write_json
 from .routing import (
     normalize_question_analysis,
@@ -54,6 +55,56 @@ def support_manifest_path(
 ) -> Path:
     """Return the canonical runtime path for one external support manifest."""
     return paths.agent_work_dir / conversation_id / turn_id / "external-support-manifest.json"
+
+
+def hybrid_refresh_work_path(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+) -> Path:
+    """Return the canonical runtime path for one narrowed hybrid-refresh packet."""
+    return paths.agent_work_dir / conversation_id / turn_id / "hybrid_refresh_work.json"
+
+
+def write_hybrid_refresh_work(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    query: str,
+    source_ids: list[str],
+    recommended_targets: list[dict[str, Any]] | None = None,
+    target: str = "current",
+) -> str:
+    """Persist the narrowed Lane C work packet for the current ask turn."""
+    work_path = hybrid_refresh_work_path(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+    )
+    write_json(
+        work_path,
+        {
+            "generated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+            "target": target,
+            "query": query,
+            "selected_source_ids": [
+                source_id for source_id in source_ids if isinstance(source_id, str) and source_id
+            ],
+            "recommended_targets": [
+                target_item
+                for target_item in (recommended_targets or [])
+                if isinstance(target_item, dict)
+            ],
+            "sources": narrowed_hybrid_sources(
+                paths,
+                target=target,
+                source_ids=source_ids,
+            ),
+        },
+    )
+    return str(work_path.relative_to(paths.root))
 
 
 def load_support_manifest(
@@ -124,7 +175,12 @@ def write_external_support_manifest(
 def _retrieval_corpus_hints(paths: WorkspacePaths) -> list[str]:
     records = read_json(paths.retrieval_source_records_path("current")).get("records", [])
     if not isinstance(records, list):
-        return []
+        records = []
+    artifact_records = read_json(paths.retrieval_artifact_records_path("current")).get(
+        "records", []
+    )
+    if not isinstance(artifact_records, list):
+        artifact_records = []
     hints: list[str] = []
     for record in records:
         if not isinstance(record, dict):
@@ -136,6 +192,13 @@ def _retrieval_corpus_hints(paths: WorkspacePaths) -> list[str]:
         entities = record.get("entities", [])
         if isinstance(entities, list):
             hints.extend(value for value in entities if isinstance(value, str) and value.strip())
+    for record in artifact_records:
+        if not isinstance(record, dict):
+            continue
+        for field_name in ("title", "searchable_text", "linked_text"):
+            value = record.get(field_name)
+            if isinstance(value, str) and value.strip():
+                hints.append(value)
     return hints
 
 
@@ -179,9 +242,7 @@ def warm_start_evidence(
             value for value in record.get("trace_ids", []) if isinstance(value, str) and value
         )
         external_urls.extend(
-            value
-            for value in record.get("external_urls", [])
-            if isinstance(value, str) and value
+            value for value in record.get("external_urls", []) if isinstance(value, str) and value
         )
     return {
         "matched_records": [

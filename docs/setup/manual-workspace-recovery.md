@@ -112,6 +112,34 @@ Then rerun:
 .venv/bin/python -m docmason doctor --json
 ```
 
+## PDF Rendering And Region Extraction Requirement
+
+If the current source corpus includes `.pdf`, DocMason now expects the full repo-local PDF stack:
+
+- `PyMuPDF` for region-level visual extraction
+- `pypdfium2` for render generation
+- `pypdf` for conservative text and page handling
+- `pillow` for image output
+
+Preferred repair path:
+
+```bash
+.venv/bin/python -m pip install -e ".[dev]"
+```
+
+If you need a narrower manual repair inside an existing `.venv`:
+
+```bash
+.venv/bin/python -m pip install --upgrade PyMuPDF pypdfium2 pypdf pillow
+```
+
+Then rerun:
+
+```bash
+.venv/bin/python -m docmason doctor --json
+.venv/bin/python -m docmason status --json
+```
+
 ## Windows Or Non-Native Agent Environments
 
 Windows is not the primary supported DocMason platform in the current product contract.

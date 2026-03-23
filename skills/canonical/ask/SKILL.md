@@ -54,6 +54,9 @@ If the environment cannot satisfy those capabilities, stop and explain the block
      - `preferred_channels`
      - `inspection_scope`
      - `prefer_published_artifacts`
+   - preserve artifact-language in the working query rather than flattening it away:
+     - keep phrases such as `table`, `chart`, `diagram`, `figure`, `caption`, `legend`, `flow`, `UI`, `dashboard`, `hidden sheet`, `internal tab`, or `supporting tab`
+     - for compare-style questions, keep the compared objects explicit instead of collapsing them into one soft document alias
 4. When native chat history is available, reconcile the active thread back into DocMason conversation state before answering.
    - Preserve prior real user turns, screenshots, and tool-use audits instead of treating the current message as an isolated one-shot prompt.
 5. Choose the evidence basis before choosing the amount of repo mechanics to expose:
@@ -81,10 +84,25 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 9. When answering:
    - decompose the question only when needed
    - run repeated retrieval and trace steps silently as needed
+   - keep DocMason workspace commands sequential inside the live ask turn; do not overlap `status`, `sync`, `retrieve`, `trace`, or `validate-kb` while the same workspace or conversation lease is active
    - let `ask` and `retrieve` keep the front-end simple by parsing user-native source references implicitly rather than asking the user for internal source IDs
    - if the shared resolver marks a reference as `approximate` or `unresolved`, keep the inline notice explicit and do not quietly relabel it as exact
    - allow pending interaction-derived overlay knowledge to participate only when relevant to the current domain and support strategy
+   - for spreadsheet, PDF-layout, slide, chart, table, diagram, or region-sensitive questions, inspect artifact-aware retrieval fields before drafting:
+     - `matched_artifacts`
+     - `matched_artifact_ids`
+     - `matched_overlay_unit_ids`
+     - artifact `section_path`, `caption_text`, `continuation_group_ids`, `procedure_hints`, and `semantic_labels`
    - inspect published renders, structure sidecars, notes, or media first when the chosen evidence channels point there
+   - if the question is comparative or cross-document, confirm the top support set covers each major source or artifact family needed for the comparison instead of letting one source swallow the answer path
+   - if retrieval says published artifacts are insufficient because of hard-artifact semantic gaps, prefer one narrowed hybrid sync refresh through `knowledge-base-sync` before falling back to raw source inspection
+     - typical signals: `semantic_gap_hints`, weak or missing PDF text layers, `page-image` artifacts, or a source-escalation reason that explicitly calls for hybrid multimodal enrichment
+     - read `recommended_hybrid_targets` first instead of improvising your own narrowed multimodal target list
+     - once Lane C selects a source, treat `source` as the minimum completion unit for that ask
+     - write `runtime/agent-work/<conversation>/<turn>/hybrid_refresh_work.json` before doing the narrowed refresh so the current-turn hybrid scope remains auditable
+     - use `target_focus_render_assets` first and only trigger targeted hi-res focus renders when the baseline crop is still not legible enough
+     - rerun `docmason sync --json`, then rerun retrieve and trace before answering
+     - for compare or synthesis questions, start with the strongest source and only expand to the next clearly relevant source when compare coverage still remains insufficient
    - inspect source files or rerender only when the published-artifact plan says the KB is insufficient
    - write only the final answer under `runtime/answers/<conversation_id>/<turn_id>.md`
    - keep progress chatter, shell correction, and self-talk out of canonical answer files and interaction excerpts
@@ -131,12 +149,14 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 - Do not push natural-language semantic routing down into large deterministic keyword lists. The main agent should make the semantic judgment and pass it into the repo helpers explicitly.
 - Do not build a growing odd-question taxonomy. Route those questions by evidence needs and published evidence channels instead.
 - Do not run mutating sync during an ordinary answer path unless the routed ask helper has already determined that the current `workspace-corpus` question needs fresh local state; when it does, keep the transition concise and auditable.
+- When Lane C is triggered, do not stop at a single artifact if the selected source still has uncovered current hybrid candidates. Finish that selected source to the current architecture's best state, or surface a concrete blocker.
 - If the current published corpus is stale but still usable, answer from the published corpus first and append one concise freshness notice.
 - If the user explicitly needs latest local document state, prefer the ask helper's auto-sync path before answering rather than guessing.
 - If the user message is clearly a direct setup, status, sync, adapter, or runtime-review request, switch to the matching top-level workflow instead of overloading `ask`.
 - Do not force the user into English-only interaction. Match the user-facing answer language unless they explicitly ask otherwise.
 - If the final answer trace is not `grounded`, preserve that KB boundary honestly instead of relabeling it.
 - If the shared source-reference resolver returns `approximate` or `unresolved`, keep that notice explicit in the answer path and let the persisted runtime artifacts remain auditable.
+- If a soft document alias is present but the user is really asking for artifact-level support such as a diagram, table, chart, region, or compare view, do not let that soft alias collapse retrieval to one source by reflex.
 - Do not treat `external-source-verified` or `model-knowledge` answers as product failures just because KB `answer_state` is not `grounded`.
 - Keep one user question mapped to one canonical turn. Re-entering helper layers inside the same live question should reuse the open turn rather than creating a second canonical answer.
 - If published KB artifacts already satisfy the required evidence channels, do not go back to `original_doc/` or rerender source files as a first move.
@@ -151,3 +171,4 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 - `grounded-answer` remains the inner specialist workflow for direct supported answers.
 - `grounded-composition` is the inner specialist workflow for evidence-backed drafting, planning, and research outputs.
 - `@ask` may be used as an optional shortcut in platforms that support it, but the primary path is natural freeform asking inside the workspace.
+- If the ask path performs a narrowed hybrid refresh, keep it mostly silent. Only surface one concise user-facing note when the wait is no longer brief or when the current turn will publish KB mutations.

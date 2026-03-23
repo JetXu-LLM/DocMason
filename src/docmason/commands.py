@@ -214,10 +214,14 @@ def homebrew_auto_install_plan(
             "feasible": False,
             "detail": "The official Homebrew installer requires `/usr/bin/curl`.",
         }
-    if not xcode_select_path.exists() or command_runner(
-        [str(xcode_select_path), "-p"],
-        cwd,
-    ).exit_code != 0:
+    if (
+        not xcode_select_path.exists()
+        or command_runner(
+            [str(xcode_select_path), "-p"],
+            cwd,
+        ).exit_code
+        != 0
+    ):
         return {
             "feasible": False,
             "detail": (
@@ -402,6 +406,15 @@ def office_renderer_next_step() -> str:
     return (
         "Install LibreOffice with your Linux distribution's package manager or from "
         "https://www.libreoffice.org/download/download/, ensure `soffice` is on PATH, "
+        "then rerun `docmason doctor`."
+    )
+
+
+def pdf_renderer_next_step() -> str:
+    """Return the preferred next-step guidance for the PDF extraction stack."""
+    return (
+        'Run `.venv/bin/python -m pip install -e ".[dev]"` from the workspace root, or '
+        "install `PyMuPDF`, `pypdfium2`, `pypdf`, and `pillow` into the repo-local `.venv`, "
         "then rerun `docmason doctor`."
     )
 
@@ -1087,7 +1100,10 @@ def doctor_workspace(
             "bootstrap-state",
             ACTION_REQUIRED,
             bootstrap_detail,
-            "Run `docmason prepare --yes` from the current workspace root to refresh the cached bootstrap marker.",
+            (
+                "Run `docmason prepare --yes` from the current workspace root "
+                "to refresh the cached bootstrap marker."
+            ),
         )
     elif bootstrap_reason in {
         "missing-venv",
@@ -1105,7 +1121,10 @@ def doctor_workspace(
             "bootstrap-state",
             DEGRADED,
             bootstrap_detail,
-            "Run `docmason prepare --yes` to refresh the cached bootstrap marker to the current contract.",
+            (
+                "Run `docmason prepare --yes` to refresh the cached bootstrap "
+                "marker to the current contract."
+            ),
         )
     else:
         add_check(
@@ -1200,7 +1219,7 @@ def doctor_workspace(
                 "pdf-renderer",
                 ACTION_REQUIRED,
                 pdf_snapshot["detail"],
-                "Install the DocMason PDF dependencies and rerun `docmason doctor`.",
+                pdf_renderer_next_step(),
             )
     else:
         add_check("pdf-renderer", READY, pdf_snapshot["detail"])
@@ -1215,12 +1234,16 @@ def doctor_workspace(
 
     claude = adapter_snapshot(workspace)["claude"]
     if claude["present"] and not claude["stale"]:
-        add_check("claude-adapter", READY, "Claude adapter files are present and fresh.")
+        add_check(
+            "claude-adapter",
+            READY,
+            "Claude adapter memory files are present and fresh.",
+        )
     elif claude["present"]:
         add_check(
             "claude-adapter",
             READY,
-            "Claude adapter files are present but stale relative to canonical sources.",
+            "Claude adapter memory files are present but stale relative to canonical sources.",
             "If you plan to use Claude, run `docmason sync-adapters` to refresh the adapter.",
         )
     else:
@@ -1228,7 +1251,37 @@ def doctor_workspace(
             "claude-adapter",
             READY,
             (
-                "Claude adapter files have not been generated yet. This is optional "
+                "Claude adapter memory files have not been generated yet. This is optional "
+                "until that ecosystem is used."
+            ),
+        )
+
+    if claude["skill_shims_present"]:
+        add_check(
+            "claude-native-skill-shims",
+            READY,
+            "Claude native skill shims are present for repo-local slash-command discovery.",
+        )
+    elif claude["present"]:
+        add_check(
+            "claude-native-skill-shims",
+            DEGRADED,
+            (
+                "Claude native skill shims are not present. The core Claude "
+                "adapter remains usable, "
+                "but native slash-command discovery is unavailable."
+            ),
+            (
+                "If you want Claude native slash-command discovery, run "
+                "`docmason sync-adapters` to refresh the repo-local skill shims."
+            ),
+        )
+    else:
+        add_check(
+            "claude-native-skill-shims",
+            READY,
+            (
+                "Claude native skill shims have not been generated yet. This is optional "
                 "until that ecosystem is used."
             ),
         )
@@ -1238,9 +1291,7 @@ def doctor_workspace(
     claude_code_hooks_dir = workspace.root / ".claude" / "hooks"
     if claude_code_settings.exists():
         hook_scripts = (
-            sorted(claude_code_hooks_dir.glob("on-*.sh"))
-            if claude_code_hooks_dir.exists()
-            else []
+            sorted(claude_code_hooks_dir.glob("on-*.sh")) if claude_code_hooks_dir.exists() else []
         )
         if hook_scripts:
             non_executable = [s.name for s in hook_scripts if not os.access(s, os.X_OK)]
@@ -1317,9 +1368,7 @@ def doctor_workspace(
     elif any(check["status"] == DEGRADED for check in checks):
         overall = DEGRADED
 
-    if any(
-        check["name"] == "platform" and check["status"] != READY for check in checks
-    ):
+    if any(check["name"] == "platform" and check["status"] != READY for check in checks):
         next_steps.append(manual_workspace_recovery_step())
 
     payload = {
@@ -1460,6 +1509,7 @@ def sync_workspace(
         "change_set": result.get("change_set", {}),
         "auto_repairs": result.get("auto_repairs", {}),
         "auto_authoring": result.get("auto_authoring", {}),
+        "hybrid_enrichment": result.get("hybrid_enrichment", {}),
         "autonomous_steps": result.get("autonomous_steps", []),
         "required_capabilities": result.get("required_capabilities", []),
         "pending_work_path": pending_work_path,
@@ -1481,7 +1531,23 @@ def sync_workspace(
         )
     auto_repairs = result.get("auto_repairs", {})
     if isinstance(auto_repairs, dict):
-        lines.append("Auto repairs: " f"total={auto_repairs.get('repair_count', 0)}")
+        lines.append(f"Auto repairs: total={auto_repairs.get('repair_count', 0)}")
+    hybrid_enrichment = result.get("hybrid_enrichment", {})
+    if isinstance(hybrid_enrichment, dict):
+        lines.append(
+            "Hybrid enrichment: "
+            f"mode={hybrid_enrichment.get('mode', 'unknown')}, "
+            f"eligible={hybrid_enrichment.get('eligible_unit_count', 0)}, "
+            f"covered={hybrid_enrichment.get('covered_unit_count', 0)}, "
+            f"remaining={hybrid_enrichment.get('remaining_unit_count', 0)}, "
+            f"blocked={hybrid_enrichment.get('blocked_unit_count', 0)}"
+        )
+        hybrid_work_path = hybrid_enrichment.get("hybrid_work_path")
+        if isinstance(hybrid_work_path, str) and hybrid_work_path:
+            lines.append(f"Hybrid work queue: {hybrid_work_path}")
+        capability_gap_reason = hybrid_enrichment.get("capability_gap_reason")
+        if isinstance(capability_gap_reason, str) and capability_gap_reason:
+            lines.append(f"Hybrid gap: {capability_gap_reason}")
     auto_authoring = result.get("auto_authoring", {})
     if isinstance(auto_authoring, dict):
         lines.append(
@@ -1848,28 +1914,6 @@ def validate_knowledge_base(
     return make_report(status, payload, lines)
 
 
-def build_claude_root_content(paths: WorkspacePaths) -> str:
-    """Render the generated root Claude memory file.
-
-    The committed ``.claude/CLAUDE.md`` already imports ``@../AGENTS.md``
-    and ``@../adapters/claude/project-memory.md``.  The generated root
-    ``CLAUDE.md`` avoids duplicating those imports and instead focuses on
-    summarizing the canonical adapter surface for quick reference.
-    """
-    return "\n".join(
-        [
-            "# DocMason Claude Adapter",
-            "",
-            "This file is generated by `docmason sync-adapters --target claude`.",
-            "Do not edit it manually. Regenerate it from canonical committed sources.",
-            "",
-            "@AGENTS.md",
-            "@adapters/claude/project-memory.md",
-            "",
-        ]
-    )
-
-
 def build_claude_project_memory(
     paths: WorkspacePaths,
     workflow_metadata: list[WorkflowMetadata],
@@ -1912,7 +1956,7 @@ def sync_adapters(
         ]
         return make_report(ACTION_REQUIRED, payload, lines)
 
-    source_inputs = workspace.adapter_source_inputs()
+    source_inputs = workspace.claude_adapter_source_inputs()
     missing_sources = [path for path in source_inputs if not path.exists()]
     if missing_sources:
         payload = {
@@ -1948,7 +1992,6 @@ def sync_adapters(
 
     workspace.claude_adapter_dir.mkdir(parents=True, exist_ok=True)
     refresh_generated_connector_manifests(workspace)
-    workspace.claude_root_path.write_text(build_claude_root_content(workspace), encoding="utf-8")
     workspace.claude_workflow_routing_path.write_text(
         render_workflow_routing_markdown(workflow_metadata),
         encoding="utf-8",
@@ -2160,6 +2203,27 @@ def run_workflow(
                 "Repair staged validation blockers, then rerun "
                 "`docmason workflow knowledge-base-sync`."
             )
+        else:
+            hybrid_enrichment = sync_report.payload.get("hybrid_enrichment", {})
+            if (
+                sync_status in {"valid", "warnings"}
+                and isinstance(hybrid_enrichment, dict)
+                and hybrid_enrichment.get("mode") in {"candidate-prepared", "partially-covered"}
+            ):
+                workflow_status = "needs-hybrid-enrichment"
+                next_workflows = ["knowledge-construction", "knowledge-base-sync"]
+                hybrid_work_path = hybrid_enrichment.get("hybrid_work_path")
+                queue_detail = (
+                    f" from `{hybrid_work_path}`"
+                    if isinstance(hybrid_work_path, str) and hybrid_work_path
+                    else ""
+                )
+                next_steps.append(
+                    "Deterministic publication succeeded, but hard-artifact multimodal "
+                    f"enrichment is still queued{queue_detail}. Consume that queue with a "
+                    "capable multimodal host agent, write additive `semantic_overlay/` "
+                    "sidecars, then rerun `docmason workflow knowledge-base-sync`."
+                )
     else:
         payload = {
             "status": ACTION_REQUIRED,
@@ -2174,6 +2238,8 @@ def run_workflow(
 
     reports = [report for _step_name, report in steps]
     status = _workflow_status(reports)
+    if workflow_status != "completed" and status == READY:
+        status = DEGRADED
     workflow_payload: dict[str, Any] = {
         "status": status,
         "workflow_id": workflow_id,

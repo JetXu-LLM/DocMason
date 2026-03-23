@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from docmason.commands import DEGRADED, READY, retrieve_knowledge, trace_knowledge
+from docmason.commands import (
+    DEGRADED,
+    READY,
+    CommandReport,
+    retrieve_knowledge,
+    run_workflow,
+    sync_workspace,
+    trace_knowledge,
+)
 from docmason.knowledge import update_source_index
 from docmason.project import WorkspacePaths, read_json, write_json
+from docmason.semantic_overlays import write_semantic_overlay
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class RetrievalTraceCoreTests(unittest.TestCase):
@@ -20,7 +33,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         root = Path(tempdir.name)
 
         (root / "src" / "docmason").mkdir(parents=True)
-        (root / "skills" / "canonical" / "workspace-bootstrap").mkdir(parents=True)
+        shutil.copytree(ROOT / "skills" / "canonical", root / "skills" / "canonical")
         (root / "original_doc").mkdir()
         (root / "knowledge_base").mkdir()
         (root / "runtime").mkdir()
@@ -37,10 +50,6 @@ class RetrievalTraceCoreTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
-        (root / "skills" / "canonical" / "workspace-bootstrap" / "SKILL.md").write_text(
-            "# Workspace Bootstrap\n",
-            encoding="utf-8",
-        )
         return WorkspacePaths(root=root)
 
     def mark_environment_ready(self, workspace: WorkspacePaths) -> None:
@@ -65,6 +74,101 @@ class RetrievalTraceCoreTests(unittest.TestCase):
             writer.add_blank_page(width=144 + index, height=144 + index)
         with path.open("wb") as handle:
             writer.write(handle)
+
+    def create_pdf_with_chart(self, path: Path) -> None:
+        try:
+            import pymupdf  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - compatibility import
+            import fitz as pymupdf  # type: ignore[import-not-found]
+
+        document = pymupdf.open()
+        page = document.new_page(width=420, height=320)
+        page.insert_text((48, 36), "Quarterly Revenue Chart")
+        page.insert_text((48, 58), "Q1 Q2 Q3 Q4 Actual Budget")
+        page.draw_line((48, 260), (360, 260), color=(0, 0, 0), width=1.2)
+        page.draw_line((48, 84), (48, 260), color=(0, 0, 0), width=1.2)
+        for index, height in enumerate((44, 86, 62, 118), start=0):
+            left = 84 + (index * 56)
+            page.draw_rect(
+                (left, 260 - height, left + 28, 260),
+                color=(0.1, 0.2, 0.8),
+                fill=(0.1, 0.2, 0.8),
+            )
+            page.insert_text((left - 2, 278), f"Q{index + 1}")
+        page.insert_text((300, 92), "Revenue")
+        document.save(path)
+        document.close()
+
+    def create_pdf_with_sections_and_tables(self, path: Path) -> None:
+        try:
+            import pymupdf  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - compatibility import
+            import fitz as pymupdf  # type: ignore[import-not-found]
+
+        document = pymupdf.open()
+        for page_index in range(2):
+            page = document.new_page(width=520, height=720)
+            page.insert_text((48, 48), "1. Executive Summary", fontsize=18)
+            page.insert_text(
+                (48, 78),
+                "The document summarises KPI trends and supporting evidence for review.",
+                fontsize=11,
+            )
+            page.insert_text((48, 118), "Table 1. KPI Summary", fontsize=12)
+            top = 150
+            left = 48
+            width = 320
+            row_height = 30
+            col_width = 100
+            for row in range(4):
+                y = top + (row * row_height)
+                page.draw_line((left, y), (left + width, y), color=(0, 0, 0), width=1)
+            for col in range(4):
+                x = left + (col * col_width)
+                page.draw_line((x, top), (x, top + (3 * row_height)), color=(0, 0, 0), width=1)
+            headers = ["Quarter", "Actual", "Budget"]
+            values = [
+                ["Q1", "10", "12"],
+                [
+                    "Q2" if page_index == 0 else "Q3",
+                    "15" if page_index == 0 else "18",
+                    "14" if page_index == 0 else "17",
+                ],
+            ]
+            for col, header in enumerate(headers):
+                page.insert_text((left + 8 + (col * col_width), top + 18), header, fontsize=10)
+            for row, row_values in enumerate(values, start=1):
+                for col, value in enumerate(row_values):
+                    page.insert_text(
+                        (left + 8 + (col * col_width), top + 18 + (row * row_height)),
+                        value,
+                        fontsize=10,
+                    )
+        document.save(path)
+        document.close()
+
+    def create_pdf_with_full_page_image(self, path: Path) -> None:
+        try:
+            import pymupdf  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - compatibility import
+            import fitz as pymupdf  # type: ignore[import-not-found]
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            image_path = Path(tempdir_name) / "page.png"
+            image = Image.new("RGB", (1200, 1600), color=(245, 245, 245))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((80, 120, 1120, 1480), outline=(32, 64, 128), width=14)
+            draw.rectangle((170, 300, 1030, 540), fill=(210, 225, 245))
+            draw.rectangle((170, 660, 1030, 1180), fill=(225, 235, 250))
+            draw.rectangle((170, 1230, 760, 1380), fill=(235, 240, 250))
+            image.save(image_path)
+
+            document = pymupdf.open()
+            page = document.new_page(width=595, height=842)
+            page.insert_image(page.rect, filename=str(image_path))
+            document.save(path)
+            document.close()
 
     def build_seeded_knowledge(
         self,
@@ -358,6 +462,424 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.assertTrue(session_path.exists())
         usage_history = workspace.usage_history_path.read_text(encoding="utf-8")
         self.assertIn(report.payload["session_id"], usage_history)
+
+    def test_pdf_artifact_query_surfaces_matched_artifacts_and_trace_supports(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_chart(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(pending.payload["sync_status"], "pending-synthesis")
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/a.pdf"],
+            title="Operational Overview",
+            summary="A conservative seeded summary without explicit chart vocabulary.",
+            key_point="The document preserves supporting business evidence.",
+            claim="The document can support follow-up analysis.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/b.pdf"],
+            title="Plain Companion",
+            summary="A plain companion source.",
+            key_point="This source is intentionally generic.",
+            claim="This source should rank below the chart-bearing source for chart hints.",
+        )
+
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        report = retrieve_knowledge(
+            query="quarterly revenue chart q4",
+            top=2,
+            graph_hops=0,
+            include_renders=True,
+            paths=workspace,
+        )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertTrue(report.payload["results"][0]["matched_artifacts"])
+        self.assertTrue(report.payload["results"][0]["matched_artifact_ids"])
+        self.assertTrue(
+            any(
+                item["artifact_type"] in {"chart", "major-region"}
+                for item in report.payload["results"][0]["matched_artifacts"]
+            )
+        )
+
+        answer_file = workspace.root / "answer.txt"
+        answer_file.write_text(
+            "The quarterly revenue chart highlights Q4 as the strongest quarter.",
+            encoding="utf-8",
+        )
+        trace = trace_knowledge(answer_file=str(answer_file), top=2, paths=workspace)
+        self.assertTrue(trace.payload["supporting_artifact_ids"])
+        self.assertTrue(trace.payload["segments"][0]["supporting_artifact_ids"])
+        self.assertTrue(trace.payload["segments"][0]["artifact_supports"])
+        self.assertEqual(
+            trace.payload["segments"][0]["artifact_supports"][0]["artifact_id"],
+            trace.payload["segments"][0]["supporting_artifact_ids"][0].split(":", 1)[1],
+        )
+
+    def test_pdf_document_context_query_surfaces_section_and_caption_matches(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_sections_and_tables(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/a.pdf"],
+            title="Operations Packet",
+            summary="A seeded summary that does not mention the table caption explicitly.",
+            key_point="The packet preserves operating evidence.",
+            claim="The packet can support evidence tracing.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/b.pdf"],
+            title="Plain Packet",
+            summary="A plain control document.",
+            key_point="This control document is intentionally generic.",
+            claim="This control document should not outrank the structured packet.",
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        report = retrieve_knowledge(
+            query="executive summary kpi summary table",
+            top=2,
+            graph_hops=0,
+            include_renders=True,
+            paths=workspace,
+        )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["results"][0]["title"], "Operations Packet")
+        matched_artifact = report.payload["results"][0]["matched_artifacts"][0]
+        self.assertEqual(matched_artifact["caption_text"], "Table 1. KPI Summary")
+        self.assertIn("1. Executive Summary", matched_artifact["section_path"])
+
+    def test_sync_image_only_pdf_emits_page_image_artifact_and_hybrid_work(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+        self.create_pdf(workspace.source_dir / "control.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(pending.payload["sync_status"], "pending-synthesis")
+        hybrid = pending.payload["hybrid_enrichment"]
+        self.assertEqual(hybrid["mode"], "candidate-prepared")
+        self.assertTrue(hybrid["workflow_auto_supported"])
+        self.assertTrue(hybrid["hybrid_work_path"])
+        self.assertTrue(hybrid["capability_gap_reason"])
+
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        scan_source_dir = (
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/scan.pdf"]
+        )
+        artifact_index = read_json(scan_source_dir / "artifact_index.json")
+        page_image = next(
+            item
+            for item in artifact_index["artifacts"]
+            if item.get("artifact_type") == "page-image"
+        )
+        pdf_document = read_json(scan_source_dir / "pdf_document.json")
+        self.assertEqual(
+            pdf_document["page_contexts"][0]["page_image_artifact_id"], page_image["artifact_id"]
+        )
+        self.assertIn(pdf_document["page_contexts"][0]["text_layer_quality"], {"none", "weak"})
+
+        hybrid_work = read_json(workspace.knowledge_base_staging_dir / "hybrid_work.json")
+        source_work = next(
+            item
+            for item in hybrid_work["sources"]
+            if item.get("source_id") == by_path["original_doc/scan.pdf"]
+        )
+        unit_work = source_work["units"][0]
+        self.assertIn("page-image", unit_work["candidate_kinds"])
+        self.assertIn(page_image["artifact_id"], unit_work["target_artifact_ids"])
+
+    def test_workflow_runner_surfaces_hybrid_enrichment_gap_after_valid_sync(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        sync_report = CommandReport(
+            exit_code=0,
+            payload={
+                "status": READY,
+                "sync_status": "valid",
+                "hybrid_enrichment": {
+                    "mode": "candidate-prepared",
+                    "eligible_unit_count": 4,
+                    "overlay_unit_count": 0,
+                    "hybrid_work_path": "knowledge_base/staging/hybrid_work.json",
+                },
+            },
+            lines=[],
+        )
+        status_report = CommandReport(
+            exit_code=0,
+            payload={"status": READY},
+            lines=[],
+        )
+        with (
+            mock.patch("docmason.commands.status_workspace", return_value=status_report),
+            mock.patch("docmason.commands.sync_workspace", return_value=sync_report),
+        ):
+            report = run_workflow("knowledge-base-sync", paths=workspace)
+
+        self.assertEqual(report.payload["status"], DEGRADED)
+        self.assertEqual(report.payload["workflow_status"], "needs-hybrid-enrichment")
+        self.assertEqual(report.payload["final_report"]["sync_status"], "valid")
+        self.assertEqual(
+            report.payload["final_report"]["hybrid_enrichment"]["mode"],
+            "candidate-prepared",
+        )
+        self.assertIn("knowledge-construction", report.payload["next_workflows"])
+        self.assertIn("hybrid_work.json", report.payload["next_steps"][0])
+
+    def test_page_image_results_mark_published_artifacts_insufficient_without_overlay(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+        self.create_pdf(workspace.source_dir / "control.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/scan.pdf"],
+            title="Scanned Workflow Page",
+            summary="A scanned workflow page with limited extracted text.",
+            key_point=(
+                "The published baseline preserves the rendered page but not "
+                "enough semantic detail."
+            ),
+            claim="This page requires multimodal follow-up before confident semantic use.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/control.pdf"],
+            title="Control Page",
+            summary="A control page with no scan-specific signals.",
+            key_point="The control page is intentionally generic.",
+            claim="The control page should rank lower for scanned-page queries.",
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        report = retrieve_knowledge(
+            query="scanned workflow page image",
+            top=2,
+            graph_hops=0,
+            include_renders=True,
+            paths=workspace,
+        )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertFalse(report.payload["published_artifacts_sufficient"])
+        self.assertTrue(report.payload["source_escalation_required"])
+        self.assertIn("hybrid multimodal enrichment", report.payload["source_escalation_reason"])
+        first_result = report.payload["results"][0]
+        self.assertTrue(first_result["matched_units"])
+        self.assertIn(first_result["matched_units"][0]["text_layer_quality"], {"none", "weak"})
+        self.assertTrue(first_result["matched_units"][0]["page_image_artifact_id"])
+        self.assertTrue(report.payload["recommended_hybrid_targets"])
+        recommended = report.payload["recommended_hybrid_targets"][0]
+        self.assertEqual(recommended["source_id"], first_result["source_id"])
+        self.assertTrue(recommended["required_overlay_slots"])
+        self.assertTrue(recommended["target_focus_render_assets"])
+
+    def test_semantic_overlay_enriches_retrieve_and_trace_outputs(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        first_source = (
+            workspace.knowledge_base_staging_dir / "sources" / pending_sources[0]["source_id"]
+        )
+        second_source = (
+            workspace.knowledge_base_staging_dir / "sources" / pending_sources[1]["source_id"]
+        )
+        self.build_seeded_knowledge(
+            first_source,
+            title="Visual Review",
+            summary="A neutral seeded summary.",
+            key_point="The source preserves evidence for follow-up.",
+            claim="The source can support review work.",
+        )
+        self.build_seeded_knowledge(
+            second_source,
+            title="Control Review",
+            summary="A control seeded summary.",
+            key_point="The control source is generic.",
+            claim="The control source should rank lower for overlay-only hints.",
+        )
+        write_semantic_overlay(
+            first_source,
+            {
+                "source_id": pending_sources[0]["source_id"],
+                "unit_id": "page-001",
+                "derivation_mode": "hybrid",
+                "eligible_reason": "diagram-or-ui-page",
+                "consumed_inputs": {
+                    "render_assets": ["renders/page-001.png"],
+                    "artifact_ids": [],
+                },
+                "semantic_labels": [
+                    {
+                        "label": "diagram-summary",
+                        "text": "Approval flow between intake and review teams.",
+                        "confidence": "high",
+                    }
+                ],
+                "artifact_annotations": [],
+                "cross_region_relations": [],
+                "uncertainty_notes": [],
+            },
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        report = retrieve_knowledge(
+            query="approval flow intake review teams",
+            top=2,
+            graph_hops=0,
+            include_renders=True,
+            paths=workspace,
+        )
+        self.assertEqual(report.exit_code, 0)
+        self.assertTrue(report.payload["results"][0]["matched_overlay_unit_ids"])
+        self.assertTrue(report.payload["results"][0]["matched_units"][0]["semantic_labels"])
+
+        answer_file = workspace.root / "overlay-answer.txt"
+        answer_file.write_text(
+            "The approval flow connects intake and review teams.",
+            encoding="utf-8",
+        )
+        trace = trace_knowledge(answer_file=str(answer_file), top=2, paths=workspace)
+        self.assertTrue(trace.payload["supporting_overlay_unit_ids"])
+        self.assertTrue(trace.payload["segments"][0]["supporting_overlay_unit_ids"])
+        self.assertTrue(trace.payload["segments"][0]["semantic_supports"])
+        self.assertEqual(
+            trace.payload["segments"][0]["semantic_supports"][0]["semantic_overlay_asset"],
+            "semantic_overlay/page-001.json",
+        )
+
+    def test_write_semantic_overlay_backfills_lane_bc_contract_fields(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        first_source = (
+            workspace.knowledge_base_staging_dir / "sources" / pending_sources[0]["source_id"]
+        )
+        asset = write_semantic_overlay(
+            first_source,
+            {
+                "source_id": pending_sources[0]["source_id"],
+                "unit_id": "page-001",
+                "eligible_reason": "diagram-or-ui-page",
+                "consumed_inputs": {
+                    "render_assets": ["renders/page-001.png"],
+                },
+                "semantic_labels": [
+                    {
+                        "label": "diagram-summary",
+                        "text": "Approval flow between intake and review teams.",
+                        "confidence": "high",
+                    }
+                ],
+                "artifact_annotations": [],
+                "cross_region_relations": [],
+                "uncertainty_notes": [],
+            },
+        )
+
+        overlay = read_json(first_source / asset)
+        self.assertEqual(overlay["origin"], "sync-hybrid")
+        self.assertTrue(overlay["source_fingerprint"])
+        self.assertTrue(overlay["unit_evidence_fingerprint"])
+        self.assertIn("diagram-summary", overlay["covered_slots"])
+        self.assertEqual(
+            overlay["consumed_inputs"]["focus_render_assets"],
+            ["renders/page-001.png"],
+        )
+
+    def test_compare_query_applies_coverage_bonus_to_multiple_sources(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        report = retrieve_knowledge(
+            query="compare campaign planning brief and campaign evaluation plan",
+            top=2,
+            graph_hops=0,
+            include_renders=False,
+            paths=workspace,
+        )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertGreaterEqual(len(report.payload["results"]), 2)
+        self.assertGreater(report.payload["results"][1]["score"]["compare_coverage_bonus"], 0)
+
+    def test_sync_backfills_phase_three_artifacts_for_legacy_unchanged_sources(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        for source_id in source_ids:
+            for base_dir in (
+                workspace.knowledge_base_current_dir / "sources" / source_id,
+                workspace.knowledge_base_staging_dir / "sources" / source_id,
+            ):
+                artifact_index = base_dir / "artifact_index.json"
+                if artifact_index.exists():
+                    artifact_index.unlink()
+                visual_dir = base_dir / "visual_layout"
+                if visual_dir.exists():
+                    import shutil
+
+                    shutil.rmtree(visual_dir)
+                evidence_manifest_path = base_dir / "evidence_manifest.json"
+                evidence_manifest = read_json(evidence_manifest_path)
+                evidence_manifest.pop("artifact_index_asset", None)
+                evidence_manifest.pop("visual_layout_assets", None)
+                write_json(evidence_manifest_path, evidence_manifest)
+
+        result = sync_workspace(workspace)
+
+        self.assertEqual(result.payload["sync_status"], "valid")
+        self.assertGreaterEqual(result.payload["build_stats"]["rebuilt_sources"], 2)
+        rebuilt_source_dir = workspace.knowledge_base_current_dir / "sources" / source_ids[0]
+        self.assertTrue((rebuilt_source_dir / "artifact_index.json").exists())
+        rebuilt_evidence = read_json(rebuilt_source_dir / "evidence_manifest.json")
+        self.assertTrue(rebuilt_evidence["visual_layout_assets"])
 
     def test_citation_first_trace_returns_source_and_unit_provenance(self) -> None:
         workspace = self.make_workspace()

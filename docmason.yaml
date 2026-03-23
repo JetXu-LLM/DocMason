@@ -106,5 +106,6 @@ quality:
   prefer_explicit_failure_over_weak_fallback: true
 
 roadmap:
-  current_completed_phase: phase-2-workspace-coordination-atomic-publish-and-projection-discipline
-  next_phase: phase-3-spreadsheet-and-multimodal-evidence-compiler-deepening
+  current_completed_phase: phase-3-spreadsheet-and-multimodal-evidence-compiler-deepening
+  phase_3_follow_on: hybrid-pdf-parity-and-multimodal-kb-deepening
+  next_phase: phase-4-governed-interaction-memory-and-operator-control-plane

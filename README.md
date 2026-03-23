@@ -17,8 +17,8 @@ DocMason is for people who need more than keyword search:
 - trace claims back to provenance
 - keep the workflow local, file-first, and auditable
 
-The current native and supported v1 path is Codex on macOS.
-Other agent ecosystems matter, but they are treated as compatibility targets built on top of that primary workflow.
+The native reference workflow is Codex on macOS.
+Claude Code and GitHub Copilot also receive quiet repository-native compatibility adaptations, so users can open the same repo, follow the same bootstrap and sync path, and start working without a separate adapter ritual.
 
 The current repository also supports a narrower but important extension beyond pure factual QA:
 odd or non-typical document questions can stay KB-native when the published corpus already exposes
@@ -31,6 +31,8 @@ Pick the entry point that matches what you want to do on minute one:
 - [Use Privately](../../releases/latest/download/DocMason-clean.zip): download the clean workspace bundle with no `.git`, no `tests/`, and empty live workspace directories.
 - [Try ICO + GCS Demo](../../releases/latest/download/DocMason-demo-ico-gcs.zip): download the demo workspace bundle with no `.git`, no `tests/`, and a preloaded public sample corpus in `original_doc/`.
 - [Develop / Contribute](CONTRIBUTING.md): clone the canonical source repo, keep `tests/` and the tracked public demo corpus, then materialize the demo corpus locally only when you want it.
+
+The clean and demo bundles also include the committed GitHub Copilot workspace instructions so bundle users get the same AGENTS-first repository guidance without extra setup.
 
 ## Why This Exists
 
@@ -46,6 +48,7 @@ DocMason is built around a different assumption:
 
 - preserve multimodal evidence
 - prepare deterministic file-based artifacts
+- add richer semantic overlays when a capable multimodal agent is available
 - let strong AI agents do the hardest semantic work
 - validate the resulting knowledge base with code
 - keep everything local-file-first and repository-native
@@ -139,6 +142,8 @@ The deeper rationale lives in [`docs/product/distribution-and-benchmarks.md`](do
 - Conversation-native logging, review summaries, and benchmark-candidate extraction.
 - Pending interaction-derived overlay retrieval plus staged and published interaction memory support.
 - KB-native odd-question support through published evidence channels rather than default source rerender.
+- Deterministic PDF document-context sidecars plus first-class `page-image` artifacts for image-heavy or scanned pages.
+- Additive workflow-level hybrid enrichment through `knowledge_base/staging/hybrid_work.json` when a capable multimodal host agent is available.
 
 A capable agent should also behave honestly on first contact:
 
@@ -153,6 +158,7 @@ A capable agent should also behave honestly on first contact:
 ## Why It Feels Different
 
 - Multimodal by design: evidence is prepared for both text and rendered-image inspection when the document demands it.
+- Hard-artifact first: the shipped deterministic compiler builds page, slide, sheet, and artifact targets first, then the workflow-level multimodal lane only enriches the hard artifacts that still need semantic closure.
 - Agent-native: the main operating model is working with a strong AI agent inside the repository, not sending files into a bespoke backend product.
 - File-only knowledge base: no required database service, no hidden SaaS dependency, no platform lock-in.
 - Provenance-first: retrieval and trace are first-class, not an afterthought.
@@ -176,6 +182,7 @@ The stable public command surface now includes nine commands:
 The public CLI keeps a deterministic substrate and can expand when that materially improves usability, auditability, and operator reliability.
 `docmason workflow` is the advanced public execution surface for explicit workflow-level operator and agent use.
 The primary user-facing natural-language workflow is `ask`, not a new public CLI command.
+For multimodal closure, keep the boundary explicit: bare `docmason sync` publishes deterministic truth, while the canonical workflow layer may consume `hybrid_work.json` and add honest `semantic_overlay/` sidecars when the host agent can inspect renders.
 
 In practice, the surface is layered like this:
 
@@ -215,6 +222,7 @@ Current v1 input support is tiered:
 - Text lightweight-compatible: `mdx`, `yaml`, `yml`, `tex`, `csv`, `tsv`
 
 For PowerPoint, Word, and Excel inputs, high-fidelity rendering depends on LibreOffice. Legacy `.ppt`, `.doc`, and `.xls` files are normalized through LibreOffice into the same published office-source pipeline used for `.pptx`, `.docx`, and `.xlsx`.
+PDF-first corpora also rely on the repo-local PDF stack: `PyMuPDF` for deterministic region extraction, `pypdfium2` for renders, `pypdf` for conservative page handling, and `pillow` for image output.
 Markdown, plain text, `.eml`, and the lightweight-compatible text family do not require LibreOffice.
 
 ## Office Rendering Setup
@@ -230,6 +238,9 @@ Verification:
 
 - run `./.venv/bin/python -m docmason doctor`
 - on standard macOS installs, DocMason detects `/Applications/LibreOffice.app/Contents/MacOS/soffice` automatically
+
+If your corpus includes PDFs, keep the repo-local PDF stack installed as well. The normal editable install path already includes `PyMuPDF`, `pypdfium2`, `pypdf`, and `pillow`.
+If you need the manual recovery path, follow [`docs/setup/manual-workspace-recovery.md`](docs/setup/manual-workspace-recovery.md).
 
 ## Privacy And Local-First Boundary
 
@@ -265,7 +276,7 @@ Current architecture refactor program:
 - Phase 0, Rename To DocMason: implemented
 - Phase 1, Run Control, Turn Ownership, and Commit Barrier: implemented
 - Phase 2, Workspace Coordination, Atomic Publish, and Projection Discipline: implemented
-- Phase 3, Spreadsheet and Multimodal Evidence Compiler Deepening: planned
+- Phase 3, Spreadsheet and Multimodal Evidence Compiler Deepening: implemented, including `pdf_document.json`, richer native Office semantics, `page-image` artifacts for image-dominant PDF pages, and additive `semantic_overlay/` support through the workflow-level hybrid lane
 - Phase 4, Governed Interaction Memory and Operator Control Plane: planned
 
 What is intentionally not implemented yet:
@@ -311,7 +322,7 @@ DocMason/
 - `public-sample-workspace` is the contributor-only optional skill for materializing the tracked public demo corpus into live `original_doc/`.
 - `python3 scripts/use-sample-corpus.py --preset ico-gcs` remains the direct script path when you want the same setup without going through an agent skill.
 - `sample_corpus/` is the tracked fixture boundary. Do not replace it with your private corpus.
-- `scripts/install-git-hooks.sh` installs the repo safety hooks that block staged live workspace data.
+- `scripts/install-git-hooks.sh` installs the repo safety hooks that block staged live workspace data and re-check tracked live workspace paths before push.
 
 ## If This Direction Matters
 

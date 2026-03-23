@@ -63,6 +63,15 @@ These are specialist inner workflows that the main agent should invoke when a to
 These are follow-on workflows used by sync and validation loops rather than ordinary user entry points.
 Under the current autonomous sync path, they are mainly compatibility or recovery workflows rather
 than the normal publication path.
+For multimodal closure, keep the boundary explicit: the public `sync` command publishes deterministic
+truth, while the canonical workflow layer may consume `knowledge_base/staging/hybrid_work.json` and
+write additive `semantic_overlay/` sidecars for queued hard artifacts such as `page-image`, chart,
+table, picture, group, or connector-heavy targets.
+If that queue is still pending, the workflow should report a follow-through state such as
+`needs-hybrid-enrichment` instead of pretending the multimodal lane already finished.
+The queue now carries slot coverage, freshness fingerprints, and focus-render targets so the
+workflow layer can distinguish `candidate-prepared`, `partially-covered`, and truly `covered`
+sources without pushing provider-specific logic into the public CLI.
 
 Each workflow directory includes:
 
@@ -113,9 +122,11 @@ The canonical workflow semantics still live in:
 
 `docmason sync-adapters` generates:
 
-- `CLAUDE.md`
 - `adapters/claude/project-memory.md`
 - `adapters/claude/workflow-routing.md`
 - `.claude/skills/` repo-local thin shims that point back to the canonical skills
+
+The committed `.claude/CLAUDE.md` remains the sole Claude project-memory entry file and
+soft-imports the generated project memory when it is present.
 
 `workflow-routing.md` groups workflows by tier and category so a fresh capable agent can infer the intended product surface without relying on a hidden chat transcript.

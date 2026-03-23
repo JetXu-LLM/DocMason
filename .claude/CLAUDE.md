@@ -4,14 +4,21 @@ This is a DocMason workspace. Read the full agent contract below.
 
 @../AGENTS.md
 
-## Claude Code First-Use Adaptation
+## Claude Code Notes
 
-If `.claude/skills` is present, it should be a repo-local thin shim layer generated from the
-canonical repository skills during workspace bootstrap or repair.
-Do not create global skill links or hand-maintained parallel skill copies.
+This file is the committed Claude Code entry surface for this repo.
+`AGENTS.md` is the baseline contract.
 
-## Richer Workflow Routing
+Bootstrap, repair, or `docmason sync-adapters` may generate repo-local Claude helpers such as:
 
-If the generated adapter files are present, richer workflow routing is available:
+- `adapters/claude/project-memory.md` for richer workflow routing
+- `.claude/skills/` for repo-local Claude skill discovery
+
+Treat those as generated local helpers, not authored instructions.
+Do not hand-edit them, create global skill links, or maintain parallel skill copies.
+
+The import below is optional enrichment.
+If the file exists, Claude gets the richer routing layer.
+If it does not exist yet, continue from `AGENTS.md` and the normal bootstrap, status, and sync flows.
 
 @../adapters/claude/project-memory.md

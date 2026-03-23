@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -455,11 +456,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         sample_manifest.parent.mkdir(parents=True, exist_ok=True)
         sample_manifest.write_text('{"corpus_id": "ico-gcs"}\n', encoding="utf-8")
         optional_skill = (
-            workspace.root
-            / "skills"
-            / "optional"
-            / "public-sample-workspace"
-            / "SKILL.md"
+            workspace.root / "skills" / "optional" / "public-sample-workspace" / "SKILL.md"
         )
         optional_skill.parent.mkdir(parents=True, exist_ok=True)
         optional_skill.write_text("# Public Sample Workspace\n", encoding="utf-8")
@@ -582,7 +579,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         workspace = self.make_workspace()
         report = doctor_workspace(workspace, editable_install_probe=self.missing_probe)
         self.assertNotIn(
-            "Follow `docs/setup/manual-workspace-recovery.md` for the manual workspace bootstrap and repair fallback.",
+            (
+                "Follow `docs/setup/manual-workspace-recovery.md` for the "
+                "manual workspace bootstrap and repair fallback."
+            ),
             report.payload["next_steps"],
         )
 
@@ -633,7 +633,9 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         bootstrapped = status_workspace(workspace, editable_install_probe=self.ready_probe)
         self.assertEqual(bootstrapped.payload["stage"], "workspace-bootstrapped")
-        self.assertEqual(bootstrapped.payload["bootstrap_state"]["reason"], "legacy-compatible-ready")
+        self.assertEqual(
+            bootstrapped.payload["bootstrap_state"]["reason"], "legacy-compatible-ready"
+        )
         self.assertTrue(bootstrapped.payload["bootstrap_state"]["cached_ready"])
 
         adapter_report = sync_adapters(workspace)
@@ -678,25 +680,85 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         report = sync_adapters(workspace)
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["target"], "claude")
-        claude_text = workspace.claude_root_path.read_text(encoding="utf-8")
         project_memory_text = workspace.claude_project_memory_path.read_text(encoding="utf-8")
         workflow_routing_text = workspace.claude_workflow_routing_path.read_text(encoding="utf-8")
-        self.assertIn("@AGENTS.md", claude_text)
-        self.assertIn("@adapters/claude/project-memory.md", claude_text)
+        self.assertFalse((workspace.root / "CLAUDE.md").exists())
         self.assertIn("@workflow-routing.md", project_memory_text)
         self.assertIn("@../../skills/canonical/workspace-bootstrap/SKILL.md", project_memory_text)
         self.assertIn("@../../skills/canonical/workspace-doctor/SKILL.md", project_memory_text)
         self.assertIn("## Foundation Workflows", workflow_routing_text)
         self.assertIn("### `workspace-bootstrap`", workflow_routing_text)
         self.assertIn("### `workspace-doctor`", workflow_routing_text)
+        self.assertIn("adapters/claude/project-memory.md", report.payload["generated_files"])
+        self.assertIn("adapters/claude/workflow-routing.md", report.payload["generated_files"])
         self.assertIn(".claude/skills", report.payload["generated_files"])
+        self.assertNotIn("CLAUDE.md", report.payload["generated_files"])
         self.assertTrue((workspace.claude_skill_shim_dir / "workspace-bootstrap").is_symlink())
 
-        before = workspace.claude_root_path.stat().st_mtime
+        before = workspace.claude_project_memory_path.stat().st_mtime
         updated_sidecar = workspace.canonical_skills_dir / "workspace-bootstrap" / "workflow.json"
         os.utime(updated_sidecar, (before + 10, before + 10))
         stale_status = status_workspace(workspace, editable_install_probe=self.missing_probe)
+        self.assertEqual(
+            stale_status.payload["adapters"]["claude"]["path"],
+            "adapters/claude/project-memory.md",
+        )
+        self.assertFalse(stale_status.payload["adapters"]["claude"]["skill_shims_required"])
         self.assertTrue(stale_status.payload["adapters"]["claude"]["stale"])
+
+    def test_operator_workflow_metadata_does_not_mark_claude_adapter_stale(self) -> None:
+        workspace = self.make_workspace()
+        operator_dir = workspace.operator_skills_dir / "operator-eval"
+        operator_dir.mkdir(parents=True)
+        (operator_dir / "SKILL.md").write_text("# Operator Eval\n", encoding="utf-8")
+        self.seed_workflow_metadata(
+            operator_dir,
+            workflow_id="operator-eval",
+            category="review",
+            mutability="workspace-write",
+            parallelism="none",
+            background_commands=["docmason workflow operator-eval --json"],
+        )
+
+        report = sync_adapters(workspace)
+        self.assertEqual(report.exit_code, 0)
+
+        before = workspace.claude_project_memory_path.stat().st_mtime
+        updated_sidecar = operator_dir / "workflow.json"
+        os.utime(updated_sidecar, (before + 10, before + 10))
+        stale_status = status_workspace(workspace, editable_install_probe=self.ready_probe)
+        self.assertFalse(stale_status.payload["adapters"]["claude"]["stale"])
+
+    def test_missing_claude_skill_shims_does_not_block_adapter_ready(self) -> None:
+        workspace = self.make_workspace()
+        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        write_json(
+            workspace.bootstrap_state_path,
+            {
+                "prepared_at": "2026-03-15T00:00:00Z",
+                "package_manager": "pip",
+                "python_executable": "/usr/bin/python3",
+                "venv_python": ".venv/bin/python",
+                "editable_install": True,
+            },
+        )
+        report = sync_adapters(workspace)
+        self.assertEqual(report.exit_code, 0)
+
+        shutil.rmtree(workspace.claude_skill_shim_dir)
+
+        status_report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+        self.assertEqual(status_report.payload["stage"], "adapter-ready")
+        self.assertTrue(status_report.payload["adapters"]["claude"]["present"])
+        self.assertFalse(status_report.payload["adapters"]["claude"]["stale"])
+        self.assertFalse(status_report.payload["adapters"]["claude"]["skill_shims_present"])
+
+        doctor_report = doctor_workspace(workspace, editable_install_probe=self.ready_probe)
+        checks = {check["name"]: check for check in doctor_report.payload["checks"]}
+        self.assertEqual(checks["claude-adapter"]["status"], READY)
+        self.assertEqual(checks["claude-native-skill-shims"]["status"], DEGRADED)
+        self.assertIn("sync-adapters", checks["claude-native-skill-shims"]["action"])
 
     def test_sync_adapters_rejects_invalid_workflow_metadata(self) -> None:
         workspace = self.make_workspace()

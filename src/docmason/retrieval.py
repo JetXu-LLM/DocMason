@@ -24,10 +24,17 @@ from .affordances import (
 from .contracts import ANSWER_STATES
 from .conversation import LOG_CONTEXT_FIELD_NAMES, semantic_log_context_from_record
 from .front_controller import load_support_manifest
+from .hybrid import current_hybrid_work
 from .interaction import load_interaction_overlay
 from .project import WorkspacePaths, append_jsonl, read_json, write_json
 from .projections import refresh_runtime_projections
 from .routing import infer_memory_query_profile, normalize_memory_semantics
+from .semantic_overlays import (
+    collect_semantic_overlay_assets,
+    load_semantic_overlays,
+    overlay_confidence,
+    overlay_search_strings,
+)
 from .source_references import (
     build_reference_resolution_summary,
     normalize_source_record_reference,
@@ -44,10 +51,13 @@ FIELD_WEIGHTS = {
     "claims": 2.5,
     "key_points": 2.5,
     "affordance": 2.0,
+    "document_context": 1.8,
     "path": 1.5,
     "unit_title": 2.0,
     "unit_text": 1.2,
     "unit_affordance": 1.1,
+    "artifact_context": 1.4,
+    "overlay": 1.7,
 }
 GRAPH_STRENGTH_WEIGHTS = {"high": 1.5, "medium": 0.8}
 MEMORY_RANK_PRIOR_BONUS = {"high": 1.2, "medium": 0.5, "low": 0.0}
@@ -105,6 +115,20 @@ GROUNDING_STOPWORDS = {
     "was",
     "were",
     "with",
+}
+COMPARATIVE_TOKENS = {
+    "compare",
+    "comparison",
+    "versus",
+    "vs",
+    "difference",
+    "different",
+    "between",
+    "against",
+    "对比",
+    "比较",
+    "差异",
+    "区别",
 }
 
 
@@ -176,6 +200,9 @@ def confidence_bonus(value: str | None) -> float:
 def render_references_from_unit(unit: dict[str, Any]) -> list[str]:
     """Return the render references attached to a unit in normalized form."""
     refs: list[str] = []
+    render_assets = unit.get("render_assets", [])
+    if isinstance(render_assets, list):
+        refs.extend(value for value in render_assets if isinstance(value, str) and value)
     rendered_asset = unit.get("rendered_asset")
     if isinstance(rendered_asset, str) and rendered_asset:
         refs.append(rendered_asset)
@@ -197,6 +224,132 @@ def summarized_consumer_text(consumer: dict[str, Any]) -> str:
         if isinstance(value, str) and value:
             return value
     return str(consumer_type or "knowledge consumer")
+
+
+def _deduplicate_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if isinstance(value, str) and value))
+
+
+def _pdf_document_context(source_dir: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    payload = read_json(source_dir / "pdf_document.json")
+    if not isinstance(payload, dict):
+        return {}, {}
+    page_lookup = {
+        str(item["unit_id"]): item
+        for item in payload.get("page_contexts", [])
+        if isinstance(item, dict) and isinstance(item.get("unit_id"), str)
+    }
+    return page_lookup, payload
+
+
+def _overlay_maps(
+    source_dir: Path,
+) -> tuple[
+    dict[str, dict[str, Any]], dict[str, list[str]], dict[str, list[str]], dict[str, str | None]
+]:
+    overlays = load_semantic_overlays(source_dir)
+    unit_texts: dict[str, list[str]] = {}
+    artifact_texts: defaultdict[str, list[str]] = defaultdict(list)
+    artifact_relation_texts: defaultdict[str, list[str]] = defaultdict(list)
+    unit_confidence: dict[str, str | None] = {}
+    for unit_id, payload in overlays.items():
+        unit_texts[unit_id] = overlay_search_strings(payload)
+        unit_confidence[unit_id] = overlay_confidence(payload)
+        for item in payload.get("artifact_annotations", []):
+            if not isinstance(item, dict):
+                continue
+            artifact_id = item.get("artifact_id")
+            if isinstance(artifact_id, str) and artifact_id:
+                artifact_texts[artifact_id].extend(
+                    value
+                    for value in (
+                        item.get("label"),
+                        item.get("text"),
+                        item.get("summary"),
+                    )
+                    if isinstance(value, str) and value.strip()
+                )
+        for relation in payload.get("cross_region_relations", []):
+            if not isinstance(relation, dict):
+                continue
+            relation_text = _deduplicate_strings(
+                [
+                    value.strip()
+                    for value in (
+                        relation.get("relation_type"),
+                        relation.get("text"),
+                        relation.get("summary"),
+                    )
+                    if isinstance(value, str) and value.strip()
+                ]
+            )
+            for key in ("from_artifact_id", "to_artifact_id"):
+                artifact_id = relation.get(key)
+                if isinstance(artifact_id, str) and artifact_id:
+                    artifact_relation_texts[artifact_id].extend(relation_text)
+    return (
+        overlays,
+        {key: _deduplicate_strings(values) for key, values in unit_texts.items()},
+        {key: _deduplicate_strings(values) for key, values in artifact_texts.items()},
+        unit_confidence,
+    )
+
+
+def _overlay_relation_map(source_dir: Path) -> dict[str, list[str]]:
+    overlays = load_semantic_overlays(source_dir)
+    relation_map: defaultdict[str, list[str]] = defaultdict(list)
+    for payload in overlays.values():
+        for relation in payload.get("cross_region_relations", []):
+            if not isinstance(relation, dict):
+                continue
+            texts = _deduplicate_strings(
+                [
+                    value.strip()
+                    for value in (
+                        relation.get("relation_type"),
+                        relation.get("text"),
+                        relation.get("summary"),
+                    )
+                    if isinstance(value, str) and value.strip()
+                ]
+            )
+            for key in ("from_artifact_id", "to_artifact_id"):
+                artifact_id = relation.get(key)
+                if isinstance(artifact_id, str) and artifact_id:
+                    relation_map[artifact_id].extend(texts)
+    return {key: _deduplicate_strings(values) for key, values in relation_map.items()}
+
+
+def _source_document_context_text(source_dir: Path, evidence_manifest: dict[str, Any]) -> str:
+    parts: list[str] = []
+    pdf_document = read_json(source_dir / "pdf_document.json")
+    if isinstance(pdf_document, dict):
+        parts.extend(
+            str(node.get("title"))
+            for node in pdf_document.get("outline_nodes", [])
+            if isinstance(node, dict) and isinstance(node.get("title"), str)
+        )
+        parts.extend(
+            str(value)
+            for value in pdf_document.get("document_role_hints", [])
+            if isinstance(value, str)
+        )
+    workbook = read_json(source_dir / "spreadsheet_workbook.json")
+    if isinstance(workbook, dict):
+        parts.extend(
+            str(item.get("sheet_name"))
+            for item in workbook.get("sheet_inventory", [])
+            if isinstance(item, dict) and isinstance(item.get("sheet_name"), str)
+        )
+    return "\n".join(_deduplicate_strings(parts))
+
+
+def _is_comparative_query(query: str, query_tokens: list[str]) -> bool:
+    lowered = query.lower()
+    if any(token in lowered for token in {" vs ", " versus "}):
+        return True
+    return any(token in COMPARATIVE_TOKENS for token in query_tokens)
+
 
 def ensure_log_directories(paths: WorkspacePaths) -> None:
     """Create the Phase 4 private log directories."""
@@ -261,6 +414,7 @@ def build_retrieval_artifacts(
 
     source_records: list[dict[str, Any]] = []
     unit_records: list[dict[str, Any]] = []
+    artifact_records: list[dict[str, Any]] = []
 
     for context in source_contexts:
         source_manifest = context["source_manifest"]
@@ -286,6 +440,15 @@ def build_retrieval_artifacts(
             source_dir = (
                 paths.knowledge_target_dir(target) / "sources" / source_manifest["source_id"]
             )
+        pdf_page_contexts, pdf_document = _pdf_document_context(source_dir)
+        (
+            semantic_overlays,
+            overlay_unit_texts,
+            overlay_artifact_texts,
+            overlay_unit_confidence,
+        ) = _overlay_maps(source_dir)
+        overlay_relation_texts = _overlay_relation_map(source_dir)
+        document_context = _source_document_context_text(source_dir, evidence_manifest)
         citation_count = len(citations_from_knowledge(knowledge))
         unit_count = len(
             [
@@ -384,6 +547,7 @@ def build_retrieval_artifacts(
             "source_aliases": source_manifest.get("source_aliases", []),
             "warnings": source_warnings,
             "trust_prior": source_manifest.get("trust_prior", {}),
+            "document_context": document_context,
             "path_tokens": tokenize_text(source_manifest["current_path"]),
             "searchable_text": "\n".join(
                 [
@@ -395,6 +559,7 @@ def build_retrieval_artifacts(
                     "\n".join(str(value) for value in claims),
                     flatten_channel_descriptors(channel_descriptors),
                     source_manifest["current_path"],
+                    document_context,
                     summary_text,
                 ]
             ),
@@ -417,6 +582,9 @@ def build_retrieval_artifacts(
             if isinstance(structure_asset, str) and structure_asset:
                 structure_data = read_json(source_dir / structure_asset)
             unit_affordance = affordance_lookup.get(unit["unit_id"], {})
+            pdf_context = pdf_page_contexts.get(unit["unit_id"], {})
+            overlay_payload = semantic_overlays.get(unit["unit_id"], {})
+            overlay_texts = overlay_unit_texts.get(unit["unit_id"], [])
             unit_channels = available_channels_from_record(unit_affordance)
             unit_channel_descriptors = channel_descriptors_from_record(unit_affordance)
             record = {
@@ -451,6 +619,7 @@ def build_retrieval_artifacts(
                 "text_asset": text_asset,
                 "structure_asset": structure_asset,
                 "render_references": render_references_from_unit(unit),
+                "render_page_span": unit.get("render_page_span"),
                 "embedded_media": unit.get("embedded_media", []),
                 "available_channels": unit_channels,
                 "channel_descriptors": unit_channel_descriptors,
@@ -473,6 +642,59 @@ def build_retrieval_artifacts(
                 "heading_aliases": unit.get("heading_aliases", []),
                 "semantic_page_aliases": unit.get("semantic_page_aliases", []),
                 "locator_aliases": unit.get("locator_aliases", []),
+                "section_path": pdf_context.get("section_path", unit.get("section_path", [])),
+                "procedure_hints": [
+                    str(span.get("text_excerpt") or "")
+                    for span in pdf_context.get("procedure_spans", [])
+                    if isinstance(span, dict) and str(span.get("text_excerpt") or "").strip()
+                ]
+                if isinstance(pdf_context.get("procedure_spans"), list)
+                else [],
+                "semantic_labels": overlay_texts,
+                "semantic_confidence": overlay_unit_confidence.get(unit["unit_id"]),
+                "derivation_mode": (
+                    str(overlay_payload.get("derivation_mode"))
+                    if isinstance(overlay_payload.get("derivation_mode"), str)
+                    else "deterministic"
+                ),
+                "semantic_overlay_asset": (
+                    str(Path("semantic_overlay") / f"{unit['unit_id']}.json")
+                    if overlay_payload
+                    else None
+                ),
+                "covered_slots": (
+                    [
+                        slot
+                        for slot in overlay_payload.get("covered_slots", [])
+                        if isinstance(slot, str)
+                    ]
+                    if overlay_payload
+                    else []
+                ),
+                "blocked_slots": (
+                    [
+                        slot
+                        for slot in overlay_payload.get("blocked_slots", [])
+                        if isinstance(slot, str)
+                    ]
+                    if overlay_payload
+                    else []
+                ),
+                "semantic_overlay_consumed_inputs": (
+                    dict(overlay_payload.get("consumed_inputs", {}))
+                    if overlay_payload and isinstance(overlay_payload.get("consumed_inputs"), dict)
+                    else None
+                ),
+                "semantic_gap_hints": unit.get(
+                    "semantic_gap_hints",
+                    pdf_context.get("semantic_gap_hints", []),
+                ),
+                "text_layer_quality": (
+                    unit.get("text_layer_quality") or pdf_context.get("text_layer_quality")
+                ),
+                "page_image_artifact_id": (
+                    unit.get("page_image_artifact_id") or pdf_context.get("page_image_artifact_id")
+                ),
                 "cell_hint_supported": unit.get("cell_hint_supported", False),
                 "child_source_id": structure_data.get("child_source_id"),
                 "published_asset": structure_data.get("published_asset"),
@@ -486,25 +708,132 @@ def build_retrieval_artifacts(
                 "trust_prior_inputs": unit.get("trust_prior_inputs", {}),
                 "text": extracted_text,
                 "structure_summary": json.dumps(structure_data, ensure_ascii=False, sort_keys=True),
-                "searchable_text": "\n".join(
-                    [
-                        str(unit.get("title", "")),
-                        extracted_text,
-                        json.dumps(structure_data, ensure_ascii=False, sort_keys=True),
-                        flatten_channel_descriptors(unit_channel_descriptors),
-                    ]
-                ),
+                "searchable_text": "",
             }
+            record["searchable_text"] = "\n".join(
+                part
+                for part in [
+                    str(unit.get("title", "")),
+                    extracted_text,
+                    json.dumps(structure_data, ensure_ascii=False, sort_keys=True),
+                    "\n".join(str(value) for value in record.get("section_path", [])),
+                    "\n".join(str(value) for value in record.get("procedure_hints", [])),
+                    "\n".join(str(value) for value in record.get("semantic_gap_hints", [])),
+                    str(record.get("text_layer_quality") or ""),
+                    str(record.get("page_image_artifact_id") or ""),
+                    flatten_channel_descriptors(unit_channel_descriptors),
+                    "\n".join(overlay_texts),
+                ]
+                if part
+            )
             unit_records.append(record)
+
+        artifact_index = read_json(source_dir / "artifact_index.json")
+        unit_lookup = {
+            str(unit["unit_id"]): unit
+            for unit in evidence_manifest.get("units", [])
+            if isinstance(unit, dict) and isinstance(unit.get("unit_id"), str)
+        }
+        for artifact in artifact_index.get("artifacts", []):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = artifact.get("artifact_id")
+            unit_id = artifact.get("unit_id")
+            if not isinstance(artifact_id, str) or not artifact_id:
+                continue
+            if not isinstance(unit_id, str) or unit_id not in unit_lookup:
+                continue
+            unit = unit_lookup[unit_id]
+            page_context = pdf_page_contexts.get(unit_id, {})
+            overlay_payload = semantic_overlays.get(unit_id, {})
+            render_assets = artifact.get("render_assets", [])
+            semantic_labels = _deduplicate_strings(
+                overlay_artifact_texts.get(artifact_id, [])
+                + overlay_relation_texts.get(artifact_id, [])
+            )
+            artifact_records.append(
+                {
+                    "source_id": source_manifest["source_id"],
+                    "source_fingerprint": source_manifest["source_fingerprint"],
+                    "current_path": source_manifest["current_path"],
+                    "document_type": source_manifest["document_type"],
+                    "source_family": source_family,
+                    "trust_tier": trust_tier,
+                    "pending_promotion": pending_promotion,
+                    "artifact_id": artifact_id,
+                    "artifact_type": artifact.get("artifact_type"),
+                    "unit_id": unit_id,
+                    "unit_type": unit.get("unit_type"),
+                    "title": artifact.get("title"),
+                    "artifact_path": artifact.get("artifact_path"),
+                    "locator_aliases": artifact.get("locator_aliases", []),
+                    "available_channels": artifact.get("available_channels", []),
+                    "render_references": [
+                        value for value in render_assets if isinstance(value, str) and value
+                    ],
+                    "focus_render_assets": [
+                        value
+                        for value in artifact.get("focus_render_assets", [])
+                        if isinstance(value, str) and value
+                    ],
+                    "render_page_span": artifact.get("render_page_span"),
+                    "bbox": artifact.get("bbox"),
+                    "normalized_bbox": artifact.get("normalized_bbox"),
+                    "graph_promoted": bool(artifact.get("graph_promoted", False)),
+                    "visual_hints": artifact.get("visual_hints", []),
+                    "linked_text": artifact.get("linked_text"),
+                    "section_path": artifact.get(
+                        "section_path", page_context.get("section_path", [])
+                    ),
+                    "caption_text": artifact.get("caption_text"),
+                    "continuation_group_ids": artifact.get("continuation_group_ids", []),
+                    "procedure_hints": artifact.get("procedure_hints", []),
+                    "semantic_labels": semantic_labels,
+                    "semantic_confidence": overlay_confidence(overlay_payload),
+                    "derivation_mode": (
+                        str(overlay_payload.get("derivation_mode"))
+                        if overlay_payload
+                        else str(artifact.get("derivation_mode") or "deterministic")
+                    ),
+                    "semantic_overlay_asset": (
+                        str(Path("semantic_overlay") / f"{unit_id}.json")
+                        if overlay_payload
+                        else None
+                    ),
+                    "semantic_gap_hints": artifact.get("semantic_gap_hints", []),
+                    "text_layer_quality": artifact.get("text_layer_quality"),
+                    "searchable_text": "\n".join(
+                        part
+                        for part in [
+                            str(artifact.get("searchable_text") or artifact.get("title") or ""),
+                            "\n".join(str(value) for value in artifact.get("section_path", []))
+                            if isinstance(artifact.get("section_path"), list)
+                            else "\n".join(
+                                str(value) for value in page_context.get("section_path", [])
+                            ),
+                            str(artifact.get("caption_text") or ""),
+                            "\n".join(str(value) for value in artifact.get("procedure_hints", [])),
+                            "\n".join(
+                                str(value) for value in artifact.get("semantic_gap_hints", [])
+                            ),
+                            str(artifact.get("text_layer_quality") or ""),
+                            "\n".join(semantic_labels),
+                        ]
+                        if part
+                    ),
+                }
+            )
 
     write_json(paths.retrieval_source_records_path(target), {"records": source_records})
     write_json(paths.retrieval_unit_records_path(target), {"records": unit_records})
+    write_json(paths.retrieval_artifact_records_path(target), {"records": artifact_records})
     manifest = {
         "generated_at": utc_now(),
         "target": target,
         "source_signature": source_signature,
         "source_count": len(source_records),
         "unit_count": len(unit_records),
+        "artifact_count": len(artifact_records),
         "graph_edge_count": len(graph_edges),
         "source_record_path": str(
             paths.retrieval_source_records_path(target).relative_to(
@@ -513,6 +842,11 @@ def build_retrieval_artifacts(
         ),
         "unit_record_path": str(
             paths.retrieval_unit_records_path(target).relative_to(
+                paths.knowledge_target_dir(target)
+            )
+        ),
+        "artifact_record_path": str(
+            paths.retrieval_artifact_records_path(target).relative_to(
                 paths.knowledge_target_dir(target)
             )
         ),
@@ -574,6 +908,9 @@ def build_trace_artifacts(
             source_dir = Path(artifact_dir)
         else:
             source_dir = paths.knowledge_target_dir(target) / "sources" / source_id
+        pdf_page_contexts, _pdf_document = _pdf_document_context(source_dir)
+        semantic_overlays = load_semantic_overlays(source_dir)
+        overlay_relation_texts = _overlay_relation_map(source_dir)
 
         consumers_by_unit: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
         top_level_citations: list[dict[str, Any]] = []
@@ -669,7 +1006,12 @@ def build_trace_artifacts(
             "affordance_derivation_mode": affordance_derivation_mode,
             "source_manifest_path": "source_manifest.json",
             "evidence_manifest_path": "evidence_manifest.json",
+            "artifact_index_path": "artifact_index.json",
+            "pdf_document_path": (
+                "pdf_document.json" if (source_dir / "pdf_document.json").exists() else None
+            ),
             "derived_affordance_path": DEFAULT_AFFORDANCE_FILENAME,
+            "semantic_overlay_assets": collect_semantic_overlay_assets(source_dir),
             "path_aliases": source_manifest.get("path_aliases", []),
             "title_aliases": source_manifest.get("title_aliases", []),
             "source_aliases": source_manifest.get("source_aliases", []),
@@ -690,11 +1032,99 @@ def build_trace_artifacts(
                     if isinstance(render, str)
                 }
             ),
+            "artifact_ids": sorted(
+                {
+                    str(artifact.get("artifact_id"))
+                    for artifact in read_json(source_dir / "artifact_index.json").get(
+                        "artifacts", []
+                    )
+                    if isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str)
+                }
+            ),
         }
         relation_index[source_id] = {
             "outgoing": outgoing_edges[source_id],
             "incoming": incoming_edges[source_id],
         }
+        artifact_index = read_json(source_dir / "artifact_index.json")
+        artifacts_by_unit: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        for artifact in artifact_index.get("artifacts", []):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_identifier = artifact.get("artifact_id")
+            artifact_unit_id = artifact.get("unit_id")
+            if not isinstance(artifact_identifier, str) or not artifact_identifier:
+                continue
+            if not isinstance(artifact_unit_id, str) or not artifact_unit_id:
+                continue
+            artifacts_by_unit[artifact_unit_id].append(
+                {
+                    "artifact_id": artifact_identifier,
+                    "artifact_type": artifact.get("artifact_type"),
+                    "title": artifact.get("title"),
+                    "artifact_path": artifact.get("artifact_path"),
+                    "locator_aliases": artifact.get("locator_aliases", []),
+                    "available_channels": artifact.get("available_channels", []),
+                    "render_references": artifact.get("render_assets", []),
+                    "focus_render_assets": artifact.get("focus_render_assets", []),
+                    "render_page_span": artifact.get("render_page_span"),
+                    "bbox": artifact.get("bbox"),
+                    "normalized_bbox": artifact.get("normalized_bbox"),
+                    "graph_promoted": bool(artifact.get("graph_promoted", False)),
+                    "linked_text": artifact.get("linked_text"),
+                    "visual_hints": artifact.get("visual_hints", []),
+                    "section_path": artifact.get(
+                        "section_path",
+                        pdf_page_contexts.get(artifact_unit_id, {}).get("section_path", []),
+                    ),
+                    "caption_text": artifact.get("caption_text"),
+                    "continuation_group_ids": artifact.get("continuation_group_ids", []),
+                    "procedure_hints": artifact.get("procedure_hints", []),
+                    "semantic_labels": _deduplicate_strings(
+                        overlay_search_strings(semantic_overlays.get(artifact_unit_id, {}))
+                        + overlay_relation_texts.get(artifact_identifier, [])
+                    ),
+                    "semantic_confidence": overlay_confidence(
+                        semantic_overlays.get(artifact_unit_id, {})
+                    ),
+                    "derivation_mode": (
+                        str(semantic_overlays.get(artifact_unit_id, {}).get("derivation_mode"))
+                        if semantic_overlays.get(artifact_unit_id)
+                        else str(artifact.get("derivation_mode") or "deterministic")
+                    ),
+                    "semantic_overlay_asset": (
+                        str(Path("semantic_overlay") / f"{artifact_unit_id}.json")
+                        if semantic_overlays.get(artifact_unit_id)
+                        else None
+                    ),
+                    "covered_slots": [
+                        slot
+                        for slot in semantic_overlays.get(artifact_unit_id, {}).get(
+                            "covered_slots",
+                            [],
+                        )
+                        if isinstance(slot, str)
+                    ],
+                    "blocked_slots": [
+                        slot
+                        for slot in semantic_overlays.get(artifact_unit_id, {}).get(
+                            "blocked_slots",
+                            [],
+                        )
+                        if isinstance(slot, str)
+                    ],
+                    "semantic_overlay_consumed_inputs": (
+                        dict(semantic_overlays.get(artifact_unit_id, {}).get("consumed_inputs", {}))
+                        if isinstance(
+                            semantic_overlays.get(artifact_unit_id, {}).get("consumed_inputs"),
+                            dict,
+                        )
+                        else None
+                    ),
+                    "semantic_gap_hints": artifact.get("semantic_gap_hints", []),
+                    "text_layer_quality": artifact.get("text_layer_quality"),
+                }
+            )
 
         for unit in evidence_manifest.get("units", []):
             if not isinstance(unit, dict) or not isinstance(unit.get("unit_id"), str):
@@ -759,6 +1189,41 @@ def build_trace_artifacts(
                 "heading_aliases": unit.get("heading_aliases", []),
                 "semantic_page_aliases": unit.get("semantic_page_aliases", []),
                 "locator_aliases": unit.get("locator_aliases", []),
+                "section_path": pdf_page_contexts.get(unit_id, {}).get(
+                    "section_path", unit.get("section_path", [])
+                ),
+                "procedure_hints": [
+                    str(span.get("text_excerpt") or "")
+                    for span in pdf_page_contexts.get(unit_id, {}).get("procedure_spans", [])
+                    if isinstance(span, dict) and str(span.get("text_excerpt") or "").strip()
+                ],
+                "semantic_labels": overlay_search_strings(semantic_overlays.get(unit_id, {})),
+                "semantic_confidence": overlay_confidence(semantic_overlays.get(unit_id, {})),
+                "derivation_mode": (
+                    str(semantic_overlays.get(unit_id, {}).get("derivation_mode"))
+                    if semantic_overlays.get(unit_id)
+                    else "deterministic"
+                ),
+                "semantic_overlay_asset": (
+                    str(Path("semantic_overlay") / f"{unit_id}.json")
+                    if semantic_overlays.get(unit_id)
+                    else None
+                ),
+                "covered_slots": [
+                    slot
+                    for slot in semantic_overlays.get(unit_id, {}).get("covered_slots", [])
+                    if isinstance(slot, str)
+                ],
+                "blocked_slots": [
+                    slot
+                    for slot in semantic_overlays.get(unit_id, {}).get("blocked_slots", [])
+                    if isinstance(slot, str)
+                ],
+                "semantic_overlay_consumed_inputs": (
+                    dict(semantic_overlays.get(unit_id, {}).get("consumed_inputs", {}))
+                    if isinstance(semantic_overlays.get(unit_id, {}).get("consumed_inputs"), dict)
+                    else None
+                ),
                 "cell_hint_supported": unit.get("cell_hint_supported", False),
                 "child_source_id": structure_data.get("child_source_id"),
                 "published_asset": structure_data.get("published_asset"),
@@ -770,8 +1235,35 @@ def build_trace_artifacts(
                 "text_asset": text_asset,
                 "structure_asset": structure_asset,
                 "render_references": render_references_from_unit(unit),
+                "focus_render_assets": deduplicate_strings(
+                    [
+                        asset
+                        for artifact in artifacts_by_unit[unit_id]
+                        for asset in artifact.get("focus_render_assets", [])
+                        if isinstance(asset, str) and asset
+                    ]
+                ),
+                "render_page_span": unit.get("render_page_span"),
                 "embedded_media": unit.get("embedded_media", []),
                 "text_excerpt": extracted_text,
+                "semantic_gap_hints": unit.get(
+                    "semantic_gap_hints",
+                    pdf_page_contexts.get(unit_id, {}).get("semantic_gap_hints", []),
+                ),
+                "text_layer_quality": (
+                    unit.get("text_layer_quality")
+                    or pdf_page_contexts.get(unit_id, {}).get("text_layer_quality")
+                ),
+                "page_image_artifact_id": (
+                    unit.get("page_image_artifact_id")
+                    or pdf_page_contexts.get(unit_id, {}).get("page_image_artifact_id")
+                ),
+                "artifacts": artifacts_by_unit[unit_id],
+                "artifact_ids": [
+                    item["artifact_id"]
+                    for item in artifacts_by_unit[unit_id]
+                    if isinstance(item.get("artifact_id"), str)
+                ],
                 "consumers": consumers_by_unit[unit_id],
             }
             knowledge_consumers[key] = {
@@ -999,7 +1491,13 @@ def load_retrieval_data(paths: WorkspacePaths, *, target: str = "current") -> di
     manifest = read_json(paths.retrieval_manifest_path(target))
     source_records = read_json(paths.retrieval_source_records_path(target)).get("records", [])
     unit_records = read_json(paths.retrieval_unit_records_path(target)).get("records", [])
-    if not manifest or not isinstance(source_records, list) or not isinstance(unit_records, list):
+    artifact_records = read_json(paths.retrieval_artifact_records_path(target)).get("records", [])
+    if (
+        not manifest
+        or not isinstance(source_records, list)
+        or not isinstance(unit_records, list)
+        or not isinstance(artifact_records, list)
+    ):
         raise FileNotFoundError(
             f"Retrieval artifacts are missing for `{target}`. Rerun `docmason sync`."
         )
@@ -1023,6 +1521,13 @@ def load_retrieval_data(paths: WorkspacePaths, *, target: str = "current") -> di
             for record in unit_records
             if isinstance(record, dict)
         ],
+        "artifact_records": [
+            _normalize_affordance_record(
+                _normalize_memory_semantics_record(paths, target=target, record=record)
+            )
+            for record in artifact_records
+            if isinstance(record, dict)
+        ],
     }
 
 
@@ -1036,6 +1541,7 @@ def merge_pending_interaction_overlay(
         "manifest": dict(retrieval_data["manifest"]),
         "source_records": list(retrieval_data["source_records"]),
         "unit_records": list(retrieval_data["unit_records"]),
+        "artifact_records": list(retrieval_data.get("artifact_records", [])),
         "graph_edges": list(retrieval_data.get("graph_edges", [])),
     }
     overlay_source_records = overlay.get("source_records", [])
@@ -1153,7 +1659,8 @@ def _effective_source_ids_from_reference(
     resolved_source_id = reference_resolution.get("resolved_source_id")
     source_match_status = str(reference_resolution.get("source_match_status") or "none")
     unit_match_status = str(reference_resolution.get("unit_match_status") or "none")
-    should_narrow = source_match_status == "exact" or (
+    source_narrowing_allowed = bool(reference_resolution.get("source_narrowing_allowed"))
+    should_narrow = (source_match_status == "exact" and source_narrowing_allowed) or (
         source_match_status == "approximate" and unit_match_status == "exact"
     )
     if should_narrow and isinstance(resolved_source_id, str) and resolved_source_id.strip():
@@ -1277,6 +1784,8 @@ def choose_support_units(
     source_record: dict[str, Any],
     unit_scores: list[dict[str, Any]],
     units_by_source: dict[str, list[dict[str, Any]]],
+    *,
+    artifact_matches_by_unit: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Choose the compact support units for a result bundle."""
     lookup = {
@@ -1293,7 +1802,23 @@ def choose_support_units(
                 {
                     **unit,
                     **scored,
+                    "matched_artifacts": list(
+                        (artifact_matches_by_unit or {}).get(str(unit.get("unit_id")), [])
+                    )[:3],
+                    "focus_render_assets": deduplicate_strings(
+                        [
+                            asset
+                            for artifact in (artifact_matches_by_unit or {}).get(
+                                str(unit.get("unit_id")),
+                                [],
+                            )
+                            if isinstance(artifact, dict)
+                            for asset in artifact.get("focus_render_assets", [])
+                            if isinstance(asset, str) and asset
+                        ]
+                    ),
                     "render_references": unit.get("render_references", []),
+                    "render_page_span": unit.get("render_page_span"),
                     "embedded_media": unit.get("embedded_media", []),
                     "structure_asset": unit.get("structure_asset"),
                     "line_start": unit.get("line_start"),
@@ -1306,11 +1831,97 @@ def choose_support_units(
                     "affordance_confidence": unit.get("affordance_confidence"),
                     "affordance_derivation_mode": unit.get("affordance_derivation_mode"),
                     "extraction_confidence": unit.get("extraction_confidence"),
+                    "section_path": unit.get("section_path", []),
+                    "procedure_hints": unit.get("procedure_hints", []),
+                    "semantic_labels": unit.get("semantic_labels", []),
+                    "semantic_confidence": unit.get("semantic_confidence"),
+                    "derivation_mode": unit.get("derivation_mode", "deterministic"),
+                    "semantic_overlay_asset": unit.get("semantic_overlay_asset"),
+                    "covered_slots": unit.get("covered_slots", []),
+                    "blocked_slots": unit.get("blocked_slots", []),
+                    "semantic_overlay_consumed_inputs": unit.get(
+                        "semantic_overlay_consumed_inputs"
+                    ),
+                    "semantic_gap_hints": unit.get("semantic_gap_hints", []),
+                    "text_layer_quality": unit.get("text_layer_quality"),
+                    "page_image_artifact_id": unit.get("page_image_artifact_id"),
                     "warnings": unit.get("warnings", []),
                     "text_excerpt": unit.get("text", ""),
                 }
             )
         return scored_support_units
+    artifact_units = [
+        unit_id for unit_id, matches in (artifact_matches_by_unit or {}).items() if matches
+    ]
+    if artifact_units:
+        artifact_support_units: list[dict[str, Any]] = []
+        for unit_id in artifact_units:
+            artifact_unit = lookup.get(unit_id)
+            if artifact_unit is None:
+                continue
+            artifact_support_units.append(
+                {
+                    "unit_id": artifact_unit["unit_id"],
+                    "title": artifact_unit.get("title"),
+                    "matched_artifacts": list(
+                        (artifact_matches_by_unit or {}).get(str(artifact_unit.get("unit_id")), [])
+                    )[:3],
+                    "focus_render_assets": deduplicate_strings(
+                        [
+                            asset
+                            for artifact in (artifact_matches_by_unit or {}).get(
+                                str(artifact_unit.get("unit_id")),
+                                [],
+                            )
+                            if isinstance(artifact, dict)
+                            for asset in artifact.get("focus_render_assets", [])
+                            if isinstance(asset, str) and asset
+                        ]
+                    ),
+                    "score": {
+                        "lexical": 0.0,
+                        "metadata_bonus": confidence_bonus(
+                            artifact_unit.get("extraction_confidence")
+                        ),
+                        "total": confidence_bonus(artifact_unit.get("extraction_confidence")),
+                    },
+                    "matched_terms": [],
+                    "render_references": artifact_unit.get("render_references", []),
+                    "render_page_span": artifact_unit.get("render_page_span"),
+                    "embedded_media": artifact_unit.get("embedded_media", []),
+                    "structure_asset": artifact_unit.get("structure_asset"),
+                    "line_start": artifact_unit.get("line_start"),
+                    "line_end": artifact_unit.get("line_end"),
+                    "slug_anchor": artifact_unit.get("slug_anchor"),
+                    "header_names": artifact_unit.get("header_names", []),
+                    "row_count": artifact_unit.get("row_count"),
+                    "available_channels": artifact_unit.get("available_channels", []),
+                    "channel_descriptors": artifact_unit.get("channel_descriptors", {}),
+                    "affordance_confidence": artifact_unit.get("affordance_confidence"),
+                    "affordance_derivation_mode": artifact_unit.get("affordance_derivation_mode"),
+                    "extraction_confidence": artifact_unit.get("extraction_confidence"),
+                    "section_path": artifact_unit.get("section_path", []),
+                    "procedure_hints": artifact_unit.get("procedure_hints", []),
+                    "semantic_labels": artifact_unit.get("semantic_labels", []),
+                    "semantic_confidence": artifact_unit.get("semantic_confidence"),
+                    "derivation_mode": artifact_unit.get("derivation_mode", "deterministic"),
+                    "semantic_overlay_asset": artifact_unit.get("semantic_overlay_asset"),
+                    "covered_slots": artifact_unit.get("covered_slots", []),
+                    "blocked_slots": artifact_unit.get("blocked_slots", []),
+                    "semantic_overlay_consumed_inputs": artifact_unit.get(
+                        "semantic_overlay_consumed_inputs"
+                    ),
+                    "semantic_gap_hints": artifact_unit.get("semantic_gap_hints", []),
+                    "text_layer_quality": artifact_unit.get("text_layer_quality"),
+                    "page_image_artifact_id": artifact_unit.get("page_image_artifact_id"),
+                    "warnings": artifact_unit.get("warnings", []),
+                    "text_excerpt": artifact_unit.get("text", ""),
+                }
+            )
+            if len(artifact_support_units) >= 3:
+                break
+        if artifact_support_units:
+            return artifact_support_units
     cited_units = [
         unit_id
         for unit_id in source_record.get("top_citation_unit_ids", [])
@@ -1327,6 +1938,21 @@ def choose_support_units(
             {
                 "unit_id": cited_unit["unit_id"],
                 "title": cited_unit.get("title"),
+                "matched_artifacts": list(
+                    (artifact_matches_by_unit or {}).get(str(cited_unit.get("unit_id")), [])
+                )[:3],
+                "focus_render_assets": deduplicate_strings(
+                    [
+                        asset
+                        for artifact in (artifact_matches_by_unit or {}).get(
+                            str(cited_unit.get("unit_id")),
+                            [],
+                        )
+                        if isinstance(artifact, dict)
+                        for asset in artifact.get("focus_render_assets", [])
+                        if isinstance(asset, str) and asset
+                    ]
+                ),
                 "score": {
                     "lexical": 0.0,
                     "metadata_bonus": confidence_bonus(cited_unit.get("extraction_confidence"))
@@ -1336,6 +1962,7 @@ def choose_support_units(
                 },
                 "matched_terms": [],
                 "render_references": cited_unit.get("render_references", []),
+                "render_page_span": cited_unit.get("render_page_span"),
                 "embedded_media": cited_unit.get("embedded_media", []),
                 "structure_asset": cited_unit.get("structure_asset"),
                 "line_start": cited_unit.get("line_start"),
@@ -1348,6 +1975,20 @@ def choose_support_units(
                 "affordance_confidence": cited_unit.get("affordance_confidence"),
                 "affordance_derivation_mode": cited_unit.get("affordance_derivation_mode"),
                 "extraction_confidence": cited_unit.get("extraction_confidence"),
+                "section_path": cited_unit.get("section_path", []),
+                "procedure_hints": cited_unit.get("procedure_hints", []),
+                "semantic_labels": cited_unit.get("semantic_labels", []),
+                "semantic_confidence": cited_unit.get("semantic_confidence"),
+                "derivation_mode": cited_unit.get("derivation_mode", "deterministic"),
+                "semantic_overlay_asset": cited_unit.get("semantic_overlay_asset"),
+                "covered_slots": cited_unit.get("covered_slots", []),
+                "blocked_slots": cited_unit.get("blocked_slots", []),
+                "semantic_overlay_consumed_inputs": cited_unit.get(
+                    "semantic_overlay_consumed_inputs"
+                ),
+                "semantic_gap_hints": cited_unit.get("semantic_gap_hints", []),
+                "text_layer_quality": cited_unit.get("text_layer_quality"),
+                "page_image_artifact_id": cited_unit.get("page_image_artifact_id"),
                 "warnings": cited_unit.get("warnings", []),
                 "text_excerpt": cited_unit.get("text", ""),
             }
@@ -1413,6 +2054,136 @@ def memory_score_adjustment(
     return True, bonus
 
 
+def _artifact_match_payload(
+    record: dict[str, Any], *, score: float, matched_terms: set[str]
+) -> dict[str, Any]:
+    """Return the retrieval-facing matched-artifact payload."""
+    return {
+        "artifact_id": record.get("artifact_id"),
+        "artifact_type": record.get("artifact_type"),
+        "unit_id": record.get("unit_id"),
+        "title": record.get("title"),
+        "artifact_path": record.get("artifact_path"),
+        "locator_aliases": record.get("locator_aliases", []),
+        "available_channels": record.get("available_channels", []),
+        "render_references": record.get("render_references", []),
+        "focus_render_assets": record.get("focus_render_assets", []),
+        "render_page_span": record.get("render_page_span"),
+        "bbox": record.get("bbox"),
+        "normalized_bbox": record.get("normalized_bbox"),
+        "graph_promoted": bool(record.get("graph_promoted", False)),
+        "visual_hints": record.get("visual_hints", []),
+        "linked_text": record.get("linked_text"),
+        "section_path": record.get("section_path", []),
+        "caption_text": record.get("caption_text"),
+        "continuation_group_ids": record.get("continuation_group_ids", []),
+        "procedure_hints": record.get("procedure_hints", []),
+        "semantic_labels": record.get("semantic_labels", []),
+        "semantic_confidence": record.get("semantic_confidence"),
+        "derivation_mode": record.get("derivation_mode", "deterministic"),
+        "semantic_overlay_asset": record.get("semantic_overlay_asset"),
+        "semantic_gap_hints": record.get("semantic_gap_hints", []),
+        "text_layer_quality": record.get("text_layer_quality"),
+        "matched_terms": sorted(term for term in matched_terms if isinstance(term, str)),
+        "score": round(float(score), 3),
+    }
+
+
+def _recommended_hybrid_targets(
+    paths: WorkspacePaths,
+    *,
+    target: str,
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    hybrid_work = current_hybrid_work(paths, target=target)
+    source_lookup = {
+        str(source.get("source_id")): source
+        for source in hybrid_work.get("sources", [])
+        if isinstance(source, dict) and isinstance(source.get("source_id"), str)
+    }
+    targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        source_id = result.get("source_id")
+        if not isinstance(source_id, str) or source_id not in source_lookup:
+            continue
+        source_packet = source_lookup[source_id]
+        matched_unit_ids = {
+            str(unit.get("unit_id"))
+            for unit in result.get("matched_units", [])
+            if isinstance(unit, dict) and isinstance(unit.get("unit_id"), str)
+        }
+        matched_artifact_ids = {
+            str(artifact.get("artifact_id"))
+            for artifact in result.get("matched_artifacts", [])
+            if isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str)
+        }
+        candidates = [
+            candidate
+            for candidate in source_packet.get("units", [])
+            if isinstance(candidate, dict)
+            and candidate.get("coverage_status") in {"candidate-prepared", "partially-covered"}
+        ]
+        for candidate in candidates:
+            unit_id = candidate.get("unit_id")
+            if not isinstance(unit_id, str):
+                continue
+            candidate_artifact_ids = {
+                str(artifact_id)
+                for artifact_id in candidate.get("target_artifact_ids", [])
+                if isinstance(artifact_id, str)
+            }
+            matched_candidate = (
+                unit_id in matched_unit_ids
+                or bool(candidate_artifact_ids & matched_artifact_ids)
+            )
+            if not matched_candidate and targets:
+                continue
+            key = (source_id, unit_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            selection_reason = (
+                "Matched hard artifacts from the top published retrieval bundle."
+                if candidate_artifact_ids & matched_artifact_ids
+                else "Matched units still have uncovered hybrid slots."
+                if unit_id in matched_unit_ids
+                else "Top-ranked source still has uncovered hybrid slots."
+            )
+            targets.append(
+                {
+                    "source_id": source_id,
+                    "unit_id": unit_id,
+                    "artifact_ids": [
+                        artifact_id
+                        for artifact_id in candidate.get("target_artifact_ids", [])
+                        if isinstance(artifact_id, str)
+                    ],
+                    "selection_reason": selection_reason,
+                    "required_overlay_slots": [
+                        slot
+                        for slot in candidate.get("required_overlay_slots", [])
+                        if isinstance(slot, str)
+                    ],
+                    "target_focus_render_assets": [
+                        asset
+                        for asset in candidate.get("target_focus_render_assets", [])
+                        if isinstance(asset, str)
+                    ],
+                    "target_render_assets": [
+                        asset
+                        for asset in candidate.get("target_render_assets", [])
+                        if isinstance(asset, str)
+                    ],
+                }
+            )
+            if len(targets) >= 8:
+                return targets
+    return targets
+
+
 def run_retrieval_query(
     retrieval_data: dict[str, Any],
     *,
@@ -1441,6 +2212,9 @@ def run_retrieval_query(
     memory_profile = infer_memory_query_profile(query, question_domain=effective_question_domain)
     source_records = retrieval_data["source_records"]
     unit_records = retrieval_data["unit_records"]
+    artifact_records = [
+        record for record in retrieval_data.get("artifact_records", []) if isinstance(record, dict)
+    ]
     graph_edges = [edge for edge in retrieval_data.get("graph_edges", []) if isinstance(edge, dict)]
 
     filtered_document_types = set(document_types or [])
@@ -1467,6 +2241,11 @@ def run_retrieval_query(
     for unit in unit_records:
         if isinstance(unit.get("source_id"), str):
             units_by_source[unit["source_id"]].append(unit)
+    artifacts_by_source: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for artifact in artifact_records:
+        source_id = artifact.get("source_id")
+        if isinstance(source_id, str):
+            artifacts_by_source[source_id].append(artifact)
 
     base_scores: dict[str, dict[str, Any]] = {}
     source_lookup: dict[str, dict[str, Any]] = {}
@@ -1505,6 +2284,7 @@ def run_retrieval_query(
                 "affordance",
                 flatten_channel_descriptors(source_record.get("channel_descriptors", {})),
             ),
+            ("document_context", str(source_record.get("document_context", ""))),
             ("path", str(source_record.get("current_path", ""))),
         ):
             score, matches = score_field(query_tokens, text, weight=FIELD_WEIGHTS[field_name])
@@ -1515,9 +2295,7 @@ def run_retrieval_query(
 
         unit_scores: list[dict[str, Any]] = []
         exact_target_unit = bool(
-            source_id == resolved_source_id
-            and resolved_unit_id
-            and resolution_status == "exact"
+            source_id == resolved_source_id and resolved_unit_id and resolution_status == "exact"
         )
         preferred_unit = bool(
             source_id == resolved_source_id
@@ -1545,24 +2323,50 @@ def run_retrieval_query(
                 flatten_channel_descriptors(unit.get("channel_descriptors", {})),
                 weight=FIELD_WEIGHTS["unit_affordance"],
             )
-            lexical_unit += title_score + text_score + affordance_score
+            context_score, context_matches = score_field(
+                query_tokens,
+                "\n".join(
+                    [
+                        "\n".join(str(value) for value in unit.get("section_path", [])),
+                        "\n".join(str(value) for value in unit.get("heading_aliases", [])),
+                        "\n".join(str(value) for value in unit.get("locator_aliases", [])),
+                        "\n".join(str(value) for value in unit.get("procedure_hints", [])),
+                    ]
+                ),
+                weight=FIELD_WEIGHTS["artifact_context"],
+            )
+            overlay_score, overlay_matches = score_field(
+                query_tokens,
+                "\n".join(str(value) for value in unit.get("semantic_labels", [])),
+                weight=FIELD_WEIGHTS["overlay"],
+            )
+            lexical_unit += (
+                title_score + text_score + affordance_score + context_score + overlay_score
+            )
             unit_matches.update(title_matches)
             unit_matches.update(text_matches)
             unit_matches.update(affordance_matches)
+            unit_matches.update(context_matches)
+            unit_matches.update(overlay_matches)
             channel_preference_bonus = _channel_preference_bonus(
                 available_channels_from_record(unit),
                 preferred_channels=preferred_channels,
                 scope="unit",
             )
+            structure_context_bonus = context_score
+            semantic_overlay_bonus = overlay_score
             reference_bonus = 0.0
             if isinstance(unit_id, str) and unit_id == resolved_unit_id:
                 if exact_target_unit:
                     reference_bonus = 12.0
                 elif preferred_unit:
                     reference_bonus = 6.0
-            metadata_bonus = confidence_bonus(unit.get("extraction_confidence")) + (
-                0.2 * float(unit.get("citation_density", 0))
-            ) + channel_preference_bonus + reference_bonus
+            metadata_bonus = (
+                confidence_bonus(unit.get("extraction_confidence"))
+                + (0.2 * float(unit.get("citation_density", 0)))
+                + channel_preference_bonus
+                + reference_bonus
+            )
             total = lexical_unit + metadata_bonus
             if lexical_unit <= 0 and reference_bonus <= 0:
                 continue
@@ -1574,12 +2378,15 @@ def run_retrieval_query(
                     "score": {
                         "lexical": lexical_unit,
                         "metadata_bonus": metadata_bonus,
+                        "structure_context_bonus": structure_context_bonus,
+                        "semantic_overlay_bonus": semantic_overlay_bonus,
                         "channel_preference_bonus": channel_preference_bonus,
                         "reference_bonus": reference_bonus,
                         "total": total,
                     },
                     "matched_terms": sorted(unit_matches),
                     "render_references": unit.get("render_references", []),
+                    "render_page_span": unit.get("render_page_span"),
                     "embedded_media": unit.get("embedded_media", []),
                     "structure_asset": unit.get("structure_asset"),
                     "logical_ordinal": unit.get("logical_ordinal"),
@@ -1598,6 +2405,15 @@ def run_retrieval_query(
                     "affordance_confidence": unit.get("affordance_confidence"),
                     "affordance_derivation_mode": unit.get("affordance_derivation_mode"),
                     "extraction_confidence": unit.get("extraction_confidence"),
+                    "section_path": unit.get("section_path", []),
+                    "procedure_hints": unit.get("procedure_hints", []),
+                    "semantic_labels": unit.get("semantic_labels", []),
+                    "semantic_confidence": unit.get("semantic_confidence"),
+                    "derivation_mode": unit.get("derivation_mode", "deterministic"),
+                    "semantic_overlay_asset": unit.get("semantic_overlay_asset"),
+                    "semantic_gap_hints": unit.get("semantic_gap_hints", []),
+                    "text_layer_quality": unit.get("text_layer_quality"),
+                    "page_image_artifact_id": unit.get("page_image_artifact_id"),
                     "warnings": unit.get("warnings", []),
                     "text_excerpt": str(unit.get("text", ""))[:500],
                 }
@@ -1611,6 +2427,150 @@ def run_retrieval_query(
                     continue
                 unit_scores.insert(0, unit_scores.pop(index))
                 break
+
+        artifact_scores: list[dict[str, Any]] = []
+        artifact_matches_by_unit: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        for artifact in artifacts_by_source[source_id]:
+            unit_id = artifact.get("unit_id")
+            if exact_target_unit and unit_id != resolved_unit_id:
+                continue
+            title_score, title_matches = score_field(
+                query_tokens,
+                str(artifact.get("title", "")),
+                weight=FIELD_WEIGHTS["unit_title"],
+            )
+            alias_score, alias_matches = score_field(
+                query_tokens,
+                "\n".join(str(value) for value in artifact.get("locator_aliases", [])),
+                weight=FIELD_WEIGHTS["unit_title"],
+            )
+            text_score, text_matches = score_field(
+                query_tokens,
+                "\n".join(
+                    [
+                        str(artifact.get("linked_text", "")),
+                        str(artifact.get("searchable_text", "")),
+                        "\n".join(str(value) for value in artifact.get("visual_hints", [])),
+                    ]
+                ),
+                weight=FIELD_WEIGHTS["unit_text"],
+            )
+            context_score, context_matches = score_field(
+                query_tokens,
+                "\n".join(
+                    [
+                        "\n".join(str(value) for value in artifact.get("section_path", [])),
+                        str(artifact.get("caption_text") or ""),
+                        "\n".join(str(value) for value in artifact.get("procedure_hints", [])),
+                        "\n".join(
+                            str(value) for value in artifact.get("continuation_group_ids", [])
+                        ),
+                    ]
+                ),
+                weight=FIELD_WEIGHTS["artifact_context"],
+            )
+            overlay_score, overlay_matches = score_field(
+                query_tokens,
+                "\n".join(str(value) for value in artifact.get("semantic_labels", [])),
+                weight=FIELD_WEIGHTS["overlay"],
+            )
+            lexical_artifact = (
+                title_score + alias_score + text_score + context_score + overlay_score
+            )
+            if lexical_artifact <= 0:
+                continue
+            artifact_matches = set()
+            artifact_matches.update(title_matches)
+            artifact_matches.update(alias_matches)
+            artifact_matches.update(text_matches)
+            artifact_matches.update(context_matches)
+            artifact_matches.update(overlay_matches)
+            matched_terms.update(artifact_matches)
+            artifact_type_bonus = 0.0
+            artifact_type = str(artifact.get("artifact_type") or "")
+            if artifact_type and artifact_type in query_tokens:
+                artifact_type_bonus += 0.5
+            if artifact.get("caption_text") and context_score > 0:
+                artifact_type_bonus += 1.4
+            if artifact_type in {"table", "chart"} and any(
+                token in query_tokens for token in ("table", "chart", "kpi", "metric")
+            ):
+                artifact_type_bonus += 0.35
+            score_total = (
+                lexical_artifact
+                + (0.4 if artifact.get("graph_promoted") else 0.0)
+                + artifact_type_bonus
+            )
+            artifact_payload = _artifact_match_payload(
+                artifact,
+                score=score_total,
+                matched_terms=artifact_matches,
+            )
+            artifact_payload["graph_promotion_bonus"] = (
+                0.4 if artifact.get("graph_promoted") else 0.0
+            )
+            artifact_payload["artifact_type_bonus"] = round(float(artifact_type_bonus), 3)
+            artifact_payload["structure_context_bonus"] = round(float(context_score), 3)
+            artifact_payload["semantic_overlay_bonus"] = round(float(overlay_score), 3)
+            artifact_scores.append(
+                {
+                    "artifact": artifact,
+                    "score": score_total,
+                    "matched_terms": artifact_matches,
+                    "payload": artifact_payload,
+                }
+            )
+            if isinstance(unit_id, str):
+                artifact_matches_by_unit[unit_id].append(artifact_payload)
+        artifact_lookup_by_id = {
+            str(artifact.get("artifact_id")): artifact
+            for artifact in artifacts_by_source[source_id]
+            if isinstance(artifact.get("artifact_id"), str)
+        }
+        for unit in units_by_source[source_id]:
+            unit_id = unit.get("unit_id")
+            if not isinstance(unit_id, str) or artifact_matches_by_unit.get(unit_id):
+                continue
+            page_image_artifact_id = unit.get("page_image_artifact_id")
+            if not isinstance(page_image_artifact_id, str) or not page_image_artifact_id:
+                continue
+            if not (
+                isinstance(unit.get("semantic_labels"), list)
+                and any(
+                    isinstance(value, str) and value.strip()
+                    for value in unit.get("semantic_labels", [])
+                )
+            ):
+                continue
+            page_image_record = artifact_lookup_by_id.get(page_image_artifact_id)
+            if not isinstance(page_image_record, dict):
+                continue
+            bridged_payload = _artifact_match_payload(
+                page_image_record,
+                score=0.15,
+                matched_terms=set(),
+            )
+            artifact_matches_by_unit[unit_id].append(bridged_payload)
+            artifact_scores.append(
+                {
+                    "artifact": page_image_record,
+                    "score": 0.15,
+                    "matched_terms": set(),
+                    "payload": bridged_payload,
+                }
+            )
+        artifact_scores.sort(
+            key=lambda item: (-float(item["score"]), str(item["artifact"].get("artifact_id", "")))
+        )
+        for support_unit_id, artifact_support_candidates in artifact_matches_by_unit.items():
+            ranked_artifact_candidates = sorted(
+                artifact_support_candidates,
+                key=lambda candidate: (
+                    -float(candidate.get("score", 0.0)),
+                    str(candidate.get("artifact_id", "")),
+                ),
+            )
+            artifact_matches_by_unit[support_unit_id] = ranked_artifact_candidates[:3]
 
         channel_preference_bonus = _channel_preference_bonus(
             available_channels_from_record(source_record),
@@ -1627,16 +2587,38 @@ def run_retrieval_query(
             + source_reference_bonus
         )
         lexical_units = sum(float(item["score"]["lexical"]) for item in unit_scores[:3])
+        lexical_artifacts = sum(float(item["score"]) for item in artifact_scores[:5])
         unit_metadata_bonus = sum(
             float(item["score"]["metadata_bonus"]) for item in unit_scores[:3]
         )
-        if lexical_source <= 0 and lexical_units <= 0 and source_reference_bonus <= 0:
+        structure_context_bonus = (
+            field_breakdown.get("document_context", 0.0)
+            + sum(
+                float(item["score"].get("structure_context_bonus", 0.0)) for item in unit_scores[:3]
+            )
+            + sum(
+                float(item["payload"].get("structure_context_bonus", 0.0))
+                for item in artifact_scores[:5]
+            )
+        )
+        semantic_overlay_bonus = sum(
+            float(item["score"].get("semantic_overlay_bonus", 0.0)) for item in unit_scores[:3]
+        ) + sum(
+            float(item["payload"].get("semantic_overlay_bonus", 0.0))
+            for item in artifact_scores[:5]
+        )
+        if (
+            lexical_source <= 0
+            and lexical_units <= 0
+            and lexical_artifacts <= 0
+            and source_reference_bonus <= 0
+        ):
             continue
         allowed, memory_bonus = memory_score_adjustment(
             source_record,
             memory_profile=memory_profile,
             lexical_source=lexical_source,
-            lexical_units=lexical_units,
+            lexical_units=lexical_units + lexical_artifacts,
             question_domain=effective_question_domain,
         )
         if not allowed:
@@ -1644,19 +2626,31 @@ def run_retrieval_query(
         base_score = (
             lexical_source
             + lexical_units
+            + lexical_artifacts
             + metadata_bonus
             + unit_metadata_bonus
             + memory_bonus
         )
+        if lexical_artifacts > 0:
+            field_breakdown["artifacts"] = lexical_artifacts
         base_scores[source_id] = {
             "source_record": source_record,
             "field_breakdown": field_breakdown,
             "matched_terms": matched_terms,
-            "matched_units": choose_support_units(source_record, unit_scores, units_by_source),
+            "matched_units": choose_support_units(
+                source_record,
+                unit_scores,
+                units_by_source,
+                artifact_matches_by_unit=artifact_matches_by_unit,
+            ),
+            "matched_artifacts": [item["payload"] for item in artifact_scores[:5]],
             "score": {
                 "lexical_source": lexical_source,
                 "lexical_units": lexical_units,
+                "lexical_artifacts": lexical_artifacts,
                 "metadata_bonus": metadata_bonus + unit_metadata_bonus,
+                "structure_context_bonus": structure_context_bonus,
+                "semantic_overlay_bonus": semantic_overlay_bonus,
                 "channel_preference_bonus": channel_preference_bonus
                 + sum(
                     float(item["score"].get("channel_preference_bonus", 0.0))
@@ -1666,6 +2660,7 @@ def run_retrieval_query(
                 + sum(float(item["score"].get("reference_bonus", 0.0)) for item in unit_scores[:3]),
                 "memory_bonus": memory_bonus,
                 "graph_bonus": 0.0,
+                "compare_coverage_bonus": 0.0,
                 "total": base_score,
             },
             "graph_expansions": [],
@@ -1677,7 +2672,9 @@ def run_retrieval_query(
         if origin_total <= 0:
             continue
         if (
-            float(result["score"]["lexical_source"]) + float(result["score"]["lexical_units"])
+            float(result["score"]["lexical_source"])
+            + float(result["score"]["lexical_units"])
+            + float(result["score"].get("lexical_artifacts", 0.0))
             <= 0.0
         ):
             continue
@@ -1717,12 +2714,16 @@ def run_retrieval_query(
                             neighbor_source or {"source_id": neighbor},
                             [],
                             units_by_source,
+                            artifact_matches_by_unit={},
                         ),
+                        "matched_artifacts": [],
                         "score": {
                             "lexical_source": 0.0,
                             "lexical_units": 0.0,
+                            "lexical_artifacts": 0.0,
                             "metadata_bonus": 0.0,
                             "graph_bonus": 0.0,
+                            "compare_coverage_bonus": 0.0,
                             "total": 0.0,
                         },
                         "graph_expansions": [],
@@ -1744,15 +2745,61 @@ def run_retrieval_query(
                 )
                 queue.append((neighbor, hop + 1, bonus))
 
+    if _is_comparative_query(query, query_tokens):
+        ranked_source_ids = sorted(
+            base_scores.keys(),
+            key=lambda item: (
+                -float(base_scores[item]["score"]["total"]),
+                str(item),
+            ),
+        )
+        for index, source_id in enumerate(ranked_source_ids[:3], start=1):
+            result = base_scores[source_id]
+            lexical_strength = (
+                float(result["score"].get("lexical_source", 0.0))
+                + float(result["score"].get("lexical_units", 0.0))
+                + float(result["score"].get("lexical_artifacts", 0.0))
+            )
+            if lexical_strength <= 0.5:
+                continue
+            bonus = 1.2 if index == 2 else 0.6 if index == 3 else 0.0
+            if bonus <= 0:
+                continue
+            result["score"]["compare_coverage_bonus"] += bonus
+            result["score"]["total"] += bonus
+
     results: list[dict[str, Any]] = []
     for source_id, result in base_scores.items():
         source_record = result["source_record"]
         support_units = result["matched_units"][:3]
+        matched_artifacts = [
+            item for item in result.get("matched_artifacts", []) if isinstance(item, dict)
+        ][:5]
         render_references = sorted(
             {
                 reference
                 for unit in support_units
                 for reference in unit.get("render_references", [])
+                if isinstance(reference, str)
+            }
+            | {
+                reference
+                for artifact in matched_artifacts
+                for reference in artifact.get("render_references", [])
+                if isinstance(reference, str)
+            }
+        )
+        focus_render_assets = sorted(
+            {
+                reference
+                for unit in support_units
+                for reference in unit.get("focus_render_assets", [])
+                if isinstance(reference, str)
+            }
+            | {
+                reference
+                for artifact in matched_artifacts
+                for reference in artifact.get("focus_render_assets", [])
                 if isinstance(reference, str)
             }
         )
@@ -1797,6 +2844,17 @@ def run_retrieval_query(
                 term for term in result["matched_terms"] if isinstance(term, str)
             ),
             "matched_units": support_units,
+            "matched_artifacts": matched_artifacts,
+            "matched_artifact_ids": [
+                artifact.get("artifact_id")
+                for artifact in matched_artifacts
+                if isinstance(artifact.get("artifact_id"), str)
+            ],
+            "matched_overlay_unit_ids": [
+                unit.get("unit_id")
+                for unit in support_units
+                if isinstance(unit.get("unit_id"), str) and unit.get("semantic_labels")
+            ],
             "graph_expansions": sorted(
                 result["graph_expansions"],
                 key=lambda item: (
@@ -1806,6 +2864,7 @@ def run_retrieval_query(
                 ),
             ),
             "render_references": render_references if include_renders else [],
+            "focus_render_assets": focus_render_assets if include_renders else [],
         }
         if bundle["score"]["total"] > 0:
             results.append(bundle)
@@ -2041,6 +3100,11 @@ def retrieve_corpus(
         "document_types": document_types or [],
         "source_ids": effective_source_ids,
     }
+    payload["recommended_hybrid_targets"] = _recommended_hybrid_targets(
+        paths,
+        target=target,
+        results=payload["results"],
+    )
     if write_logs:
         consulted_results = [
             {
@@ -2057,6 +3121,11 @@ def retrieve_corpus(
                     unit["unit_id"]
                     for unit in result.get("matched_units", [])
                     if unit.get("unit_id")
+                ],
+                "matched_artifact_ids": [
+                    artifact["artifact_id"]
+                    for artifact in result.get("matched_artifacts", [])
+                    if isinstance(artifact, dict) and artifact.get("artifact_id")
                 ],
             }
             for result in payload["results"]
@@ -2077,13 +3146,9 @@ def retrieve_corpus(
                     "preferred_channels": payload.get("preferred_channels", []),
                     "inspection_scope": payload.get("inspection_scope"),
                     "matched_published_channels": payload.get("matched_published_channels", []),
-                    "published_artifacts_sufficient": payload.get(
-                        "published_artifacts_sufficient"
-                    ),
+                    "published_artifacts_sufficient": payload.get("published_artifacts_sufficient"),
                     "reference_resolution": reference_resolution,
-                    "reference_resolution_summary": payload.get(
-                        "reference_resolution_summary"
-                    ),
+                    "reference_resolution_summary": payload.get("reference_resolution_summary"),
                     "source_escalation_required": payload.get("source_escalation_required"),
                     "source_escalation_reason": payload.get("source_escalation_reason"),
                     "corpus_signature": payload.get("corpus_signature"),
@@ -2102,6 +3167,36 @@ def build_segment_supports(result: dict[str, Any]) -> list[dict[str, Any]]:
     """Return compact support data from a retrieval result for answer grounding."""
     supports: list[dict[str, Any]] = []
     for unit in result.get("matched_units", []):
+        matched_artifacts = [
+            artifact for artifact in unit.get("matched_artifacts", []) if isinstance(artifact, dict)
+        ]
+        support_channels = deduplicate_strings(
+            list(unit.get("available_channels", []))
+            + [
+                channel
+                for artifact in matched_artifacts
+                for channel in artifact.get("available_channels", [])
+                if isinstance(channel, str) and channel
+            ]
+        )
+        support_render_refs = deduplicate_strings(
+            list(unit.get("render_references", []))
+            + [
+                reference
+                for artifact in matched_artifacts
+                for reference in artifact.get("render_references", [])
+                if isinstance(reference, str) and reference
+            ]
+        )
+        support_focus_render_refs = deduplicate_strings(
+            list(unit.get("focus_render_assets", []))
+            + [
+                reference
+                for artifact in matched_artifacts
+                for reference in artifact.get("focus_render_assets", [])
+                if isinstance(reference, str) and reference
+            ]
+        )
         supports.append(
             {
                 "source_id": result.get("source_id"),
@@ -2113,12 +3208,42 @@ def build_segment_supports(result: dict[str, Any]) -> list[dict[str, Any]]:
                 "answer_use_policy": result.get("answer_use_policy"),
                 "source_warnings": result.get("warnings", []),
                 "unit_id": unit.get("unit_id"),
+                "artifact_ids": [
+                    artifact.get("artifact_id")
+                    for artifact in matched_artifacts
+                    if isinstance(artifact.get("artifact_id"), str)
+                ],
+                "artifact_supports": matched_artifacts,
+                "semantic_supports": [
+                    {
+                        "unit_id": unit.get("unit_id"),
+                        "semantic_labels": unit.get("semantic_labels", []),
+                        "semantic_confidence": unit.get("semantic_confidence"),
+                        "semantic_overlay_asset": unit.get("semantic_overlay_asset"),
+                        "covered_slots": unit.get("covered_slots", []),
+                        "blocked_slots": unit.get("blocked_slots", []),
+                        "consumed_inputs": unit.get("semantic_overlay_consumed_inputs"),
+                    }
+                ]
+                if unit.get("semantic_labels")
+                else [],
                 "title": unit.get("title"),
                 "score": unit.get("score"),
-                "render_references": unit.get("render_references", []),
+                "render_references": support_render_refs,
+                "focus_render_assets": support_focus_render_refs,
+                "render_page_span": unit.get("render_page_span"),
                 "embedded_media": unit.get("embedded_media", []),
                 "structure_asset": unit.get("structure_asset"),
-                "available_channels": unit.get("available_channels", []),
+                "section_path": unit.get("section_path", []),
+                "procedure_hints": unit.get("procedure_hints", []),
+                "semantic_labels": unit.get("semantic_labels", []),
+                "semantic_confidence": unit.get("semantic_confidence"),
+                "derivation_mode": unit.get("derivation_mode", "deterministic"),
+                "semantic_overlay_asset": unit.get("semantic_overlay_asset"),
+                "semantic_gap_hints": unit.get("semantic_gap_hints", []),
+                "text_layer_quality": unit.get("text_layer_quality"),
+                "page_image_artifact_id": unit.get("page_image_artifact_id"),
+                "available_channels": support_channels,
                 "channel_descriptors": unit.get("channel_descriptors", {}),
                 "affordance_confidence": unit.get("affordance_confidence"),
                 "affordance_derivation_mode": unit.get("affordance_derivation_mode"),
@@ -2133,14 +3258,19 @@ def build_segment_supports(result: dict[str, Any]) -> list[dict[str, Any]]:
 def build_segment_supports_from_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collect compact support data across multiple retrieval results."""
     supports: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
     for result in results:
         for support in build_segment_supports(result):
             source_id = support.get("source_id")
             unit_id = support.get("unit_id")
             if not isinstance(source_id, str) or not isinstance(unit_id, str):
                 continue
-            key = (source_id, unit_id)
+            artifact_ids = tuple(
+                artifact_id
+                for artifact_id in support.get("artifact_ids", [])
+                if isinstance(artifact_id, str)
+            )
+            key = (source_id, unit_id, artifact_ids)
             if key in seen:
                 continue
             seen.add(key)
@@ -2153,10 +3283,14 @@ def deduplicate_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
-def compact_support_ids(results: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
-    """Build compact supporting source and unit identifiers for trace payloads."""
+def compact_support_ids(
+    results: list[dict[str, Any]],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Build compact support identifiers for trace payloads."""
     source_ids: list[str] = []
     unit_ids: list[str] = []
+    artifact_ids: list[str] = []
+    overlay_unit_ids: list[str] = []
     for result in results:
         source_id = result.get("source_id")
         if not isinstance(source_id, str) or not source_id:
@@ -2168,7 +3302,20 @@ def compact_support_ids(results: list[dict[str, Any]]) -> tuple[list[str], list[
             unit_id = unit.get("unit_id")
             if isinstance(unit_id, str) and unit_id:
                 unit_ids.append(f"{source_id}:{unit_id}")
-    return deduplicate_strings(source_ids), deduplicate_strings(unit_ids)
+                if unit.get("semantic_labels"):
+                    overlay_unit_ids.append(f"{source_id}:{unit_id}")
+            for artifact in unit.get("matched_artifacts", []):
+                if not isinstance(artifact, dict):
+                    continue
+                artifact_id = artifact.get("artifact_id")
+                if isinstance(artifact_id, str) and artifact_id:
+                    artifact_ids.append(f"{source_id}:{artifact_id}")
+    return (
+        deduplicate_strings(source_ids),
+        deduplicate_strings(unit_ids),
+        deduplicate_strings(artifact_ids),
+        deduplicate_strings(overlay_unit_ids),
+    )
 
 
 def needs_render_inspection_from_supports(
@@ -2293,10 +3440,12 @@ def render_inspection_required_from_segments(segment_traces: list[dict[str, Any]
 
 def supporting_ids_from_segments(
     segment_traces: list[dict[str, Any]],
-) -> tuple[list[str], list[str]]:
-    """Collect compact supporting source and unit identifiers across all segments."""
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Collect compact support identifiers across all trace segments."""
     source_ids: list[str] = []
     unit_ids: list[str] = []
+    artifact_ids: list[str] = []
+    overlay_unit_ids: list[str] = []
     for segment in segment_traces:
         if not isinstance(segment, dict):
             continue
@@ -2308,7 +3457,20 @@ def supporting_ids_from_segments(
             unit_ids.extend(
                 value for value in segment["supporting_unit_ids"] if isinstance(value, str)
             )
-    return deduplicate_strings(source_ids), deduplicate_strings(unit_ids)
+        if isinstance(segment.get("supporting_artifact_ids"), list):
+            artifact_ids.extend(
+                value for value in segment["supporting_artifact_ids"] if isinstance(value, str)
+            )
+        if isinstance(segment.get("supporting_overlay_unit_ids"), list):
+            overlay_unit_ids.extend(
+                value for value in segment["supporting_overlay_unit_ids"] if isinstance(value, str)
+            )
+    return (
+        deduplicate_strings(source_ids),
+        deduplicate_strings(unit_ids),
+        deduplicate_strings(artifact_ids),
+        deduplicate_strings(overlay_unit_ids),
+    )
 
 
 def segment_answer_text(answer_text: str) -> list[str]:
@@ -2474,7 +3636,24 @@ def trace_answer_text(
             results = []
         top_result = results[0] if results else None
         supports = build_segment_supports_from_results(results[:top])
-        supporting_source_ids, supporting_unit_ids = compact_support_ids(results[:top])
+        artifact_supports = [
+            artifact
+            for support in supports
+            for artifact in support.get("artifact_supports", [])
+            if isinstance(artifact, dict)
+        ]
+        semantic_supports = [
+            semantic_support
+            for support in supports
+            for semantic_support in support.get("semantic_supports", [])
+            if isinstance(semantic_support, dict)
+        ]
+        (
+            supporting_source_ids,
+            supporting_unit_ids,
+            supporting_artifact_ids,
+            supporting_overlay_unit_ids,
+        ) = compact_support_ids(results[:top])
         segment_trace = {
             "segment_index": index,
             "segment_text": segment,
@@ -2487,6 +3666,10 @@ def trace_answer_text(
             ),
             "supporting_source_ids": supporting_source_ids,
             "supporting_unit_ids": supporting_unit_ids,
+            "supporting_artifact_ids": supporting_artifact_ids,
+            "supporting_overlay_unit_ids": supporting_overlay_unit_ids,
+            "artifact_supports": artifact_supports,
+            "semantic_supports": semantic_supports,
             "supporting_results": results[:top],
             "supporting_units": supports,
         }
@@ -2506,6 +3689,18 @@ def trace_answer_text(
                             for unit in result.get("matched_units", [])
                             if unit.get("unit_id")
                         ],
+                        "matched_artifact_ids": [
+                            artifact["artifact_id"]
+                            for artifact in result.get("matched_artifacts", [])
+                            if isinstance(artifact, dict) and artifact.get("artifact_id")
+                        ],
+                        "matched_overlay_unit_ids": [
+                            unit["unit_id"]
+                            for unit in result.get("matched_units", [])
+                            if isinstance(unit, dict)
+                            and unit.get("unit_id")
+                            and unit.get("semantic_labels")
+                        ],
                     }
                     for result in results[:top]
                 ],
@@ -2522,7 +3717,12 @@ def trace_answer_text(
         declared_answer_state=declared_answer_state,
     )
     kb_render_required = render_inspection_required_from_segments(segment_traces)
-    supporting_source_ids, supporting_unit_ids = supporting_ids_from_segments(segment_traces)
+    (
+        supporting_source_ids,
+        supporting_unit_ids,
+        supporting_artifact_ids,
+        supporting_overlay_unit_ids,
+    ) = supporting_ids_from_segments(segment_traces)
     all_supports = [
         support
         for segment in segment_traces
@@ -2580,13 +3780,13 @@ def trace_answer_text(
         "reference_resolution_summary": build_reference_resolution_summary(
             effective_reference_resolution
         ),
-        "source_escalation_required": published_evidence_plan.get(
-            "source_escalation_required"
-        ),
+        "source_escalation_required": published_evidence_plan.get("source_escalation_required"),
         "source_escalation_reason": published_evidence_plan.get("source_escalation_reason"),
         "render_inspection_required": render_inspection_required,
         "supporting_source_ids": supporting_source_ids,
         "supporting_unit_ids": supporting_unit_ids,
+        "supporting_artifact_ids": supporting_artifact_ids,
+        "supporting_overlay_unit_ids": supporting_overlay_unit_ids,
         "answer_text": answer_text,
         "segments": segment_traces,
         "segment_count": len(segment_traces),
@@ -2645,12 +3845,12 @@ def trace_answer_text(
                 "source_escalation_required": published_evidence_plan.get(
                     "source_escalation_required"
                 ),
-                "source_escalation_reason": published_evidence_plan.get(
-                    "source_escalation_reason"
-                ),
+                "source_escalation_reason": published_evidence_plan.get("source_escalation_reason"),
                 "render_inspection_required": render_inspection_required,
                 "supporting_source_ids": supporting_source_ids,
                 "supporting_unit_ids": supporting_unit_ids,
+                "supporting_artifact_ids": supporting_artifact_ids,
+                "supporting_overlay_unit_ids": supporting_overlay_unit_ids,
                 "final_answer": answer_text,
                 "segment_traces": segment_traces,
                 "consulted_results": consulted_results,
@@ -2822,13 +4022,26 @@ def trace_session(
         )
         supporting_source_ids = session_payload.get("supporting_source_ids")
         supporting_unit_ids = session_payload.get("supporting_unit_ids")
-        if not isinstance(supporting_source_ids, list) or not isinstance(
-            supporting_unit_ids,
-            list,
-        ):
-            supporting_source_ids, supporting_unit_ids = supporting_ids_from_segments(
-                segment_traces
+        supporting_artifact_ids = session_payload.get("supporting_artifact_ids")
+        supporting_overlay_unit_ids = session_payload.get("supporting_overlay_unit_ids")
+        if (
+            not isinstance(supporting_source_ids, list)
+            or not isinstance(
+                supporting_unit_ids,
+                list,
             )
+            or not isinstance(supporting_artifact_ids, list)
+            or not isinstance(
+                supporting_overlay_unit_ids,
+                list,
+            )
+        ):
+            (
+                supporting_source_ids,
+                supporting_unit_ids,
+                supporting_artifact_ids,
+                supporting_overlay_unit_ids,
+            ) = supporting_ids_from_segments(segment_traces)
         trace_id = str(uuid.uuid4())
         result = {
             "recorded_at": utc_now(),
@@ -2870,13 +4083,13 @@ def trace_session(
                 if isinstance(session_payload.get("reference_resolution"), dict)
                 else None
             ),
-            "source_escalation_required": published_evidence_plan.get(
-                "source_escalation_required"
-            ),
+            "source_escalation_required": published_evidence_plan.get("source_escalation_required"),
             "source_escalation_reason": published_evidence_plan.get("source_escalation_reason"),
             "render_inspection_required": render_inspection_required,
             "supporting_source_ids": supporting_source_ids,
             "supporting_unit_ids": supporting_unit_ids,
+            "supporting_artifact_ids": supporting_artifact_ids,
+            "supporting_overlay_unit_ids": supporting_overlay_unit_ids,
             "answer_text": session_payload.get("final_answer"),
             "segments": segment_traces,
             "segment_count": len(segment_traces),

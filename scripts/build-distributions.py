@@ -32,6 +32,9 @@ EXCLUDED_SUBTREES = {
     Path("skills") / "optional",
     Path("scripts") / "private",
 }
+INCLUDED_TRACKED_FILES = {
+    Path(".github") / "copilot-instructions.md",
+}
 
 BUNDLE_CHANNELS = {
     "clean": {
@@ -63,11 +66,11 @@ def tracked_files(repo_root: Path) -> list[Path]:
             check=True,
             capture_output=True,
         )
-        return [
-            Path(item.decode("utf-8"))
-            for item in result.stdout.split(b"\0")
-            if item
-        ]
+        tracked = [Path(item.decode("utf-8")) for item in result.stdout.split(b"\0") if item]
+        for relative_path in INCLUDED_TRACKED_FILES:
+            if (repo_root / relative_path).exists() and relative_path not in tracked:
+                tracked.append(relative_path)
+        return sorted(tracked)
     return sorted(
         path.relative_to(repo_root)
         for path in repo_root.rglob("*")
@@ -107,6 +110,8 @@ def default_source_ref(repo_root: Path) -> str | None:
 def should_copy(relative_path: Path) -> bool:
     if not relative_path.parts:
         return False
+    if relative_path in INCLUDED_TRACKED_FILES:
+        return True
     if str(relative_path) in EXACT_PATH_EXCLUDES:
         return False
     for subtree in EXCLUDED_SUBTREES:
@@ -213,7 +218,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-ref",
         default=None,
-        help="Git ref recorded in bundle manifests. Defaults to the current checkout branch or tag.",
+        help=(
+            "Git ref recorded in bundle manifests. Defaults to the current checkout "
+            "branch or tag."
+        ),
     )
     return parser.parse_args()
 

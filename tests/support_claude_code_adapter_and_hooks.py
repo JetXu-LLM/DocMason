@@ -20,16 +20,15 @@ from pathlib import Path
 from unittest import mock
 
 from docmason.cli import build_parser
-from docmason.commands import DEGRADED, READY, doctor_workspace
+from docmason.commands import READY, doctor_workspace
 from docmason.conversation import detect_agent_surface
 from docmason.hooks import (
     SUPPORTED_EVENTS,
-    _append_record,
     _mirror_path,
     handle_hook_event,
     run_hook_cli,
 )
-from docmason.project import WorkspacePaths, read_json, write_json
+from docmason.project import WorkspacePaths, read_json
 from docmason.transcript import (
     SUPPORTED_PROVIDERS,
     load_claude_code_transcript,
@@ -142,7 +141,9 @@ class HookEventHandlerTests(unittest.TestCase):
             handle_hook_event("session", json.dumps(payload))
 
         mirror_root = self.workspace_root / "runtime" / "interaction-ingest" / "claude-code"
-        self.assertFalse(mirror_root.exists(), "No mirror file should be created without session_id")
+        self.assertFalse(
+            mirror_root.exists(), "No mirror file should be created without session_id"
+        )
 
     def test_invalid_json_silently_handled(self) -> None:
         with mock.patch("docmason.hooks._resolve_workspace_root", return_value=self.workspace_root):
@@ -238,7 +239,9 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
         return path
 
     def test_locate_existing_session(self) -> None:
-        self._write_mirror_session("abc-123", [{"record_type": "session-start", "session_id": "abc-123"}])
+        self._write_mirror_session(
+            "abc-123", [{"record_type": "session-start", "session_id": "abc-123"}]
+        )
         result = locate_claude_code_session("abc-123", self.workspace_root)
         self.assertIsNotNone(result)
 
@@ -283,11 +286,37 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
 
     def test_load_multi_turn_transcript(self) -> None:
         records = [
-            {"record_type": "session-start", "session_id": "sess-002", "cwd": "", "transcript_path": "", "model": ""},
-            {"record_type": "prompt-submit", "session_id": "sess-002", "recorded_at": "2026-03-20T10:00:00Z", "prompt": "First question"},
-            {"record_type": "stop", "session_id": "sess-002", "recorded_at": "2026-03-20T10:01:00Z", "last_assistant_message": "First answer"},
-            {"record_type": "prompt-submit", "session_id": "sess-002", "recorded_at": "2026-03-20T10:02:00Z", "prompt": "Second question"},
-            {"record_type": "stop", "session_id": "sess-002", "recorded_at": "2026-03-20T10:03:00Z", "last_assistant_message": "Second answer"},
+            {
+                "record_type": "session-start",
+                "session_id": "sess-002",
+                "cwd": "",
+                "transcript_path": "",
+                "model": "",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-002",
+                "recorded_at": "2026-03-20T10:00:00Z",
+                "prompt": "First question",
+            },
+            {
+                "record_type": "stop",
+                "session_id": "sess-002",
+                "recorded_at": "2026-03-20T10:01:00Z",
+                "last_assistant_message": "First answer",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-002",
+                "recorded_at": "2026-03-20T10:02:00Z",
+                "prompt": "Second question",
+            },
+            {
+                "record_type": "stop",
+                "session_id": "sess-002",
+                "recorded_at": "2026-03-20T10:03:00Z",
+                "last_assistant_message": "Second answer",
+            },
         ]
         self._write_mirror_session("sess-002", records)
         transcript = load_claude_code_transcript("sess-002", self.workspace_root)
@@ -304,10 +333,34 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
 
     def test_tool_use_records_captured(self) -> None:
         records = [
-            {"record_type": "session-start", "session_id": "sess-003", "cwd": "", "transcript_path": "", "model": ""},
-            {"record_type": "prompt-submit", "session_id": "sess-003", "recorded_at": "2026-03-20T10:00:00Z", "prompt": "Run ls"},
-            {"record_type": "tool-use", "session_id": "sess-003", "recorded_at": "2026-03-20T10:00:30Z", "tool_name": "Bash", "tool_use_id": "t-1", "tool_input": {"command": "ls"}, "tool_response": "file.txt"},
-            {"record_type": "stop", "session_id": "sess-003", "recorded_at": "2026-03-20T10:01:00Z", "last_assistant_message": "Done"},
+            {
+                "record_type": "session-start",
+                "session_id": "sess-003",
+                "cwd": "",
+                "transcript_path": "",
+                "model": "",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-003",
+                "recorded_at": "2026-03-20T10:00:00Z",
+                "prompt": "Run ls",
+            },
+            {
+                "record_type": "tool-use",
+                "session_id": "sess-003",
+                "recorded_at": "2026-03-20T10:00:30Z",
+                "tool_name": "Bash",
+                "tool_use_id": "t-1",
+                "tool_input": {"command": "ls"},
+                "tool_response": "file.txt",
+            },
+            {
+                "record_type": "stop",
+                "session_id": "sess-003",
+                "recorded_at": "2026-03-20T10:01:00Z",
+                "last_assistant_message": "Done",
+            },
         ]
         self._write_mirror_session("sess-003", records)
         transcript = load_claude_code_transcript("sess-003", self.workspace_root)
@@ -349,7 +402,14 @@ class DetectAgentSurfaceTests(unittest.TestCase):
 
     def test_codex_thread_id_returns_codex(self) -> None:
         with mock.patch.dict("os.environ", {"CODEX_THREAD_ID": "thread-1"}, clear=False):
-            with mock.patch.dict("os.environ", {k: "" for k in ("DOCMASON_AGENT_SURFACE", "CLAUDE_PROJECT_DIR", "CLAUDE_SESSION_ID")}, clear=False):
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    k: ""
+                    for k in ("DOCMASON_AGENT_SURFACE", "CLAUDE_PROJECT_DIR", "CLAUDE_SESSION_ID")
+                },
+                clear=False,
+            ):
                 surface = detect_agent_surface()
         self.assertEqual(surface, "codex")
 
@@ -429,6 +489,11 @@ class CommittedBootstrapperFilesTests(unittest.TestCase):
         content = path.read_text(encoding="utf-8")
         self.assertIn("@../AGENTS.md", content)
 
+    def test_committed_claude_md_imports_generated_project_memory(self) -> None:
+        path = ROOT / ".claude" / "CLAUDE.md"
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("@../adapters/claude/project-memory.md", content)
+
     def test_committed_settings_json_exists(self) -> None:
         path = ROOT / ".claude" / "settings.json"
         self.assertTrue(path.exists(), ".claude/settings.json should be committed")
@@ -441,6 +506,7 @@ class CommittedBootstrapperFilesTests(unittest.TestCase):
         scripts = list(hooks_dir.glob("on-*.sh"))
         self.assertGreaterEqual(len(scripts), 3, "At least 3 hook scripts expected")
         import os
+
         for script in scripts:
             self.assertTrue(
                 os.access(script, os.X_OK),
@@ -458,6 +524,10 @@ class CommittedBootstrapperFilesTests(unittest.TestCase):
         content = gitignore.read_text(encoding="utf-8")
         self.assertIn("/.claude/skills", content)
         self.assertIn("/.agents/", content)
+        self.assertNotIn("/CLAUDE.md", content)
+
+    def test_repo_does_not_commit_root_claude_md(self) -> None:
+        self.assertFalse((ROOT / "CLAUDE.md").exists())
 
 
 class ProjectPathsTests(unittest.TestCase):
@@ -537,7 +607,9 @@ class DoctorHookCheckTests(unittest.TestCase):
         def fake_editable_install(paths: WorkspacePaths) -> tuple[bool, str]:
             return True, "editable install available"
 
-        with mock.patch.dict("os.environ", {"CODEX_THREAD_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False):
+        with mock.patch.dict(
+            "os.environ", {"CODEX_THREAD_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False
+        ):
             report = doctor_workspace(workspace, editable_install_probe=fake_editable_install)
 
         checks = report.payload.get("checks", [])
@@ -552,7 +624,9 @@ class DoctorHookCheckTests(unittest.TestCase):
         def fake_editable_install(paths: WorkspacePaths) -> tuple[bool, str]:
             return True, "editable install available"
 
-        with mock.patch.dict("os.environ", {"CODEX_THREAD_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False):
+        with mock.patch.dict(
+            "os.environ", {"CODEX_THREAD_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False
+        ):
             report = doctor_workspace(workspace, editable_install_probe=fake_editable_install)
 
         checks = report.payload.get("checks", [])

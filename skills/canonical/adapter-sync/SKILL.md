@@ -42,6 +42,7 @@ If the agent cannot write local generated files, stop and explain that adapter s
 
 - DocMason currently supports the Claude target only.
 - Generated adapters are local derived artifacts and should not be hand-maintained.
-- The generated root `CLAUDE.md` imports canonical committed sources through Claude-supported `@path` imports.
+- The committed `.claude/CLAUDE.md` is the sole Claude project-memory entry file in this repo.
+- Adapter sync refreshes the generated `adapters/claude/project-memory.md` and `adapters/claude/workflow-routing.md` files that `.claude/CLAUDE.md` can import.
 - Adapter sync also refreshes the repo-local `.claude/skills/` thin shim layer instead of relying on a hand-created symlink to the full repo skills tree.
 - Use this workflow when the chosen agent ecosystem actually depends on generated adapter files, not as a reflex before every workflow.

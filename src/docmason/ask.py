@@ -126,6 +126,10 @@ def _sync_turn_log_artifacts(
     auto_sync_triggered: bool | None = None,
     auto_sync_reason: str | None = None,
     auto_sync_summary: dict[str, Any] | None = None,
+    hybrid_refresh_triggered: bool | None = None,
+    hybrid_refresh_sources: list[str] | None = None,
+    hybrid_refresh_completion_status: str | None = None,
+    hybrid_refresh_summary: dict[str, Any] | None = None,
 ) -> None:
     update_fields = {
         "conversation_id": conversation_id,
@@ -148,6 +152,10 @@ def _sync_turn_log_artifacts(
         "auto_sync_triggered": auto_sync_triggered,
         "auto_sync_reason": auto_sync_reason,
         "auto_sync_summary": auto_sync_summary,
+        "hybrid_refresh_triggered": hybrid_refresh_triggered,
+        "hybrid_refresh_sources": hybrid_refresh_sources or [],
+        "hybrid_refresh_completion_status": hybrid_refresh_completion_status,
+        "hybrid_refresh_summary": hybrid_refresh_summary,
     }
     if semantic_log_context:
         update_fields.update(semantic_log_context)
@@ -674,6 +682,10 @@ def complete_ask_turn(
     evidence_mode: str | None = None,
     research_depth: str | None = None,
     bundle_paths: list[str] | None = None,
+    hybrid_refresh_triggered: bool | None = None,
+    hybrid_refresh_sources: list[str] | None = None,
+    hybrid_refresh_completion_status: str | None = None,
+    hybrid_refresh_summary: dict[str, Any] | None = None,
     status: str = "completed",
 ) -> dict[str, Any]:
     """Complete one `ask` turn after the routed workflow finishes."""
@@ -782,6 +794,30 @@ def complete_ask_turn(
         current_turn,
         "auto_sync_summary",
     )
+    resolved_hybrid_refresh_triggered = _resolve_scalar(
+        hybrid_refresh_triggered,
+        latest_trace_payload,
+        current_turn,
+        "hybrid_refresh_triggered",
+    )
+    resolved_hybrid_refresh_sources = _resolve_list(
+        hybrid_refresh_sources,
+        latest_trace_payload,
+        current_turn,
+        "hybrid_refresh_sources",
+    )
+    resolved_hybrid_refresh_completion_status = _resolve_scalar(
+        hybrid_refresh_completion_status,
+        latest_trace_payload,
+        current_turn,
+        "hybrid_refresh_completion_status",
+    )
+    resolved_hybrid_refresh_summary = _resolve_mapping(
+        hybrid_refresh_summary,
+        latest_trace_payload,
+        current_turn,
+        "hybrid_refresh_summary",
+    )
     effective_support_basis = (
         resolved_support_basis
         if isinstance(resolved_support_basis, str)
@@ -870,6 +906,10 @@ def complete_ask_turn(
             "auto_sync_triggered": resolved_auto_sync_triggered,
             "auto_sync_reason": resolved_auto_sync_reason,
             "auto_sync_summary": resolved_auto_sync_summary,
+            "hybrid_refresh_triggered": resolved_hybrid_refresh_triggered,
+            "hybrid_refresh_sources": resolved_hybrid_refresh_sources,
+            "hybrid_refresh_completion_status": resolved_hybrid_refresh_completion_status,
+            "hybrid_refresh_summary": resolved_hybrid_refresh_summary,
             "evidence_mode": evidence_mode,
             "research_depth": research_depth,
             "bundle_paths": bundle_paths or [],
@@ -938,6 +978,16 @@ def complete_ask_turn(
         if isinstance(resolved_auto_sync_reason, str)
         else None,
         auto_sync_summary=resolved_auto_sync_summary,
+        hybrid_refresh_triggered=(
+            resolved_hybrid_refresh_triggered
+            if isinstance(resolved_hybrid_refresh_triggered, bool)
+            else None
+        ),
+        hybrid_refresh_sources=resolved_hybrid_refresh_sources,
+        hybrid_refresh_completion_status=resolved_hybrid_refresh_completion_status
+        if isinstance(resolved_hybrid_refresh_completion_status, str)
+        else None,
+        hybrid_refresh_summary=resolved_hybrid_refresh_summary,
     )
     refresh_runtime_projections(paths)
     return updated

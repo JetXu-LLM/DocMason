@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import time
 import uuid
@@ -11,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .project import WorkspacePaths, read_json, write_json
+from .project import WorkspacePaths, read_json
 
 
 class LeaseConflictError(RuntimeError):
@@ -79,6 +80,9 @@ def workspace_lease(
         try:
             target.mkdir(parents=False, exist_ok=False)
         except FileExistsError as error:
+            if target.exists() and not target.is_dir():
+                target.unlink()
+                continue
             if _stale_lease(target, stale_after_seconds=stale_after_seconds):
                 shutil.rmtree(target, ignore_errors=True)
                 continue
@@ -89,7 +93,10 @@ def workspace_lease(
                 ) from error
             time.sleep(poll_interval_seconds)
             continue
-        write_json(target / "lease.json", payload)
+        (target / "lease.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         break
     try:
         yield payload

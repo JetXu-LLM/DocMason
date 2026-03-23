@@ -16,6 +16,7 @@ from docmason.commands import (
     sync_workspace,
     trace_knowledge,
 )
+from docmason.front_controller import write_hybrid_refresh_work
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import retrieve_corpus, trace_answer_file, trace_session
 
@@ -100,6 +101,29 @@ class AskHardeningTests(unittest.TestCase):
             writer.add_blank_page(width=144 + index, height=144 + index)
         with path.open("wb") as handle:
             writer.write(handle)
+
+    def create_pdf_with_full_page_image(self, path: Path) -> None:
+        try:
+            import pymupdf  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - compatibility import
+            import fitz as pymupdf  # type: ignore[import-not-found]
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            image_path = Path(tempdir_name) / "page.png"
+            image = Image.new("RGB", (1200, 1600), color=(245, 245, 245))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((80, 120, 1120, 1480), outline=(32, 64, 128), width=14)
+            draw.rectangle((170, 300, 1030, 540), fill=(210, 225, 245))
+            draw.rectangle((170, 660, 1030, 1180), fill=(225, 235, 250))
+            draw.rectangle((170, 1230, 760, 1380), fill=(235, 240, 250))
+            image.save(image_path)
+
+            document = pymupdf.open()
+            page = document.new_page(width=595, height=842)
+            page.insert_image(page.rect, filename=str(image_path))
+            document.save(path)
+            document.close()
 
     def build_seeded_knowledge(
         self,
@@ -197,10 +221,15 @@ class AskHardeningTests(unittest.TestCase):
 
         report = run_workflow("knowledge-base-sync", paths=workspace)
 
-        self.assertEqual(report.payload["status"], "ready")
-        self.assertEqual(report.payload["workflow_status"], "completed")
-        self.assertEqual(report.payload["final_report"]["sync_status"], "valid")
-        self.assertEqual(report.payload["next_workflows"], [])
+        self.assertIn(report.payload["status"], {"ready", "degraded"})
+        self.assertIn(report.payload["final_report"]["sync_status"], {"valid", "warnings"})
+        hybrid_mode = report.payload["final_report"]["hybrid_enrichment"]["mode"]
+        if hybrid_mode == "candidate-prepared":
+            self.assertEqual(report.payload["workflow_status"], "needs-hybrid-enrichment")
+            self.assertIn("knowledge-construction", report.payload["next_workflows"])
+        else:
+            self.assertEqual(report.payload["workflow_status"], "completed")
+            self.assertEqual(report.payload["next_workflows"], [])
 
     def test_workflow_runner_rejects_ask_as_public_execution_target(self) -> None:
         workspace = self.make_workspace()
@@ -429,6 +458,104 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(trace_report.payload["preferred_channels"], ["render", "structure"])
         self.assertTrue(
             any("Published evidence;" in line for line in trace_report.lines),
+        )
+
+    def test_write_hybrid_refresh_work_persists_narrowed_source_packet(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+        self.create_pdf(workspace.source_dir / "control.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-hybrid-refresh"},
+            clear=False,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What is shown on the scanned workflow page image?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    evidence_requirements={
+                        "preferred_channels": ["render", "structure"],
+                        "inspection_scope": "unit",
+                        "prefer_published_artifacts": True,
+                    },
+                ),
+            )
+
+        retrieval = retrieve_corpus(
+            workspace,
+            query="scanned workflow page image",
+            top=2,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=True,
+            log_context=turn["log_context"],
+            question_domain=turn["question_domain"],
+            evidence_requirements=turn["evidence_requirements"],
+        )
+        source_ids = [
+            item["source_id"]
+            for item in retrieval["recommended_hybrid_targets"]
+            if isinstance(item, dict) and isinstance(item.get("source_id"), str)
+        ]
+        refresh_path = write_hybrid_refresh_work(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            query="scanned workflow page image",
+            source_ids=source_ids[:1],
+            recommended_targets=retrieval["recommended_hybrid_targets"][:1],
+        )
+        payload = read_json(workspace.root / refresh_path)
+        self.assertEqual(payload["query"], "scanned workflow page image")
+        self.assertEqual(payload["selected_source_ids"], source_ids[:1])
+        self.assertEqual(len(payload["sources"]), 1)
+        self.assertTrue(payload["sources"][0]["units"])
+
+    def test_complete_ask_turn_persists_hybrid_refresh_fields(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-hybrid-state"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the image-heavy page mean?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="general-stable",
+                ),
+            )
+        (workspace.root / turn["answer_file_path"]).write_text(
+            "The image-heavy page needs multimodal evidence refresh before interpretation.",
+            encoding="utf-8",
+        )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            response_excerpt="Hybrid refresh completed for the selected source.",
+            status="answered",
+            hybrid_refresh_triggered=True,
+            hybrid_refresh_sources=["source-001"],
+            hybrid_refresh_completion_status="covered",
+            hybrid_refresh_summary={
+                "mode": "ask-hybrid",
+                "covered_source_count": 1,
+            },
+        )
+        self.assertTrue(completed["hybrid_refresh_triggered"])
+        self.assertEqual(completed["hybrid_refresh_sources"], ["source-001"])
+        self.assertEqual(completed["hybrid_refresh_completion_status"], "covered")
+        self.assertEqual(
+            completed["hybrid_refresh_summary"]["covered_source_count"],
+            1,
         )
 
     def test_source_scope_sufficiency_backfills_from_matched_units_for_legacy_records(self) -> None:

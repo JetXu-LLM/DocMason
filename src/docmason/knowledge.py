@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
+import warnings
 import zipfile
 from collections import Counter
 from collections.abc import Iterable
+from contextlib import redirect_stderr
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from .affordances import (
@@ -24,8 +28,22 @@ from .affordances import (
     merge_derived_affordances,
     validate_derived_affordances,
 )
+from .artifacts import validate_artifact_index, validate_pdf_document
 from .coordination import workspace_lease
 from .email_sources import parse_email_source
+from .evidence_artifacts import (
+    compile_docx_visual_compatibility,
+    compile_pdf_visual_artifacts,
+    compile_pptx_visual_artifacts,
+    compile_xlsx_artifacts,
+    write_empty_artifact_index,
+)
+from .hybrid import (
+    build_source_hybrid_packet,
+    focus_render_contract_complete,
+    materialize_focus_render_assets,
+    summarize_hybrid_work,
+)
 from .interaction import (
     build_promoted_interaction_memories,
     interaction_ingest_snapshot,
@@ -52,6 +70,14 @@ from .retrieval import (
     build_trace_artifacts,
     normalize_filename_stem,
 )
+from .semantic_overlays import (
+    collect_semantic_overlay_assets,
+    load_semantic_overlays,
+    overlay_confidence,
+    overlay_search_strings,
+    validate_hybrid_work,
+    validate_semantic_overlay,
+)
 from .source_references import (
     enrich_evidence_manifest_reference_fields,
     enrich_source_manifest_reference_fields,
@@ -60,6 +86,11 @@ from .text_sources import ParsedUnit, parse_text_source
 from .versioning import publish_staging_snapshot
 
 PLACEHOLDER_TERMS = ("todo", "tbd", "placeholder", "lorem ipsum", "fill in")
+DOCX_ORDERED_STEP_PATTERN = re.compile(r"^\s*(\d+)(?:[.)-])\s+")
+DOCX_CAPTION_PREFIX_PATTERN = re.compile(
+    r"^(figure|fig\.|table|chart|diagram|exhibit)\s+[A-Za-z0-9.-]+\s*[:.-]?\s+",
+    re.IGNORECASE,
+)
 REQUIRED_KNOWLEDGE_KEYS = (
     "source_id",
     "source_fingerprint",
@@ -84,6 +115,12 @@ EMAIL_MAX_ATTACHMENT_DEPTH = 2
 DERIVED_SOURCE_ORIGIN = "derived-attachment"
 EMAIL_ATTACHMENT_RELATION_TYPE = "email-attachment"
 LEGACY_OFFICE_EXTENSION_MAP = {"ppt": "pptx", "doc": "docx", "xls": "xlsx"}
+BENIGN_THIRD_PARTY_DIAGNOSTIC_SUBSTRINGS = (
+    "conditional formatting extension is not supported and will be removed",
+    "data validation extension is not supported and will be removed",
+    "cannot parse header or footer so it will be ignored",
+    "ignoring wrong pointing object",
+)
 
 
 def utc_now() -> str:
@@ -134,12 +171,106 @@ def module_available(module_name: str) -> bool:
     return True
 
 
+def _is_benign_third_party_diagnostic(message: str) -> bool:
+    normalized = " ".join(message.lower().split())
+    return any(token in normalized for token in BENIGN_THIRD_PARTY_DIAGNOSTIC_SUBSTRINGS)
+
+
+def _normalize_third_party_diagnostics(lines: list[str]) -> list[str]:
+    messages: list[str] = []
+    for value in lines:
+        text = " ".join(sanitize_text(value).split()).strip()
+        if not text or _is_benign_third_party_diagnostic(text):
+            continue
+        messages.append(text)
+    return list(dict.fromkeys(messages))
+
+
+class _ThirdPartyDiagnosticCapture:
+    """Capture third-party warnings and stderr without polluting CLI output."""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+        self._warning_context: Any = None
+        self._warning_records: list[Any] = []
+        self._stderr_redirect: Any = None
+        self._stderr_proxy = io.StringIO()
+        self._stderr_file: Any = None
+        self._stderr_fd: int | None = None
+        self._fd_redirected = False
+
+    def __enter__(self) -> _ThirdPartyDiagnosticCapture:
+        self._warning_context = warnings.catch_warnings(record=True)
+        self._warning_records = self._warning_context.__enter__()
+        warnings.simplefilter("always")
+        self._stderr_file = tempfile.TemporaryFile(mode="w+b")
+        try:
+            self._stderr_fd = os.dup(2)
+            try:
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os.dup2(self._stderr_file.fileno(), 2)
+            self._fd_redirected = True
+        except OSError:
+            self._stderr_fd = None
+            self._fd_redirected = False
+        self._stderr_redirect = redirect_stderr(self._stderr_proxy)
+        self._stderr_redirect.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Literal[False]:
+        if self._stderr_redirect is not None:
+            self._stderr_redirect.__exit__(exc_type, exc, tb)
+        if self._fd_redirected and self._stderr_fd is not None:
+            try:
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os.dup2(self._stderr_fd, 2)
+            os.close(self._stderr_fd)
+        raw_lines: list[str] = []
+        if self._stderr_file is not None:
+            self._stderr_file.seek(0)
+            raw_lines.extend(
+                self._stderr_file.read().decode("utf-8", errors="replace").splitlines()
+            )
+            self._stderr_file.close()
+        raw_lines.extend(self._stderr_proxy.getvalue().splitlines())
+        raw_lines.extend(
+            str(getattr(record, "message", record))
+            for record in self._warning_records
+            if str(getattr(record, "message", record)).strip()
+        )
+        if self._warning_context is not None:
+            self._warning_context.__exit__(exc_type, exc, tb)
+        self.messages = _normalize_third_party_diagnostics(raw_lines)
+        return False
+
+
+def _append_captured_diagnostic_failures(
+    failures: list[dict[str, str]],
+    capture: _ThirdPartyDiagnosticCapture,
+    *,
+    stage: str,
+) -> None:
+    existing = {(item.get("stage"), item.get("detail")) for item in failures}
+    for message in capture.messages:
+        key = (stage, message)
+        if key in existing:
+            continue
+        failures.append({"stage": stage, "detail": message})
+        existing.add(key)
+
+
 def pdf_renderer_snapshot() -> dict[str, Any]:
     """Describe PDF rendering dependency readiness."""
     missing: list[str] = []
     for module_name in ("pypdfium2", "pypdf", "PIL"):
         if not module_available(module_name):
             missing.append(module_name)
+    if not (module_available("pymupdf") or module_available("fitz")):
+        missing.append("PyMuPDF")
     ready = not missing
     detail = "PDF rendering and extraction dependencies are available."
     if missing:
@@ -500,7 +631,10 @@ def _initial_change_reason(
     if change_classification == "deleted":
         return "This previously indexed source is no longer present under `original_doc/`."
     if change_classification == "ambiguous":
-        return "Multiple historical sources could plausibly match this path; operator review is required."
+        return (
+            "Multiple historical sources could plausibly match this path; "
+            "operator review is required."
+        )
     if "path_changed" in change_traits and "binary_changed" in change_traits:
         return (
             "The source path changed and the binary fingerprint also changed; staged evidence must "
@@ -780,26 +914,49 @@ def import_pdf_modules() -> tuple[Any, Any]:
 
 
 def render_pdf_document(
-    pdf_path: Path, renders_dir: Path
+    pdf_path: Path,
+    renders_dir: Path,
+    *,
+    prefix: str = "page",
 ) -> tuple[list[str], list[dict[str, str]]]:
     """Render a PDF into PNG images and return relative asset names."""
     failures: list[dict[str, str]] = []
     rendered_assets: list[str] = []
     pdfium, _ = import_pdf_modules()
+    diagnostics = _ThirdPartyDiagnosticCapture()
 
     try:
-        document = pdfium.PdfDocument(str(pdf_path))
-        for index in range(len(document)):
-            page = document[index]
-            bitmap = page.render(scale=2)
-            image = bitmap.to_pil()
-            filename = f"page-{index + 1:03d}.png"
-            output_path = renders_dir / filename
-            image.save(output_path)
-            rendered_assets.append(str(Path("renders") / filename))
-        document.close()
+        with diagnostics:
+            document = pdfium.PdfDocument(str(pdf_path))
+            try:
+                for index in range(len(document)):
+                    page = document[index]
+                    bitmap = page.render(scale=2)
+                    image = bitmap.to_pil()
+                    filename = f"{prefix}-{index + 1:03d}.png"
+                    output_path = renders_dir / filename
+                    image.save(
+                        output_path,
+                        format="PNG",
+                        compress_level=1,
+                        optimize=False,
+                    )
+                    rendered_assets.append(str(Path("renders") / filename))
+            finally:
+                document.close()
     except Exception as exc:  # pragma: no cover - defensive against third-party failures
+        _append_captured_diagnostic_failures(
+            failures,
+            diagnostics,
+            stage="render-pdf-diagnostic",
+        )
         failures.append({"stage": "render-pdf", "detail": str(exc)})
+    else:
+        _append_captured_diagnostic_failures(
+            failures,
+            diagnostics,
+            stage="render-pdf-diagnostic",
+        )
     return rendered_assets, failures
 
 
@@ -808,12 +965,25 @@ def extract_pdf_text(pdf_path: Path) -> tuple[list[str], list[dict[str, str]]]:
     failures: list[dict[str, str]] = []
     texts: list[str] = []
     _, PdfReader = import_pdf_modules()
+    diagnostics = _ThirdPartyDiagnosticCapture()
     try:
-        reader = PdfReader(str(pdf_path))
-        for page in reader.pages:
-            texts.append(sanitize_text(page.extract_text() or ""))
+        with diagnostics:
+            reader = PdfReader(str(pdf_path))
+            for page in reader.pages:
+                texts.append(sanitize_text(page.extract_text() or ""))
     except Exception as exc:  # pragma: no cover - defensive against third-party failures
+        _append_captured_diagnostic_failures(
+            failures,
+            diagnostics,
+            stage="extract-pdf-text-diagnostic",
+        )
         failures.append({"stage": "extract-pdf-text", "detail": str(exc)})
+    else:
+        _append_captured_diagnostic_failures(
+            failures,
+            diagnostics,
+            stage="extract-pdf-text-diagnostic",
+        )
     return texts, failures
 
 
@@ -829,6 +999,56 @@ def convert_office_to_pdf(
         soffice_binary,
         target_format="pdf",
     )
+
+
+def _load_workbook_quietly(
+    workbook_path: Path,
+    *,
+    data_only: bool,
+    failures: list[dict[str, str]],
+    stage: str,
+) -> Any | None:
+    from openpyxl import load_workbook  # type: ignore[import-untyped]
+
+    diagnostics = _ThirdPartyDiagnosticCapture()
+    try:
+        with diagnostics:
+            workbook = load_workbook(filename=str(workbook_path), data_only=data_only)
+    except Exception as exc:  # pragma: no cover - defensive against third-party failures
+        _append_captured_diagnostic_failures(failures, diagnostics, stage=f"{stage}-diagnostic")
+        failures.append(
+            {
+                "stage": stage,
+                "detail": f"Could not load workbook `{workbook_path.name}`: {exc}",
+            }
+        )
+        return None
+    _append_captured_diagnostic_failures(failures, diagnostics, stage=f"{stage}-diagnostic")
+    return workbook
+
+
+def _save_workbook_quietly(
+    workbook: Any,
+    output_path: Path,
+    *,
+    failures: list[dict[str, str]],
+    stage: str,
+) -> bool:
+    diagnostics = _ThirdPartyDiagnosticCapture()
+    try:
+        with diagnostics:
+            workbook.save(output_path)
+    except Exception as exc:  # pragma: no cover - defensive against third-party failures
+        _append_captured_diagnostic_failures(failures, diagnostics, stage=f"{stage}-diagnostic")
+        failures.append(
+            {
+                "stage": stage,
+                "detail": f"Could not save workbook `{output_path.name}`: {exc}",
+            }
+        )
+        return False
+    _append_captured_diagnostic_failures(failures, diagnostics, stage=f"{stage}-diagnostic")
+    return True
 
 
 def convert_office_to_format(
@@ -879,7 +1099,9 @@ def normalize_legacy_office_source(
     soffice_binary: str,
 ) -> tuple[Path | None, list[dict[str, str]]]:
     """Convert legacy binary Office formats to OOXML so existing builders can reuse them."""
-    source_extension = str(source_entry.get("source_extension") or source_path.suffix.lower().lstrip("."))
+    source_extension = str(
+        source_entry.get("source_extension") or source_path.suffix.lower().lstrip(".")
+    )
     target_extension = LEGACY_OFFICE_EXTENSION_MAP.get(source_extension)
     if target_extension is None:
         return source_path, []
@@ -889,6 +1111,71 @@ def normalize_legacy_office_source(
         soffice_binary,
         target_format=target_extension,
     )
+
+
+def render_xlsx_sheet_documents(
+    workbook_path: Path,
+    *,
+    sheet_names: list[str],
+    renders_dir: Path,
+    tempdir: Path,
+    soffice_binary: str,
+) -> tuple[dict[str, list[str]], list[str], list[dict[str, str]]]:
+    """Render one workbook into per-sheet PNG assets via temporary isolated exports."""
+    sheet_renders: dict[str, list[str]] = {}
+    document_renders: list[str] = []
+    failures: list[dict[str, str]] = []
+    if not sheet_names:
+        return sheet_renders, document_renders, failures
+
+    for index, sheet_name in enumerate(sheet_names, start=1):
+        isolated_workbook_path = tempdir / f"sheet-{index:03d}.xlsx"
+        try:
+            workbook = _load_workbook_quietly(
+                workbook_path,
+                data_only=False,
+                failures=failures,
+                stage="xlsx-sheet-export-load",
+            )
+            if workbook is None:
+                continue
+            target_sheet = workbook[sheet_name]
+            for worksheet in workbook.worksheets:
+                worksheet.sheet_state = "visible" if worksheet.title == sheet_name else "hidden"
+            workbook.active = workbook.worksheets.index(target_sheet)
+            if not _save_workbook_quietly(
+                workbook,
+                isolated_workbook_path,
+                failures=failures,
+                stage="xlsx-sheet-export-save",
+            ):
+                continue
+        except Exception as exc:  # pragma: no cover - defensive against third-party failures
+            failures.append(
+                {
+                    "stage": "xlsx-sheet-export",
+                    "detail": f"Could not prepare isolated workbook for `{sheet_name}`: {exc}",
+                }
+            )
+            continue
+
+        converted_pdf, conversion_failures = convert_office_to_pdf(
+            isolated_workbook_path,
+            tempdir,
+            soffice_binary,
+        )
+        failures.extend(conversion_failures)
+        if converted_pdf is None:
+            continue
+        rendered_assets, render_failures = render_pdf_document(
+            converted_pdf,
+            renders_dir,
+            prefix=f"sheet-{index:03d}-page",
+        )
+        failures.extend(render_failures)
+        sheet_renders[sheet_name] = rendered_assets
+        document_renders.extend(rendered_assets)
+    return sheet_renders, document_renders, failures
 
 
 def pptx_texts_from_slide(slide: Any) -> list[str]:
@@ -959,6 +1246,7 @@ def build_pdf_source(
         text = page_texts[index] if index < len(page_texts) else ""
         text_asset = Path("extracted") / f"{unit_id}.txt"
         structure_asset = Path("extracted") / f"{unit_id}.json"
+        rendered_asset = rendered_assets[index] if index < len(rendered_assets) else None
         write_text(source_dir / text_asset, text + ("\n" if text else ""))
         write_json(
             source_dir / structure_asset,
@@ -974,7 +1262,11 @@ def build_pdf_source(
                 "unit_type": "page",
                 "ordinal": index + 1,
                 "title": f"Page {index + 1}",
-                "rendered_asset": rendered_assets[index] if index < len(rendered_assets) else None,
+                "rendered_asset": rendered_asset,
+                "render_assets": [rendered_asset] if rendered_asset else [],
+                "render_page_span": (
+                    {"start": index + 1, "end": index + 1} if rendered_asset else None
+                ),
                 "text_asset": str(text_asset),
                 "structure_asset": str(structure_asset),
                 "embedded_media": [],
@@ -985,6 +1277,18 @@ def build_pdf_source(
 
     extracted_texts = [text for text in page_texts if text]
     source_manifest = build_source_manifest(paths, source_entry, "python-pdf")
+    phase_three = compile_pdf_visual_artifacts(
+        source_dir,
+        source_id=str(source_entry["source_id"]),
+        pdf_path=source_path,
+        units=units,
+        page_texts=page_texts,
+    )
+    for unit in units:
+        unit_update = phase_three["unit_updates"].get(str(unit.get("unit_id")), {})
+        if isinstance(unit_update, dict):
+            unit.update(unit_update)
+    materialize_focus_render_assets(source_dir, evidence_manifest={"units": units})
     evidence_manifest = {
         "source_id": source_entry["source_id"],
         "document_type": "pdf",
@@ -994,9 +1298,13 @@ def build_pdf_source(
         "document_renders": rendered_assets,
         "units": units,
         "failures": render_failures + text_failures,
+        "warnings": list(phase_three.get("warnings", [])),
         "structure_assets": [
             str(Path("extracted") / f"page-{index + 1:03d}.json") for index in range(page_count)
         ],
+        "artifact_index_asset": "artifact_index.json",
+        "pdf_document_asset": phase_three.get("pdf_document_asset"),
+        "visual_layout_assets": phase_three["visual_layout_assets"],
         "embedded_media": [],
         "language_candidates": [detect_source_language(extracted_texts)],
     }
@@ -1057,6 +1365,11 @@ def build_pptx_source(
             unit_id = f"slide-{index:03d}"
             hidden = pptx_slide_hidden(slide)
             visible_texts = pptx_texts_from_slide(slide)
+            slide_title = ""
+            try:
+                slide_title = sanitize_text(slide.shapes.title.text)
+            except Exception:
+                slide_title = visible_texts[0] if visible_texts else ""
             notes = pptx_notes_text(slide)
             media_refs = extract_pptx_media_refs(slide)
             all_texts.extend(visible_texts)
@@ -1084,22 +1397,53 @@ def build_pptx_source(
             if not hidden and visible_render_index < len(rendered_assets):
                 rendered_asset = rendered_assets[visible_render_index]
                 visible_render_index += 1
+            render_ordinal = visible_render_index if rendered_asset else None
             units.append(
                 {
                     "unit_id": unit_id,
                     "unit_type": "slide",
                     "ordinal": index,
-                    "title": f"Slide {index}",
+                    "title": slide_title or f"Slide {index}",
                     "rendered_asset": rendered_asset,
+                    "render_assets": [rendered_asset] if rendered_asset else [],
+                    "render_ordinal": render_ordinal,
+                    "render_page_span": (
+                        {"start": render_ordinal, "end": render_ordinal}
+                        if isinstance(render_ordinal, int)
+                        else None
+                    ),
                     "text_asset": str(text_asset),
                     "structure_asset": str(structure_asset),
                     "embedded_media": media_refs,
                     "extraction_confidence": "high" if visible_texts or notes else "low",
                     "hidden": hidden,
+                    "heading_aliases": [slide_title] if slide_title else [],
+                    "locator_aliases": [slide_title] if slide_title else [f"Slide {index}"],
                     "trust_prior_inputs": build_trust_prior_from_source_entry(source_entry),
                 }
             )
 
+    phase_three = (
+        compile_pptx_visual_artifacts(
+            source_dir,
+            source_id=str(source_entry["source_id"]),
+            presentation=presentation,
+            units=units,
+        )
+        if presentation is not None
+        else {
+            "artifact_index": write_empty_artifact_index(
+                source_dir, source_id=str(source_entry["source_id"])
+            ),
+            "visual_layout_assets": [],
+            "unit_updates": {},
+        }
+    )
+    for unit in units:
+        unit_update = phase_three["unit_updates"].get(str(unit.get("unit_id")), {})
+        if isinstance(unit_update, dict):
+            unit.update(unit_update)
+    materialize_focus_render_assets(source_dir, evidence_manifest={"units": units})
     evidence_manifest = {
         "source_id": source_entry["source_id"],
         "document_type": "pptx",
@@ -1115,6 +1459,8 @@ def build_pptx_source(
         "structure_assets": [
             str(Path("extracted") / f"slide-{index:03d}.json") for index in range(1, len(units) + 1)
         ],
+        "artifact_index_asset": "artifact_index.json",
+        "visual_layout_assets": phase_three["visual_layout_assets"],
         "embedded_media": sorted(set(embedded_media)),
         "language_candidates": [detect_source_language(all_texts)],
     }
@@ -1162,6 +1508,20 @@ def extract_docx_blocks(source_path: Path) -> tuple[list[dict[str, Any]], list[s
             for node in child.iter()
             if node.tag.rsplit("}", 1)[-1] == "t" and sanitize_text(node.text)
         ]
+        style_name = next(
+            (
+                sanitize_text(
+                    node.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val")
+                )
+                for node in child.iter()
+                if node.tag.rsplit("}", 1)[-1] == "pStyle"
+                and sanitize_text(
+                    node.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val")
+                )
+            ),
+            "",
+        )
+        has_numbering = any(node.tag.rsplit("}", 1)[-1] == "numPr" for node in child.iter())
         image_refs = [
             str(
                 node.get(
@@ -1175,10 +1535,24 @@ def extract_docx_blocks(source_path: Path) -> tuple[list[dict[str, Any]], list[s
             )
         ]
         embedded_images.extend(image_refs)
+        text_value = "\n".join(texts).strip()
+        is_heading = style_name.lower().startswith("heading")
+        if is_heading and current_blocks:
+            finalize_section()
         block = {
             "kind": "table" if tag == "tbl" else "paragraph",
-            "text": "\n".join(texts).strip(),
+            "text": text_value,
             "image_refs": image_refs,
+            "style_name": style_name or None,
+            "is_heading": is_heading,
+            "list_kind": (
+                "ordered"
+                if DOCX_ORDERED_STEP_PATTERN.match(text_value)
+                else "bullet"
+                if has_numbering or text_value.lstrip().startswith(("-", "*", "•"))
+                else None
+            ),
+            "caption_kind": ("figure" if DOCX_CAPTION_PREFIX_PATTERN.match(text_value) else None),
         }
         if block["text"] or block["image_refs"]:
             current_blocks.append(block)
@@ -1189,7 +1563,120 @@ def extract_docx_blocks(source_path: Path) -> tuple[list[dict[str, Any]], list[s
 
     if current_blocks:
         finalize_section()
+    for section in sections:
+        blocks = [block for block in section.get("blocks", []) if isinstance(block, dict)]
+        headings = [
+            str(block.get("text"))
+            for block in blocks
+            if block.get("is_heading") and isinstance(block.get("text"), str) and block.get("text")
+        ]
+        section["headings"] = headings
+        section["procedure_spans"] = [
+            {
+                "kind": str(block.get("list_kind")),
+                "text_excerpt": sanitize_text(block.get("text")),
+            }
+            for block in blocks
+            if isinstance(block.get("list_kind"), str) and sanitize_text(block.get("text"))
+        ]
+        captions = [
+            sanitize_text(block.get("text"))
+            for block in blocks
+            if block.get("caption_kind") and sanitize_text(block.get("text"))
+        ]
+        section["captions"] = captions
+        image_count = sum(
+            len(block.get("image_refs", []))
+            for block in blocks
+            if isinstance(block.get("image_refs"), list)
+        )
+        role_hints: list[str] = []
+        if image_count:
+            role_hints.append("image-heavy")
+        if any(block.get("kind") == "table" for block in blocks):
+            role_hints.append("table-heavy")
+        if section["procedure_spans"]:
+            role_hints.append("procedure-like")
+        section["role_hints"] = role_hints
     return sections, sorted(set(embedded_images))
+
+
+def extract_docx_embedded_media(
+    source_path: Path,
+    *,
+    image_refs: list[str],
+    source_dir: Path,
+) -> dict[str, str]:
+    """Extract embedded DOCX images into stable per-source media assets."""
+    from docx import Document
+
+    document = Document(str(source_path))
+    media_dir = source_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    assets_by_ref: dict[str, str] = {}
+    for image_ref in sorted(
+        {
+            value
+            for value in image_refs
+            if isinstance(value, str) and value.strip()
+        }
+    ):
+        relationship = document.part.rels.get(image_ref)
+        if relationship is None:
+            continue
+        if not str(getattr(relationship, "reltype", "")).endswith("/image"):
+            continue
+        target_part = getattr(relationship, "target_part", None)
+        if target_part is None:
+            continue
+        blob = getattr(target_part, "blob", None)
+        partname = Path(str(getattr(target_part, "partname", "") or ""))
+        suffix = partname.suffix.lower() or ".bin"
+        if not isinstance(blob, (bytes, bytearray)) or not blob:
+            continue
+        asset_path = media_dir / f"{image_ref}{suffix}"
+        asset_path.write_bytes(bytes(blob))
+        assets_by_ref[image_ref] = str(asset_path.relative_to(source_dir))
+    return assets_by_ref
+
+
+def extract_xlsx_embedded_media(
+    workbook_value: Any,
+    *,
+    units: list[dict[str, Any]],
+    source_dir: Path,
+) -> dict[str, dict[str, str]]:
+    """Extract embedded XLSX images into stable per-source media assets."""
+    media_dir = source_dir / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    unit_lookup = {
+        str(unit.get("title") or ""): str(unit.get("unit_id") or "")
+        for unit in units
+        if isinstance(unit.get("title"), str) and isinstance(unit.get("unit_id"), str)
+    }
+    assets_by_unit: dict[str, dict[str, str]] = {}
+    for worksheet in getattr(workbook_value, "worksheets", []) or []:
+        worksheet_title = str(getattr(worksheet, "title", "") or "")
+        unit_id = unit_lookup.get(worksheet_title)
+        if not unit_id:
+            continue
+        unit_assets: dict[str, str] = {}
+        for index, image in enumerate(getattr(worksheet, "_images", []), start=1):
+            image_ref = f"image-{index:03d}"
+            try:
+                blob = image._data()
+            except Exception:
+                continue
+            if not isinstance(blob, (bytes, bytearray)) or not blob:
+                continue
+            extension = str(getattr(image, "format", "") or "").lower().strip(".")
+            suffix = f".{extension}" if extension else ".bin"
+            asset_path = media_dir / f"{unit_id}-{image_ref}{suffix}"
+            asset_path.write_bytes(bytes(blob))
+            unit_assets[image_ref] = str(asset_path.relative_to(source_dir))
+        if unit_assets:
+            assets_by_unit[unit_id] = unit_assets
+    return assets_by_unit
 
 
 def build_docx_source(
@@ -1220,6 +1707,15 @@ def build_docx_source(
             if normalized_source_path is not None
             else ([], [])
         )
+        embedded_media_assets = (
+            extract_docx_embedded_media(
+                normalized_source_path,
+                image_refs=embedded_images,
+                source_dir=source_dir,
+            )
+            if normalized_source_path is not None
+            else {}
+        )
         converted_pdf, conversion_failures = convert_office_to_pdf(
             source_path, tempdir, soffice_binary
         )
@@ -1244,12 +1740,18 @@ def build_docx_source(
         write_json(source_dir / structure_asset, section)
         write_text(source_dir / text_asset, section_text + ("\n" if section_text else ""))
         structure_assets.append(str(structure_asset))
+        headings = [
+            value
+            for value in section.get("headings", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        locator_aliases = headings[:3] or [f"Section {section['ordinal']}"]
         units.append(
             {
                 "unit_id": unit_id,
                 "unit_type": "section",
                 "ordinal": section["ordinal"],
-                "title": f"Section {section['ordinal']}",
+                "title": headings[0] if headings else f"Section {section['ordinal']}",
                 "rendered_asset": None,
                 "render_reference_ids": [Path(asset).stem for asset in rendered_assets],
                 "text_asset": str(text_asset),
@@ -1263,10 +1765,24 @@ def build_docx_source(
                     }
                 ),
                 "extraction_confidence": "high" if section_text else "low",
+                "heading_aliases": headings,
+                "locator_aliases": locator_aliases,
                 "trust_prior_inputs": build_trust_prior_from_source_entry(source_entry),
             }
         )
 
+    phase_three = compile_docx_visual_compatibility(
+        source_dir,
+        source_id=str(source_entry["source_id"]),
+        units=units,
+        document_renders=rendered_assets,
+        embedded_media_assets=embedded_media_assets,
+    )
+    for unit in units:
+        unit_update = phase_three["unit_updates"].get(str(unit.get("unit_id")), {})
+        if isinstance(unit_update, dict):
+            unit.update(unit_update)
+    materialize_focus_render_assets(source_dir, evidence_manifest={"units": units})
     evidence_manifest = {
         "source_id": source_entry["source_id"],
         "document_type": "docx",
@@ -1280,6 +1796,8 @@ def build_docx_source(
         "units": units,
         "failures": normalization_failures + conversion_failures + render_failures,
         "structure_assets": structure_assets,
+        "artifact_index_asset": "artifact_index.json",
+        "visual_layout_assets": phase_three["visual_layout_assets"],
         "embedded_media": embedded_images,
         "language_candidates": [detect_source_language(all_texts)],
     }
@@ -1301,8 +1819,6 @@ def build_xlsx_source(
     soffice_binary: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build manifests and extracted artifacts for an XLSX source."""
-    from openpyxl import load_workbook  # type: ignore[import-untyped]
-
     source_entry = normalize_source_entry_for_build(paths, source_path, source_entry)
     extracted_dir = source_dir / "extracted"
     renders_dir = source_dir / "renders"
@@ -1312,29 +1828,69 @@ def build_xlsx_source(
     source_manifest = build_source_manifest(paths, source_entry, "libreoffice-pdf")
     with tempfile.TemporaryDirectory() as tempdir_name:
         tempdir = Path(tempdir_name)
+        render_failures: list[dict[str, str]] = []
+        conversion_failures: list[dict[str, str]] = []
+        rendered_assets: list[str] = []
+        sheet_render_assets: dict[str, list[str]] = {}
         normalized_source_path, normalization_failures = normalize_legacy_office_source(
             source_path,
             source_entry=source_entry,
             output_dir=tempdir,
             soffice_binary=soffice_binary,
         )
-        workbook = (
-            load_workbook(filename=str(normalized_source_path), data_only=True)
+        workbook_formula = (
+            _load_workbook_quietly(
+                normalized_source_path,
+                data_only=False,
+                failures=render_failures,
+                stage="xlsx-formula-load",
+            )
             if normalized_source_path is not None
             else None
         )
-        converted_pdf, conversion_failures = convert_office_to_pdf(
-            source_path, tempdir, soffice_binary
+        workbook_value = (
+            _load_workbook_quietly(
+                normalized_source_path,
+                data_only=True,
+                failures=render_failures,
+                stage="xlsx-value-load",
+            )
+            if normalized_source_path is not None
+            else None
         )
-        render_failures: list[dict[str, str]] = []
-        rendered_assets: list[str] = []
-        if converted_pdf is not None:
-            rendered_assets, render_failures = render_pdf_document(converted_pdf, renders_dir)
+        if normalized_source_path is not None and workbook_formula is not None:
+            (
+                sheet_render_assets,
+                rendered_assets,
+                sheet_render_failures,
+            ) = render_xlsx_sheet_documents(
+                normalized_source_path,
+                sheet_names=[worksheet.title for worksheet in workbook_formula.worksheets],
+                renders_dir=renders_dir,
+                tempdir=tempdir,
+                soffice_binary=soffice_binary,
+            )
+            render_failures.extend(sheet_render_failures)
+        if not rendered_assets:
+            converted_pdf, conversion_failures = convert_office_to_pdf(
+                source_path,
+                tempdir,
+                soffice_binary,
+            )
+            if converted_pdf is not None:
+                rendered_assets, fallback_render_failures = render_pdf_document(
+                    converted_pdf,
+                    renders_dir,
+                )
+                render_failures.extend(fallback_render_failures)
 
     units: list[dict[str, Any]] = []
     structure_assets: list[str] = []
     all_texts: list[str] = []
-    for index, worksheet in enumerate(workbook.worksheets if workbook is not None else [], start=1):
+    for index, worksheet in enumerate(
+        workbook_value.worksheets if workbook_value is not None else [],
+        start=1,
+    ):
         non_empty_cells: list[dict[str, str]] = []
         truncated = False
         for row in worksheet.iter_rows():
@@ -1377,22 +1933,70 @@ def build_xlsx_source(
             },
         )
         structure_assets.append(str(structure_asset))
+        unit_render_assets = list(sheet_render_assets.get(worksheet.title, []))
         units.append(
             {
                 "unit_id": f"sheet-{index:03d}",
                 "unit_type": "sheet",
                 "ordinal": index,
                 "title": worksheet.title,
-                "rendered_asset": None,
-                "render_reference_ids": [Path(asset).stem for asset in rendered_assets],
+                "rendered_asset": unit_render_assets[0] if unit_render_assets else None,
+                "render_assets": unit_render_assets,
+                "render_reference_ids": [Path(asset).stem for asset in unit_render_assets],
+                "render_page_span": None,
                 "text_asset": str(text_asset),
                 "structure_asset": str(structure_asset),
                 "embedded_media": [],
                 "extraction_confidence": "high" if non_empty_cells else "low",
+                "hidden": worksheet.sheet_state != "visible",
                 "trust_prior_inputs": build_trust_prior_from_source_entry(source_entry),
             }
         )
 
+    embedded_media_assets = (
+        extract_xlsx_embedded_media(
+            workbook_value,
+            units=units,
+            source_dir=source_dir,
+        )
+        if workbook_value is not None
+        else {}
+    )
+    for unit in units:
+        unit_id = str(unit.get("unit_id") or "")
+        if not unit_id:
+            continue
+        unit["embedded_media"] = sorted(
+            embedded_media_assets.get(unit_id, {}).values()
+        )
+
+    phase_three = (
+        compile_xlsx_artifacts(
+            source_dir,
+            source_id=str(source_entry["source_id"]),
+            workbook_formula=workbook_formula,
+            workbook_value=workbook_value,
+            units=units,
+            sheet_render_assets=sheet_render_assets,
+            embedded_media_assets=embedded_media_assets,
+        )
+        if workbook_formula is not None and workbook_value is not None
+        else {
+            "artifact_index": write_empty_artifact_index(
+                source_dir,
+                source_id=str(source_entry["source_id"]),
+            ),
+            "spreadsheet_workbook_asset": None,
+            "spreadsheet_sheet_assets": [],
+            "visual_layout_assets": [],
+            "unit_updates": {},
+        }
+    )
+    for unit in units:
+        unit_update = phase_three["unit_updates"].get(str(unit.get("unit_id")), {})
+        if isinstance(unit_update, dict):
+            unit.update(unit_update)
+    materialize_focus_render_assets(source_dir, evidence_manifest={"units": units})
     evidence_manifest = {
         "source_id": source_entry["source_id"],
         "document_type": "xlsx",
@@ -1406,6 +2010,10 @@ def build_xlsx_source(
         "units": units,
         "failures": normalization_failures + conversion_failures + render_failures,
         "structure_assets": structure_assets,
+        "artifact_index_asset": "artifact_index.json",
+        "spreadsheet_workbook_asset": phase_three["spreadsheet_workbook_asset"],
+        "spreadsheet_sheet_assets": phase_three["spreadsheet_sheet_assets"],
+        "visual_layout_assets": phase_three["visual_layout_assets"],
         "embedded_media": [],
         "language_candidates": [detect_source_language(all_texts)],
     }
@@ -1557,9 +2165,7 @@ def _enrich_text_structure_refs(
                 str(raw_link.get("target") or ""),
             )
             link["resolution"] = {
-                key: value
-                for key, value in resolution.items()
-                if key != "absolute_path"
+                key: value for key, value in resolution.items() if key != "absolute_path"
             }
             enriched_links.append(link)
         block["links"] = enriched_links
@@ -1605,8 +2211,9 @@ def build_text_source(
     source_entry = normalize_source_entry_for_build(paths, source_path, source_entry)
     definition = source_definition_for_entry(source_entry, source_path)
     if definition is None:
+        source_extension = source_entry.get("source_extension") or source_path.suffix
         raise RuntimeError(
-            f"Unsupported text source type for staging: {source_entry.get('source_extension') or source_path.suffix}"
+            f"Unsupported text source type for staging: {source_extension}"
         )
     extracted_dir = source_dir / "extracted"
     ensure_directory(extracted_dir)
@@ -1662,7 +2269,10 @@ def build_text_source(
             }
         )
 
-    source_manifest = build_source_manifest(paths, source_entry, "text-native", title=parsed.source_title)
+    source_manifest = build_source_manifest(
+        paths, source_entry, "text-native", title=parsed.source_title
+    )
+    write_empty_artifact_index(source_dir, source_id=str(source_entry["source_id"]))
     evidence_manifest = {
         "source_id": source_entry["source_id"],
         "document_type": source_entry["document_type"],
@@ -1674,6 +2284,7 @@ def build_text_source(
         "failures": parsed.failures,
         "warnings": list(dict.fromkeys([*parsed.warnings, *media_warnings])),
         "structure_assets": structure_assets,
+        "artifact_index_asset": "artifact_index.json",
         "embedded_media": sorted(set(embedded_media_assets)),
         "language_candidates": [parsed.source_language],
     }
@@ -1728,7 +2339,9 @@ def _synthetic_source_entry_from_manifest(
         "modified_at": source_manifest.get("modified_at"),
         "first_seen_at": source_manifest.get("first_seen_at", utc_now()),
         "last_seen_at": utc_now(),
-        "identity_confidence": str(source_manifest.get("identity_confidence") or "derived-attachment"),
+        "identity_confidence": str(
+            source_manifest.get("identity_confidence") or "derived-attachment"
+        ),
         "identity_basis": str(source_manifest.get("identity_basis") or "derived-attachment"),
         "change_classification": change_classification,
         "change_traits": traits,
@@ -1768,7 +2381,8 @@ def _derived_source_change_state(
     now = utc_now()
     previous_path = (
         str(previous_manifest.get("current_path"))
-        if isinstance(previous_manifest, dict) and isinstance(previous_manifest.get("current_path"), str)
+        if isinstance(previous_manifest, dict)
+        and isinstance(previous_manifest.get("current_path"), str)
         else None
     )
     previous_fingerprint = (
@@ -1778,7 +2392,9 @@ def _derived_source_change_state(
         else None
     )
     prior_paths: list[str] = []
-    if isinstance(previous_manifest, dict) and isinstance(previous_manifest.get("prior_paths"), list):
+    if isinstance(previous_manifest, dict) and isinstance(
+        previous_manifest.get("prior_paths"), list
+    ):
         prior_paths.extend(
             value for value in previous_manifest["prior_paths"] if isinstance(value, str) and value
         )
@@ -1824,7 +2440,10 @@ def _derived_source_change_state(
         classification = "modified"
     reason = "The derived attachment source changed and must be restaged."
     if classification == "unchanged":
-        reason = "The derived attachment fingerprint is unchanged, so the staged artifacts can be reused."
+        reason = (
+            "The derived attachment fingerprint is unchanged, so the staged "
+            "artifacts can be reused."
+        )
     elif classification == "moved-or-renamed":
         reason = (
             "The derived attachment path changed but the attachment fingerprint is unchanged, "
@@ -1919,6 +2538,10 @@ def _persist_source_artifacts(
     evidence_manifest: dict[str, Any],
 ) -> None:
     """Write the standard manifest and guidance files for one staged source dir."""
+    evidence_manifest = sync_optional_sidecar_assets(
+        source_dir,
+        evidence_manifest=evidence_manifest,
+    )
     write_json(source_dir / "source_manifest.json", source_manifest)
     write_json(source_dir / "evidence_manifest.json", evidence_manifest)
     create_source_authoring_notes(source_dir, source_manifest)
@@ -1932,6 +2555,26 @@ def _persist_source_artifacts(
         knowledge=knowledge or None,
         summary_text=summary_text,
     )
+
+
+def sync_optional_sidecar_assets(
+    source_dir: Path,
+    *,
+    evidence_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Refresh optional sidecar asset references from the current staged source dir."""
+    payload = dict(evidence_manifest)
+    semantic_overlay_assets = collect_semantic_overlay_assets(source_dir)
+    if semantic_overlay_assets:
+        payload["semantic_overlay_assets"] = semantic_overlay_assets
+    else:
+        payload.pop("semantic_overlay_assets", None)
+    pdf_document_path = source_dir / "pdf_document.json"
+    if str(payload.get("document_type") or "") == "pdf" and pdf_document_path.exists():
+        payload["pdf_document_asset"] = "pdf_document.json"
+    elif payload.get("pdf_document_asset") and not pdf_document_path.exists():
+        payload.pop("pdf_document_asset", None)
+    return payload
 
 
 def build_email_source_tree(
@@ -2006,7 +2649,8 @@ def build_email_source_tree(
                 supported_child = child_depth <= EMAIL_MAX_ATTACHMENT_DEPTH
                 if not supported_child:
                     unit_warnings.append(
-                        f"Nested `.eml` depth exceeded the supported maximum of {EMAIL_MAX_ATTACHMENT_DEPTH}."
+                        "Nested `.eml` depth exceeded the supported maximum of "
+                        f"{EMAIL_MAX_ATTACHMENT_DEPTH}."
                     )
             if supported_child:
                 combined_slots = (*lineage_slots, attachment.lineage_slot)
@@ -2057,7 +2701,9 @@ def build_email_source_tree(
                     "document_type": child_document_type,
                     "source_extension": attachment.source_extension,
                     "support_tier": (
-                        definition.support_tier if definition is not None else attachment.support_tier
+                        definition.support_tier
+                        if definition is not None
+                        else attachment.support_tier
                     ),
                     "source_origin": DERIVED_SOURCE_ORIGIN,
                     "parent_source_id": source_entry["source_id"],
@@ -2131,7 +2777,10 @@ def build_email_source_tree(
                         if child_previous_dir is not None:
                             previous_signature = semantic_evidence_signature(child_previous_dir)
                             current_signature = semantic_evidence_signature(child_source_dir)
-                            if previous_signature is not None and previous_signature == current_signature:
+                            if (
+                                previous_signature is not None
+                                and previous_signature == current_signature
+                            ):
                                 preserve_semantic_outputs(child_previous_dir, child_source_dir)
                                 _persist_source_artifacts(
                                     child_source_dir,
@@ -2160,7 +2809,8 @@ def build_email_source_tree(
                     )
                     published_attachment_assets.append(published_asset)
                 unit_warnings.append(
-                    f"Attachment `{attachment.filename}` is preserved as raw evidence without a dedicated parser."
+                    f"Attachment `{attachment.filename}` is preserved as raw "
+                    "evidence without a dedicated parser."
                 )
 
             attachment_resolution[attachment.unit_id] = {
@@ -2229,9 +2879,7 @@ def build_email_source_tree(
                 }
             )
             unit_warnings.extend(
-                warning
-                for warning in resolution.get("warnings", [])
-                if isinstance(warning, str)
+                warning for warning in resolution.get("warnings", []) if isinstance(warning, str)
             )
         write_text(source_dir / text_asset, unit.text + ("\n" if unit.text else ""))
         write_json(source_dir / structure_asset, structure_data)
@@ -2262,7 +2910,8 @@ def build_email_source_tree(
         "published_attachment_assets": published_attachment_assets,
         "email_subject": parsed.email_metadata.get("subject"),
         "message_id": parsed.email_metadata.get("message_id"),
-        "root_email_source_id": source_entry.get("root_email_source_id") or source_entry["source_id"],
+        "root_email_source_id": source_entry.get("root_email_source_id")
+        or source_entry["source_id"],
     }
     source_manifest = build_source_manifest(
         paths,
@@ -2270,6 +2919,7 @@ def build_email_source_tree(
         "email-native",
         title=parsed.source_title,
     )
+    write_empty_artifact_index(source_dir, source_id=str(source_entry["source_id"]))
     evidence_manifest = {
         "source_id": source_entry["source_id"],
         "document_type": "email",
@@ -2281,6 +2931,7 @@ def build_email_source_tree(
         "failures": parsed.failures,
         "warnings": list(dict.fromkeys(source_warnings)),
         "structure_assets": structure_assets,
+        "artifact_index_asset": "artifact_index.json",
         "embedded_media": sorted(set(embedded_media_assets)),
         "language_candidates": [parsed.source_language],
         "email_metadata": parsed.email_metadata,
@@ -2462,11 +3113,38 @@ def build_single_source_artifacts(
 
 
 def locate_previous_source_dir(paths: WorkspacePaths, source_id: str) -> Path | None:
-    """Find the best previous source directory for reuse, preferring staging over current."""
-    for target_root in (paths.knowledge_base_staging_dir, paths.knowledge_base_current_dir):
-        candidate = target_root / "sources" / source_id
-        if candidate.exists():
-            return candidate
+    """Find the best previous source directory for reuse without dropping richer semantic state."""
+
+    def semantic_rank(source_dir: Path) -> tuple[int, int, int, float]:
+        overlay_assets = collect_semantic_overlay_assets(source_dir)
+        semantic_paths = [
+            source_dir / "knowledge.json",
+            source_dir / "summary.md",
+            source_dir / "source_manifest.json",
+            source_dir / "evidence_manifest.json",
+            *(source_dir / asset for asset in overlay_assets),
+        ]
+        newest_mtime = max(
+            (path.stat().st_mtime for path in semantic_paths if path.exists()),
+            default=0.0,
+        )
+        return (
+            len(overlay_assets),
+            int((source_dir / "knowledge.json").exists()),
+            int((source_dir / "summary.md").exists()),
+            newest_mtime,
+        )
+
+    staging_candidate = paths.knowledge_base_staging_dir / "sources" / source_id
+    current_candidate = paths.knowledge_base_current_dir / "sources" / source_id
+    if staging_candidate.exists() and current_candidate.exists():
+        if semantic_rank(current_candidate) >= semantic_rank(staging_candidate):
+            return current_candidate
+        return staging_candidate
+    if current_candidate.exists():
+        return current_candidate
+    if staging_candidate.exists():
+        return staging_candidate
     return None
 
 
@@ -2476,6 +3154,12 @@ def preserve_semantic_outputs(previous_source_dir: Path, source_dir: Path) -> No
         previous_path = previous_source_dir / filename
         if previous_path.exists():
             shutil.copy2(previous_path, source_dir / filename)
+    previous_overlay_dir = previous_source_dir / "semantic_overlay"
+    target_overlay_dir = source_dir / "semantic_overlay"
+    if previous_overlay_dir.exists():
+        if target_overlay_dir.exists():
+            shutil.rmtree(target_overlay_dir)
+        shutil.copytree(previous_overlay_dir, target_overlay_dir)
 
 
 def default_render_strategy(document_type: str) -> str:
@@ -2554,6 +3238,58 @@ def refresh_staging_source_metadata(
             refresh_reused_source_metadata(paths, source_entry, source_dir)
 
 
+def source_artifact_contract_complete(
+    source_dir: Path,
+    *,
+    document_type: str,
+) -> bool:
+    """Return whether a source directory satisfies the current Phase 3 artifact contract."""
+    evidence_manifest = read_json(source_dir / "evidence_manifest.json")
+    if not evidence_manifest:
+        return False
+    artifact_index_value = evidence_manifest.get("artifact_index_asset")
+    artifact_index_path = (
+        source_dir / artifact_index_value
+        if isinstance(artifact_index_value, str) and artifact_index_value
+        else source_dir / "artifact_index.json"
+    )
+    if not artifact_index_path.exists():
+        return False
+
+    def asset_list_complete(values: Any) -> bool:
+        return (
+            isinstance(values, list)
+            and bool(values)
+            and all(
+                isinstance(value, str) and value and (source_dir / value).exists()
+                for value in values
+            )
+        )
+
+    if document_type in {"pdf", "pptx", "docx", "xlsx"}:
+        if not asset_list_complete(evidence_manifest.get("visual_layout_assets")):
+            return False
+    if document_type == "pdf":
+        pdf_document_asset = evidence_manifest.get("pdf_document_asset")
+        if not isinstance(pdf_document_asset, str) or not pdf_document_asset:
+            return False
+        if not (source_dir / pdf_document_asset).exists():
+            return False
+    if document_type == "xlsx":
+        workbook_asset = evidence_manifest.get("spreadsheet_workbook_asset")
+        if not isinstance(workbook_asset, str) or not workbook_asset:
+            return False
+        if not (source_dir / workbook_asset).exists():
+            return False
+        if not asset_list_complete(evidence_manifest.get("spreadsheet_sheet_assets")):
+            return False
+    if document_type in {"pdf", "pptx", "docx", "xlsx"} and not focus_render_contract_complete(
+        source_dir
+    ):
+        return False
+    return True
+
+
 def staging_source_artifacts_complete(
     paths: WorkspacePaths,
     active_sources: list[dict[str, Any]],
@@ -2576,6 +3312,11 @@ def staging_source_artifacts_complete(
         if not (source_dir / "evidence_manifest.json").exists():
             return False
         source_manifest = read_json(source_dir / "source_manifest.json")
+        if not source_artifact_contract_complete(
+            source_dir,
+            document_type=str(source_manifest.get("document_type") or "unknown"),
+        ):
+            return False
         for child_source_id in source_manifest.get("child_source_ids", []):
             if not isinstance(child_source_id, str) or not child_source_id:
                 return False
@@ -2678,6 +3419,10 @@ def write_staging_root_artifacts(
         {"generated_at": utc_now(), "pending_sources": []},
     )
     write_json(
+        paths.staging_hybrid_work_path,
+        {"generated_at": utc_now(), "target": "staging", "sources": []},
+    )
+    write_json(
         paths.staging_publish_manifest_path,
         {
             "staged_at": utc_now(),
@@ -2690,7 +3435,11 @@ def write_staging_root_artifacts(
 
 
 def _sorted_string_list(value: Any) -> list[str]:
-    return sorted(str(item) for item in value if isinstance(item, str)) if isinstance(value, list) else []
+    return (
+        sorted(str(item) for item in value if isinstance(item, str))
+        if isinstance(value, list)
+        else []
+    )
 
 
 def _read_unit_text(source_dir: Path, unit: dict[str, Any]) -> str:
@@ -2703,7 +3452,11 @@ def _read_unit_text(source_dir: Path, unit: dict[str, Any]) -> str:
     return sanitize_text(asset_path.read_text(encoding="utf-8"))
 
 
-def semantic_evidence_signature(source_dir: Path) -> str | None:
+def semantic_evidence_signature(
+    source_dir: Path,
+    *,
+    include_artifacts: bool = True,
+) -> str | None:
     """Return a stable semantic signature for staged evidence, independent of file path."""
     evidence_manifest = read_json(source_dir / "evidence_manifest.json")
     if not evidence_manifest:
@@ -2732,9 +3485,19 @@ def semantic_evidence_signature(source_dir: Path) -> str | None:
         "units": units,
         "warnings": evidence_warning_messages(evidence_manifest),
     }
-    return hashlib.sha256(
-        str(payload).encode("utf-8")
-    ).hexdigest()
+    if include_artifacts:
+        artifact_index = read_json(source_dir / "artifact_index.json")
+        payload["artifacts"] = [
+            {
+                "artifact_id": artifact.get("artifact_id"),
+                "artifact_type": artifact.get("artifact_type"),
+                "unit_id": artifact.get("unit_id"),
+                "title": artifact.get("title"),
+            }
+            for artifact in artifact_index.get("artifacts", [])
+            if isinstance(artifact, dict)
+        ]
+    return hashlib.sha256(str(payload).encode("utf-8")).hexdigest()
 
 
 def _prune_source_related_sources(
@@ -2789,6 +3552,16 @@ def refresh_source_semantic_outputs(
 ) -> dict[str, int]:
     """Refresh reused source knowledge metadata and silently prune deleted relations."""
     source_manifest = read_json(source_dir / "source_manifest.json")
+    evidence_manifest_path = source_dir / "evidence_manifest.json"
+    evidence_manifest = read_json(evidence_manifest_path)
+    if evidence_manifest:
+        write_json(
+            evidence_manifest_path,
+            sync_optional_sidecar_assets(
+                source_dir,
+                evidence_manifest=evidence_manifest,
+            ),
+        )
     knowledge_path = source_dir / "knowledge.json"
     knowledge = read_json(knowledge_path)
     if not source_manifest or not knowledge:
@@ -2819,8 +3592,13 @@ def refresh_source_semantic_outputs(
     summary_path = source_dir / "summary.md"
     summary_rebuilt = 0
     if not summary_path.exists() or not summary_path.read_text(encoding="utf-8").strip():
-        title = str(knowledge.get("title") or source_manifest.get("title") or source_manifest["source_id"])
-        summary_en = sanitize_text(knowledge.get("summary_en")) or "No concise English summary is currently available."
+        title = str(
+            knowledge.get("title") or source_manifest.get("title") or source_manifest["source_id"]
+        )
+        summary_en = (
+            sanitize_text(knowledge.get("summary_en"))
+            or "No concise English summary is currently available."
+        )
         summary_source = sanitize_text(knowledge.get("summary_source")) or summary_en
         summary_path.write_text(
             render_summary_markdown(
@@ -2883,6 +3661,85 @@ def _collect_unit_snippets(
     return snippets
 
 
+def _collect_artifact_snippets(
+    source_dir: Path,
+    *,
+    limit: int = 4,
+) -> list[dict[str, str]]:
+    artifact_index = read_json(source_dir / "artifact_index.json")
+    snippets: list[dict[str, str]] = []
+    for artifact in artifact_index.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+        artifact_id = artifact.get("artifact_id")
+        unit_id = artifact.get("unit_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            continue
+        if not isinstance(unit_id, str) or not unit_id:
+            continue
+        title = _compact_excerpt(
+            str(artifact.get("title") or artifact.get("linked_text") or ""),
+            limit=140,
+        )
+        if not title:
+            continue
+        if not (
+            bool(artifact.get("graph_promoted"))
+            or artifact.get("artifact_type") in {"chart", "table", "major-region"}
+        ):
+            continue
+        snippets.append(
+            {
+                "unit_id": unit_id,
+                "artifact_id": artifact_id,
+                "excerpt": title,
+            }
+        )
+        if len(snippets) >= limit:
+            break
+    return snippets
+
+
+def _collect_overlay_snippets(
+    source_dir: Path,
+    *,
+    limit: int = 4,
+) -> list[dict[str, str]]:
+    overlays = load_semantic_overlays(source_dir)
+    snippets: list[dict[str, str]] = []
+    for unit_id, payload in overlays.items():
+        confidence = overlay_confidence(payload)
+        if confidence == "low":
+            continue
+        for excerpt in overlay_search_strings(payload)[:3]:
+            compact = _compact_excerpt(excerpt, limit=160)
+            if not compact:
+                continue
+            snippets.append(
+                {
+                    "unit_id": unit_id,
+                    "excerpt": compact,
+                }
+            )
+            if len(snippets) >= limit:
+                return snippets
+    return snippets
+
+
+def _visual_role_hints(source_dir: Path, evidence_manifest: dict[str, Any]) -> list[str]:
+    hints: list[str] = []
+    for asset in evidence_manifest.get("visual_layout_assets", []):
+        if not isinstance(asset, str) or not asset:
+            continue
+        payload = read_json(source_dir / asset)
+        if not isinstance(payload, dict):
+            continue
+        hints.extend(
+            hint for hint in payload.get("role_hints", []) if isinstance(hint, str) and hint
+        )
+    return list(dict.fromkeys(hints))
+
+
 def write_conservative_semantic_outputs(
     source_dir: Path,
     *,
@@ -2898,17 +3755,40 @@ def write_conservative_semantic_outputs(
     document_type = str(source_manifest.get("document_type") or "unknown")
     title = _fallback_title(source_manifest)
     snippets = _collect_unit_snippets(source_dir, evidence_manifest, limit=3)
+    artifact_snippets = _collect_artifact_snippets(source_dir, limit=4)
+    overlay_snippets = _collect_overlay_snippets(source_dir, limit=4)
+    visual_role_hints = _visual_role_hints(source_dir, evidence_manifest)
     warnings = evidence_warning_messages(evidence_manifest)
     failures = evidence_manifest.get("failures", [])
     if not isinstance(failures, list):
         failures = []
     source_language = detect_source_language(
-        [snippet["excerpt"] for snippet in snippets] or [title]
+        [snippet["excerpt"] for snippet in [*overlay_snippets, *artifact_snippets, *snippets]]
+        or [title]
     )
     primary_citations = [
         {"unit_id": snippet["unit_id"], "support": "Autonomous in-repo semantic summary"}
         for snippet in snippets[:3]
     ]
+    artifact_citations = [
+        {
+            "unit_id": snippet["unit_id"],
+            "artifact_id": snippet["artifact_id"],
+            "support": "Autonomous artifact-backed semantic summary",
+        }
+        for snippet in artifact_snippets[:3]
+    ]
+    overlay_citations = [
+        {
+            "unit_id": snippet["unit_id"],
+            "support": "Autonomous semantic-overlay-backed summary",
+        }
+        for snippet in overlay_snippets[:2]
+    ]
+    if artifact_citations:
+        primary_citations = artifact_citations + primary_citations
+    elif overlay_citations:
+        primary_citations = overlay_citations + primary_citations
     if not primary_citations:
         first_unit_id = next(
             (
@@ -2932,14 +3812,17 @@ def write_conservative_semantic_outputs(
             interaction_context.get("related_sources", []),
             active_source_ids=active_source_ids,
         )
+        primary_snippet_excerpt = (
+            snippets[0]["excerpt"]
+            if snippets
+            else "The promoted turns were preserved, but extracted text remains limited."
+        )
         summary_en = (
             f"This interaction-derived memory preserves conversation evidence for `{title}`. "
-            f"{snippets[0]['excerpt'] if snippets else 'The promoted turns were preserved, but extracted text remains limited.'}"
+            f"{primary_snippet_excerpt}"
         )
         summary_source = (
-            snippets[0]["excerpt"]
-            if source_language != "en" and snippets
-            else summary_en
+            snippets[0]["excerpt"] if source_language != "en" and snippets else summary_en
         )
         key_points = [
             {
@@ -2971,16 +3854,202 @@ def write_conservative_semantic_outputs(
         ]
         entities = [{"name": title, "type": "interaction-memory"}]
         related_sources = filtered_related_sources
+    elif document_type == "xlsx":
+        workbook_payload = read_json(source_dir / "spreadsheet_workbook.json")
+        sheet_inventory = workbook_payload.get("sheet_inventory", [])
+        visible_sheets = [
+            item
+            for item in sheet_inventory
+            if isinstance(item, dict) and item.get("visibility") == "visible"
+        ]
+        hidden_sheets = [
+            item
+            for item in sheet_inventory
+            if isinstance(item, dict) and item.get("visibility") != "visible"
+        ]
+        chart_registry = workbook_payload.get("chart_registry", [])
+        cross_sheet_summary = workbook_payload.get("cross_sheet_reference_summary", [])
+        workbook_summary_bits = [
+            f"{len(sheet_inventory)} sheets",
+            f"{len(visible_sheets)} visible",
+        ]
+        if hidden_sheets:
+            workbook_summary_bits.append(f"{len(hidden_sheets)} hidden")
+        if isinstance(chart_registry, list) and chart_registry:
+            workbook_summary_bits.append(f"{len(chart_registry)} charts")
+        if isinstance(cross_sheet_summary, list) and cross_sheet_summary:
+            workbook_summary_bits.append(f"{len(cross_sheet_summary)} cross-sheet reference groups")
+        summary_en = "This workbook preserves " + ", ".join(workbook_summary_bits) + "."
+        if overlay_snippets:
+            summary_en += " Semantic overlay signals include: " + "; ".join(
+                snippet["excerpt"] for snippet in overlay_snippets[:2]
+            )
+        elif artifact_snippets:
+            summary_en += " Key artifact signals include: " + "; ".join(
+                snippet["excerpt"] for snippet in artifact_snippets[:2]
+            )
+        summary_source = summary_en
+        key_points = []
+        for sheet in visible_sheets[:2]:
+            if not isinstance(sheet, dict):
+                continue
+            point_parts = [str(sheet.get("sheet_name") or "Sheet")]
+            metric_candidates = sheet.get("metric_candidates", [])
+            if isinstance(metric_candidates, list) and metric_candidates:
+                point_parts.append(
+                    "metrics: " + ", ".join(str(value) for value in metric_candidates[:3])
+                )
+            time_axis_candidates = sheet.get("time_axis_candidates", [])
+            if isinstance(time_axis_candidates, list) and time_axis_candidates:
+                point_parts.append(
+                    "time axes: " + ", ".join(str(value) for value in time_axis_candidates[:2])
+                )
+            key_points.append(
+                {
+                    "text_en": "; ".join(point_parts),
+                    "text_source": "; ".join(point_parts),
+                    "citations": primary_citations[:1],
+                }
+            )
+        if not key_points:
+            key_points = [
+                {
+                    "text_en": summary_en,
+                    "text_source": summary_en,
+                    "citations": primary_citations[:1],
+                }
+            ]
+        claims = [
+            {
+                "statement_en": (
+                    f"`{title}` is preserved as a structured workbook with "
+                    "sheet-level, chart, and tabular evidence."
+                ),
+                "statement_source": (
+                    f"`{title}` is preserved as a structured workbook with "
+                    "sheet-level, chart, and tabular evidence."
+                ),
+                "citations": primary_citations[:1],
+            }
+        ]
+        if hidden_sheets:
+            claims.append(
+                {
+                    "statement_en": (
+                        f"The workbook contains {len(hidden_sheets)} hidden "
+                        "supporting sheets."
+                    ),
+                    "statement_source": (
+                        f"The workbook contains {len(hidden_sheets)} hidden "
+                        "supporting sheets."
+                    ),
+                    "citations": primary_citations[:1],
+                }
+            )
+        entities = [{"name": title, "type": "xlsx-workbook"}]
+        related_sources = []
+    elif document_type in {"pdf", "pptx", "docx"} and (
+        overlay_snippets or artifact_snippets or visual_role_hints
+    ):
+        summary_seed = (
+            "; ".join(snippet["excerpt"] for snippet in overlay_snippets[:2])
+            if overlay_snippets
+            else "; ".join(snippet["excerpt"] for snippet in artifact_snippets[:2])
+            if artifact_snippets
+            else ""
+        )
+        role_seed = ", ".join(visual_role_hints[:3]) if visual_role_hints else ""
+        summary_en = (
+            f"This source preserves published visual evidence with role hints such as {role_seed}. "
+            f"{summary_seed}".strip()
+        ).strip()
+        if not summary_en:
+            summary_en = (
+                "This source preserves published visual evidence for manual "
+                "and downstream reasoning."
+            )
+        summary_source = summary_en
+        key_points = []
+        for snippet in overlay_snippets[:2]:
+            key_points.append(
+                {
+                    "text_en": snippet["excerpt"],
+                    "text_source": snippet["excerpt"],
+                    "citations": [
+                        {
+                            "unit_id": snippet["unit_id"],
+                            "support": "Autonomous semantic-overlay-backed summary",
+                        }
+                    ],
+                }
+            )
+        if not key_points:
+            key_points = [
+                {
+                    "text_en": snippet["excerpt"],
+                    "text_source": snippet["excerpt"],
+                    "citations": [
+                        {
+                            "unit_id": snippet["unit_id"],
+                            "artifact_id": snippet["artifact_id"],
+                            "support": "Autonomous artifact-backed semantic summary",
+                        }
+                    ],
+                }
+                for snippet in artifact_snippets[:2]
+            ]
+        if not key_points:
+            key_points = [
+                {
+                    "text_en": summary_en,
+                    "text_source": summary_en,
+                    "citations": primary_citations[:1],
+                }
+            ]
+        claims = [
+            {
+                "statement_en": (
+                    f"`{title}` includes visual-layout evidence that remains "
+                    "usable without immediate source rerendering."
+                ),
+                "statement_source": (
+                    f"`{title}` includes visual-layout evidence that remains "
+                    "usable without immediate source rerendering."
+                ),
+                "citations": primary_citations[:1],
+            }
+        ]
+        if visual_role_hints:
+            claims.append(
+                {
+                    "statement_en": "Detected visual role hints include: "
+                    + ", ".join(visual_role_hints[:4]),
+                    "statement_source": "Detected visual role hints include: "
+                    + ", ".join(visual_role_hints[:4]),
+                    "citations": primary_citations[:1],
+                }
+            )
+        entities = [{"name": title, "type": document_type}]
+        related_sources = []
     else:
+        if overlay_snippets:
+            snippet_seed = list(overlay_snippets)
+        elif artifact_snippets:
+            snippet_seed = list(artifact_snippets)
+        else:
+            snippet_seed = list(snippets)
         topic_summary = (
-            "; ".join(snippet["excerpt"] for snippet in snippets[:2])
-            if snippets
-            else "The source preserved little extracted text, so interpretation remains conservative."
+            "; ".join(snippet["excerpt"] for snippet in snippet_seed[:2])
+            if snippet_seed
+            else (
+                "The source preserved little extracted text, so interpretation "
+                "remains conservative."
+            )
         )
         summary_en = f"This source covers: {topic_summary}"
         summary_source = (
-            snippets[0]["excerpt"]
-            if source_language != "en" and snippets
+            snippet_seed[0]["excerpt"]
+            if source_language != "en" and snippet_seed
             else summary_en
         )
         key_points = [
@@ -3011,18 +4080,19 @@ def write_conservative_semantic_outputs(
                     "citations": primary_citations[:1],
                 }
             ]
+        evidence_claim = (
+            f"The staged evidence for `{title}` explicitly includes: "
+            f"{snippet_seed[0]['excerpt']}"
+            if snippet_seed
+            else (
+                f"`{title}` is preserved with limited extracted text and may "
+                "require render inspection."
+            )
+        )
         claims = [
             {
-                "statement_en": (
-                    f"The staged evidence for `{title}` explicitly includes: {snippets[0]['excerpt']}"
-                    if snippets
-                    else f"`{title}` is preserved with limited extracted text and may require render inspection."
-                ),
-                "statement_source": (
-                    f"The staged evidence for `{title}` explicitly includes: {snippets[0]['excerpt']}"
-                    if snippets
-                    else f"`{title}` is preserved with limited extracted text and may require render inspection."
-                ),
+                "statement_en": evidence_claim,
+                "statement_source": evidence_claim,
                 "citations": primary_citations[:1],
             }
         ]
@@ -3031,28 +4101,39 @@ def write_conservative_semantic_outputs(
 
     known_gaps = [
         {
-            "text_en": "Evidence warnings were preserved during staging: " + "; ".join(warnings[:3]),
-            "text_source": "Evidence warnings were preserved during staging: " + "; ".join(warnings[:3]),
+            "text_en": "Evidence warnings were preserved during staging: "
+            + "; ".join(warnings[:3]),
+            "text_source": "Evidence warnings were preserved during staging: "
+            + "; ".join(warnings[:3]),
         }
         for _warning in ([warnings[0]] if warnings else [])
     ]
     if not snippets:
+        limited_text_gap = (
+            "Extracted text is limited, so manual render or structure "
+            "inspection may still be required."
+        )
         known_gaps.append(
             {
-                "text_en": "Extracted text is limited, so manual render or structure inspection may still be required.",
-                "text_source": "Extracted text is limited, so manual render or structure inspection may still be required.",
+                "text_en": limited_text_gap,
+                "text_source": limited_text_gap,
             }
         )
 
     ambiguities = [
         {
             "text_en": "Staging recorded partial extraction failures that may hide source details.",
-            "text_source": "Staging recorded partial extraction failures that may hide source details.",
+            "text_source": (
+                "Staging recorded partial extraction failures that may hide "
+                "source details."
+            ),
             "citations": primary_citations[:1],
         }
         for _failure in ([failures[0]] if failures else [])
     ]
-    confidence_level = "high" if snippets and not warnings and not failures else "medium" if snippets else "low"
+    confidence_level = (
+        "high" if snippets and not warnings and not failures else "medium" if snippets else "low"
+    )
     confidence_note = (
         "Autonomous in-repo authoring synthesized this knowledge directly from staged evidence."
     )
@@ -3176,9 +4257,7 @@ def repair_staging_semantic_artifacts(
         interaction_repairs["knowledge_relations_pruned"] += int(
             refreshed.get("knowledge_pruned", 0)
         )
-        interaction_repairs["context_relations_pruned"] += int(
-            refreshed.get("context_pruned", 0)
-        )
+        interaction_repairs["context_relations_pruned"] += int(refreshed.get("context_pruned", 0))
 
     return {
         "source_repairs": source_repairs,
@@ -3225,6 +4304,65 @@ def auto_author_pending_semantics(
         "authored_count": len(authored_items),
         "mode": "conservative-in-repo",
     }
+
+
+def build_hybrid_work_queue(
+    paths: WorkspacePaths,
+    *,
+    target: str = "staging",
+) -> dict[str, Any]:
+    """Build the staged hard-artifact hybrid work queue."""
+    target_root = paths.knowledge_target_dir(target)
+    source_root = target_root / "sources"
+    payload: dict[str, Any] = {"generated_at": utc_now(), "target": target, "sources": []}
+    if not source_root.exists():
+        write_json(paths.hybrid_work_path(target), payload)
+        return payload
+    for source_dir in sorted(source_root.glob("*")):
+        if not source_dir.is_dir():
+            continue
+        evidence_manifest = read_json(source_dir / "evidence_manifest.json")
+        source_manifest = read_json(source_dir / "source_manifest.json")
+        if not evidence_manifest or not source_manifest:
+            continue
+        source_packet = build_source_hybrid_packet(
+            source_dir,
+            evidence_manifest=evidence_manifest,
+            source_manifest=source_manifest,
+        )
+        if not source_packet:
+            continue
+        payload["sources"].append(source_packet)
+    payload["sources"].sort(
+        key=lambda item: (
+            -int(item.get("highest_remaining_priority", 0)),
+            -int(item.get("remaining_candidate_count", 0)),
+            str(item.get("source_path", "")),
+            str(item.get("source_id", "")),
+        )
+    )
+    write_json(paths.hybrid_work_path(target), payload)
+    return payload
+
+
+def hybrid_enrichment_status(paths: WorkspacePaths, *, target: str = "staging") -> dict[str, Any]:
+    """Describe the current semantic-overlay coverage without blocking publication."""
+    hybrid_work = build_hybrid_work_queue(paths, target=target)
+    summary: dict[str, Any] = {
+        "target": target,
+        "capability_detected": False,
+        "workflow_auto_supported": True,
+        "hybrid_work_path": str(paths.hybrid_work_path(target).relative_to(paths.root)),
+        "capability_gap_reason": "",
+        **summarize_hybrid_work(hybrid_work),
+    }
+    if summary["mode"] in {"candidate-prepared", "partially-covered"}:
+        summary["capability_gap_reason"] = (
+            "Deterministic sync cannot complete hard-artifact multimodal enrichment by itself. "
+            "A capable host agent workflow must consume hybrid_work.json and write additive "
+            "semantic_overlay sidecars."
+        )
+    return summary
 
 
 def refresh_change_set_details(
@@ -3302,6 +4440,15 @@ def build_staging_artifacts(
         )
         if is_email_source and classification == "moved-or-renamed":
             reuse_previous_directory = False
+        previous_contract_complete = bool(
+            previous_source_dir is not None
+            and source_artifact_contract_complete(
+                previous_source_dir,
+                document_type=str(source_entry.get("document_type") or "unknown"),
+            )
+        )
+        if reuse_previous_directory and not previous_contract_complete:
+            reuse_previous_directory = False
 
         if reuse_previous_directory and previous_source_dir is not None:
             if is_email_source:
@@ -3346,6 +4493,14 @@ def build_staging_artifacts(
                 if previous_source_dir is not None:
                     previous_signature = semantic_evidence_signature(previous_source_dir)
                     current_signature = semantic_evidence_signature(source_dir)
+                    previous_base_signature = semantic_evidence_signature(
+                        previous_source_dir,
+                        include_artifacts=False,
+                    )
+                    current_base_signature = semantic_evidence_signature(
+                        source_dir,
+                        include_artifacts=False,
+                    )
                     if previous_signature is not None and previous_signature == current_signature:
                         preserve_semantic_outputs(previous_source_dir, source_dir)
                         _persist_source_artifacts(
@@ -3361,37 +4516,66 @@ def build_staging_artifacts(
                         if "binary_changed" in change_traits and "path_changed" in change_traits:
                             source_entry["change_reason"] = (
                                 "The email path and binary fingerprint changed, but the rebuilt "
-                                "email evidence stayed semantically stable, so prior semantic outputs "
-                                "were refreshed and reused."
+                                "email evidence stayed semantically stable, so prior "
+                                "semantic outputs were refreshed and reused."
                             )
                         elif "binary_changed" in change_traits:
                             source_entry["change_reason"] = (
-                                "The email fingerprint changed, but the rebuilt email evidence stayed "
-                                "semantically stable enough to reuse prior semantic outputs."
+                                "The email fingerprint changed, but the rebuilt "
+                                "email evidence stayed semantically stable enough "
+                                "to reuse prior semantic outputs."
                             )
                         elif "path_changed" in change_traits:
                             source_entry["change_reason"] = (
                                 "The email path changed and staged evidence was rebuilt, but the "
                                 "published semantic content stayed stable enough to reuse."
                             )
+                    elif (
+                        not previous_contract_complete
+                        and previous_base_signature is not None
+                        and previous_base_signature == current_base_signature
+                    ):
+                        preserve_semantic_outputs(previous_source_dir, source_dir)
+                        _persist_source_artifacts(
+                            source_dir,
+                            source_manifest=read_json(source_dir / "source_manifest.json"),
+                            evidence_manifest=read_json(source_dir / "evidence_manifest.json"),
+                        )
+                        source_entry["semantic_outputs_reused"] = True
+                        source_entry["semantic_signature_stable"] = True
+                        change_traits = append_unique_strings(
+                            [
+                                *change_traits,
+                                "semantic_outputs_reused",
+                                "artifact_contract_backfilled",
+                            ]
+                        )
+                        source_entry["change_reason"] = (
+                            "The source needed a Phase 3 artifact-contract backfill, "
+                            "but the rebuilt evidence stayed semantically stable "
+                            "enough to reuse prior semantic outputs."
+                        )
                     else:
                         change_traits = append_unique_strings(
                             [*change_traits, "extracted_content_changed"]
                         )
                         if "path_changed" in change_traits and "binary_changed" in change_traits:
                             source_entry["change_reason"] = (
-                                "The email path changed and the rebuilt email evidence also changed "
-                                "semantically, so semantic outputs must be refreshed to current truth."
+                                "The email path changed and the rebuilt email "
+                                "evidence also changed semantically, so semantic "
+                                "outputs must be refreshed to current truth."
                             )
                         elif "binary_changed" in change_traits:
                             source_entry["change_reason"] = (
-                                "The rebuilt email evidence changed semantically, so semantic outputs "
-                                "must be refreshed to current truth."
+                                "The rebuilt email evidence changed semantically, "
+                                "so semantic outputs must be refreshed to current "
+                                "truth."
                             )
                         elif "path_changed" in change_traits:
                             source_entry["change_reason"] = (
-                                "The email path changed and the rebuilt evidence could not be proven "
-                                "semantically stable, so semantic outputs must be refreshed."
+                                "The email path changed and the rebuilt evidence "
+                                "could not be proven semantically stable, so "
+                                "semantic outputs must be refreshed."
                             )
             else:
                 source_manifest, evidence_manifest = build_single_source_artifacts(
@@ -3408,6 +4592,14 @@ def build_staging_artifacts(
                 if previous_source_dir is not None:
                     previous_signature = semantic_evidence_signature(previous_source_dir)
                     current_signature = semantic_evidence_signature(source_dir)
+                    previous_base_signature = semantic_evidence_signature(
+                        previous_source_dir,
+                        include_artifacts=False,
+                    )
+                    current_base_signature = semantic_evidence_signature(
+                        source_dir,
+                        include_artifacts=False,
+                    )
                     if previous_signature is not None and previous_signature == current_signature:
                         preserve_semantic_outputs(previous_source_dir, source_dir)
                         source_entry["semantic_outputs_reused"] = True
@@ -3429,21 +4621,44 @@ def build_staging_artifacts(
                         elif "path_changed" in change_traits:
                             source_entry["change_reason"] = (
                                 "The source path changed and staged evidence was rebuilt, but the "
-                                "semantic content stayed stable enough to reuse prior semantic outputs."
+                                "semantic content stayed stable enough to reuse "
+                                "prior semantic outputs."
                             )
+                    elif (
+                        not previous_contract_complete
+                        and previous_base_signature is not None
+                        and previous_base_signature == current_base_signature
+                    ):
+                        preserve_semantic_outputs(previous_source_dir, source_dir)
+                        source_entry["semantic_outputs_reused"] = True
+                        source_entry["semantic_signature_stable"] = True
+                        change_traits = append_unique_strings(
+                            [
+                                *change_traits,
+                                "semantic_outputs_reused",
+                                "artifact_contract_backfilled",
+                            ]
+                        )
+                        source_entry["change_reason"] = (
+                            "The source needed a Phase 3 artifact-contract backfill, "
+                            "but the rebuilt evidence stayed semantically stable "
+                            "enough to reuse prior semantic outputs."
+                        )
                     else:
                         change_traits = append_unique_strings(
                             [*change_traits, "extracted_content_changed"]
                         )
                         if "path_changed" in change_traits and "binary_changed" in change_traits:
                             source_entry["change_reason"] = (
-                                "The source path changed and the rebuilt staged evidence also changed "
-                                "semantically, so semantic outputs must be refreshed to current truth."
+                                "The source path changed and the rebuilt staged "
+                                "evidence also changed semantically, so semantic "
+                                "outputs must be refreshed to current truth."
                             )
                         elif "binary_changed" in change_traits:
                             source_entry["change_reason"] = (
-                                "The rebuilt staged evidence changed semantically, so semantic outputs "
-                                "must be refreshed to current truth."
+                                "The rebuilt staged evidence changed semantically, "
+                                "so semantic outputs must be refreshed to current "
+                                "truth."
                             )
                         elif "path_changed" in change_traits:
                             source_entry["change_reason"] = (
@@ -3607,10 +4822,14 @@ def update_dependency_state(
                 "artifact_fingerprints": {
                     "source_manifest": artifact_signature(source_dir / "source_manifest.json"),
                     "evidence_manifest": artifact_signature(source_dir / "evidence_manifest.json"),
+                    "artifact_index": artifact_signature(source_dir / "artifact_index.json"),
                     "knowledge": artifact_signature(source_dir / "knowledge.json"),
                     "summary": artifact_signature(source_dir / "summary.md"),
                     "derived_affordances": artifact_signature(
                         source_dir / DEFAULT_AFFORDANCE_FILENAME
+                    ),
+                    "spreadsheet_workbook": artifact_signature(
+                        source_dir / "spreadsheet_workbook.json"
                     ),
                 },
                 "pending_reason": pending_lookup.get(source_id, {}).get("reason"),
@@ -3647,10 +4866,20 @@ def update_dependency_state(
                 "fingerprint": artifact_signature(target_root / "pending_work.json"),
                 "dependent_source_ids": [source["source_id"] for source in source_dependencies],
             },
+            "hybrid_work": {
+                "path": str(paths.hybrid_work_path(target).relative_to(paths.root)),
+                "fingerprint": artifact_signature(paths.hybrid_work_path(target)),
+                "dependent_source_ids": [source["source_id"] for source in source_dependencies],
+            },
             "retrieval_manifest": {
                 "path": str(paths.retrieval_manifest_path(target).relative_to(paths.root)),
                 "fingerprint": artifact_signature(paths.retrieval_manifest_path(target)),
                 "present": retrieval_manifest is not None,
+            },
+            "retrieval_artifact_records": {
+                "path": str(paths.retrieval_artifact_records_path(target).relative_to(paths.root)),
+                "fingerprint": artifact_signature(paths.retrieval_artifact_records_path(target)),
+                "present": paths.retrieval_artifact_records_path(target).exists(),
             },
             "trace_manifest": {
                 "path": str(paths.trace_manifest_path(target).relative_to(paths.root)),
@@ -3756,6 +4985,7 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
         target_root / "coverage_manifest.json",
         target_root / "graph_edges.json",
         target_root / "pending_work.json",
+        target_root / "hybrid_work.json",
         target_root / "publish_manifest.json",
     ]
     for path in required_root_files:
@@ -3770,6 +5000,17 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
         for source in catalog.get("sources", [])
         if isinstance(source, dict) and isinstance(source.get("source_id"), str)
     }
+    hybrid_work = read_json(paths.hybrid_work_path(target))
+    if hybrid_work:
+        blocking_errors.extend(
+            validate_hybrid_work(
+                hybrid_work,
+                target=target,
+                known_source_ids=catalog_source_ids,
+            )
+        )
+    else:
+        blocking_errors.append("Missing or invalid hybrid_work.json")
     pending_synthesis = False
 
     for source in catalog.get("sources", []):
@@ -3797,6 +5038,10 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
             source_manifest,
             title=knowledge.get("title") if isinstance(knowledge, dict) else None,
         )
+        evidence_manifest = sync_optional_sidecar_assets(
+            source_dir,
+            evidence_manifest=evidence_manifest,
+        )
         evidence_manifest = enrich_evidence_manifest_reference_fields(
             source_manifest,
             evidence_manifest,
@@ -3812,6 +5057,69 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
             if (source_dir / "summary.md").exists()
             else ""
         )
+        artifact_index_path_value = evidence_manifest.get("artifact_index_asset")
+        artifact_index_path = (
+            source_dir / artifact_index_path_value
+            if isinstance(artifact_index_path_value, str) and artifact_index_path_value
+            else source_dir / "artifact_index.json"
+        )
+        artifact_index = read_json(artifact_index_path)
+        artifact_ids = {
+            str(artifact["artifact_id"])
+            for artifact in artifact_index.get("artifacts", [])
+            if isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str)
+        }
+        if artifact_index:
+            source_errors.extend(validate_artifact_index(artifact_index, source_id=source_id))
+        else:
+            source_errors.append("Missing or invalid artifact_index.json")
+        unit_ids = {
+            str(unit["unit_id"])
+            for unit in evidence_manifest.get("units", [])
+            if isinstance(unit, dict) and isinstance(unit.get("unit_id"), str)
+        }
+        if str(source_manifest.get("document_type") or "") == "pdf":
+            pdf_document_asset = evidence_manifest.get("pdf_document_asset")
+            pdf_document_path = (
+                source_dir / pdf_document_asset
+                if isinstance(pdf_document_asset, str) and pdf_document_asset
+                else source_dir / "pdf_document.json"
+            )
+            pdf_document = read_json(pdf_document_path)
+            if pdf_document:
+                source_errors.extend(
+                    validate_pdf_document(
+                        pdf_document,
+                        source_id=source_id,
+                        unit_ids=unit_ids,
+                        artifact_ids=artifact_ids,
+                    )
+                )
+            else:
+                source_errors.append("Missing or invalid pdf_document.json")
+
+        semantic_overlay_assets = evidence_manifest.get("semantic_overlay_assets", [])
+        if semantic_overlay_assets is not None and not isinstance(semantic_overlay_assets, list):
+            source_errors.append("semantic_overlay_assets must be a list when present")
+        elif isinstance(semantic_overlay_assets, list):
+            for asset in semantic_overlay_assets:
+                if not isinstance(asset, str) or not asset:
+                    source_errors.append(
+                        "semantic_overlay_assets entries must be non-empty strings"
+                    )
+                    continue
+                overlay_payload = read_json(source_dir / asset)
+                if not overlay_payload:
+                    source_errors.append(f"Missing or invalid semantic overlay `{asset}`")
+                    continue
+                source_errors.extend(
+                    validate_semantic_overlay(
+                        overlay_payload,
+                        source_id=source_id,
+                        unit_ids=unit_ids,
+                        artifact_ids=artifact_ids,
+                    )
+                )
 
         if not knowledge:
             pending_synthesis = True
@@ -3834,15 +5142,15 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                 source_errors.append("knowledge.json contains placeholder content")
 
             citations = citations_from_knowledge(knowledge)
-            unit_ids = {
-                str(unit["unit_id"])
-                for unit in evidence_manifest.get("units", [])
-                if isinstance(unit, dict) and isinstance(unit.get("unit_id"), str)
-            }
             for citation in citations:
                 if citation.get("unit_id") not in unit_ids:
                     source_errors.append(
                         f"Unresolved citation unit_id `{citation.get('unit_id')}` in knowledge.json"
+                    )
+                artifact_id = citation.get("artifact_id")
+                if artifact_id is not None and artifact_id not in artifact_ids:
+                    source_errors.append(
+                        f"Unresolved citation artifact_id `{artifact_id}` in knowledge.json"
                     )
                 if not sanitize_text(citation.get("support")):
                     source_errors.append("Each citation must include a non-empty support field")
@@ -3870,6 +5178,21 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                         "related_sources contains unresolved citation_unit_ids: "
                         + ", ".join(missing_citations)
                     )
+                citation_artifact_ids = [
+                    artifact_id
+                    for artifact_id in related.get("citation_artifact_ids", [])
+                    if isinstance(artifact_id, str)
+                ]
+                missing_artifact_citations = [
+                    artifact_id
+                    for artifact_id in citation_artifact_ids
+                    if artifact_id not in artifact_ids
+                ]
+                if missing_artifact_citations:
+                    source_errors.append(
+                        "related_sources contains unresolved citation_artifact_ids: "
+                        + ", ".join(missing_artifact_citations)
+                    )
                 graph_edges.append(
                     {
                         "source_id": source_id,
@@ -3878,6 +5201,11 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                         "strength": related.get("strength"),
                         "status": related.get("status"),
                         "citation_unit_ids": citation_unit_ids,
+                        "source_unit_id": related.get("source_unit_id"),
+                        "related_unit_id": related.get("related_unit_id"),
+                        "source_artifact_id": related.get("source_artifact_id"),
+                        "related_artifact_id": related.get("related_artifact_id"),
+                        "citation_artifact_ids": citation_artifact_ids,
                     }
                 )
             for related in evidence_manifest.get("deterministic_linked_sources", []):
@@ -3904,6 +5232,21 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                         "deterministic_linked_sources contains unresolved citation_unit_ids: "
                         + ", ".join(missing_citations)
                     )
+                citation_artifact_ids = [
+                    artifact_id
+                    for artifact_id in related.get("citation_artifact_ids", [])
+                    if isinstance(artifact_id, str)
+                ]
+                missing_artifact_citations = [
+                    artifact_id
+                    for artifact_id in citation_artifact_ids
+                    if artifact_id not in artifact_ids
+                ]
+                if missing_artifact_citations:
+                    source_errors.append(
+                        "deterministic_linked_sources contains unresolved citation_artifact_ids: "
+                        + ", ".join(missing_artifact_citations)
+                    )
                 graph_edges.append(
                     {
                         "source_id": source_id,
@@ -3912,6 +5255,11 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                         "strength": related.get("strength"),
                         "status": related.get("status"),
                         "citation_unit_ids": citation_unit_ids,
+                        "source_unit_id": related.get("source_unit_id"),
+                        "related_unit_id": related.get("related_unit_id"),
+                        "source_artifact_id": related.get("source_artifact_id"),
+                        "related_artifact_id": related.get("related_artifact_id"),
+                        "citation_artifact_ids": citation_artifact_ids,
                     }
                 )
 
@@ -3945,6 +5293,29 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
         for render in renders:
             if not (source_dir / render).exists():
                 source_errors.append(f"Missing rendered asset `{render}`")
+        if not artifact_index_path.exists():
+            source_errors.append("Missing artifact_index.json")
+        for artifact in artifact_index.get("artifacts", []):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_path_value = artifact.get("artifact_path")
+            if isinstance(artifact_path_value, str) and artifact_path_value:
+                if not (source_dir / artifact_path_value).exists():
+                    source_errors.append(f"Missing artifact asset `{artifact_path_value}`")
+            for render_asset in artifact.get("render_assets", []):
+                if (
+                    isinstance(render_asset, str)
+                    and render_asset
+                    and not (source_dir / render_asset).exists()
+                ):
+                    source_errors.append(f"Missing artifact render asset `{render_asset}`")
+            for focus_asset in artifact.get("focus_render_assets", []):
+                if (
+                    isinstance(focus_asset, str)
+                    and focus_asset
+                    and not (source_dir / focus_asset).exists()
+                ):
+                    source_errors.append(f"Missing artifact focus render asset `{focus_asset}`")
 
         if source_manifest.get("document_type") in {"pdf", "pptx"}:
             for unit in units:
@@ -3981,6 +5352,49 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                 and not (source_dir / structure_asset).exists()
             ):
                 source_errors.append(f"Missing structure asset `{structure_asset}`")
+            for render_asset in unit.get("render_assets", []):
+                if (
+                    isinstance(render_asset, str)
+                    and render_asset
+                    and not (source_dir / render_asset).exists()
+                ):
+                    source_errors.append(f"Missing unit render asset `{render_asset}`")
+            render_page_span = unit.get("render_page_span")
+            if render_page_span is not None and not (
+                isinstance(render_page_span, dict)
+                and isinstance(render_page_span.get("start"), int)
+                and isinstance(render_page_span.get("end"), int)
+            ):
+                source_errors.append(f"{unit['unit_id']} has an invalid render_page_span")
+
+        document_type = source_manifest.get("document_type")
+        if document_type == "xlsx":
+            workbook_asset = evidence_manifest.get("spreadsheet_workbook_asset")
+            if not isinstance(workbook_asset, str) or not workbook_asset:
+                source_errors.append("xlsx evidence must include spreadsheet_workbook_asset")
+            elif not (source_dir / workbook_asset).exists():
+                source_errors.append(f"Missing spreadsheet workbook asset `{workbook_asset}`")
+            sheet_assets = evidence_manifest.get("spreadsheet_sheet_assets", [])
+            if not isinstance(sheet_assets, list) or not sheet_assets:
+                source_errors.append("xlsx evidence must include spreadsheet_sheet_assets")
+            else:
+                for asset in sheet_assets:
+                    if isinstance(asset, str) and asset and not (source_dir / asset).exists():
+                        source_errors.append(f"Missing spreadsheet sheet asset `{asset}`")
+        if document_type == "pdf":
+            pdf_document_asset = evidence_manifest.get("pdf_document_asset")
+            if not isinstance(pdf_document_asset, str) or not pdf_document_asset:
+                source_errors.append("pdf evidence must include pdf_document_asset")
+            elif not (source_dir / pdf_document_asset).exists():
+                source_errors.append(f"Missing pdf document asset `{pdf_document_asset}`")
+        if document_type in {"pdf", "pptx", "docx", "xlsx"}:
+            visual_assets = evidence_manifest.get("visual_layout_assets", [])
+            if not isinstance(visual_assets, list) or not visual_assets:
+                source_errors.append(f"{document_type} evidence must include visual_layout_assets")
+            else:
+                for asset in visual_assets:
+                    if isinstance(asset, str) and asset and not (source_dir / asset).exists():
+                        source_errors.append(f"Missing visual layout asset `{asset}`")
 
         failures = evidence_manifest.get("failures", [])
         if isinstance(failures, list) and failures:
@@ -4495,6 +5909,19 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 }
             )
 
+        hybrid_enrichment = hybrid_enrichment_status(paths, target="staging")
+        autonomous_steps.append(
+            {
+                "step": "hybrid-enrichment",
+                "status": (
+                    "completed"
+                    if hybrid_enrichment.get("mode") in {"not-needed", "covered"}
+                    else "degraded"
+                ),
+                "detail": hybrid_enrichment.get("detail"),
+            }
+        )
+
         if pending_sources and not autonomous:
             update_sync_state(
                 paths,
@@ -4516,7 +5943,10 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             )
             return {
                 "status": "pending-synthesis",
-                "detail": "Staged evidence is ready, but autonomous authoring is disabled for this run.",
+                "detail": (
+                    "Staged evidence is ready, but autonomous authoring is "
+                    "disabled for this run."
+                ),
                 "pending_sources": pending_sources,
                 "validation": None,
                 "published": False,
@@ -4524,6 +5954,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 "build_stats": build_stats,
                 "auto_repairs": auto_repairs,
                 "auto_authoring": auto_authoring,
+                "hybrid_enrichment": hybrid_enrichment,
                 "autonomous_steps": autonomous_steps,
                 "required_capabilities": ["autonomous-authoring"],
                 "interaction_ingest": {
@@ -4555,7 +5986,10 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             )
             return {
                 "status": "action-required",
-                "detail": "Autonomous authoring could not fully resolve the staged semantic outputs.",
+                "detail": (
+                    "Autonomous authoring could not fully resolve the staged "
+                    "semantic outputs."
+                ),
                 "pending_sources": pending_sources,
                 "validation": None,
                 "published": False,
@@ -4563,6 +5997,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 "build_stats": build_stats,
                 "auto_repairs": auto_repairs,
                 "auto_authoring": auto_authoring,
+                "hybrid_enrichment": hybrid_enrichment,
                 "autonomous_steps": autonomous_steps,
                 "required_capabilities": [],
                 "interaction_ingest": {
@@ -4617,8 +6052,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                     "step": "publish",
                     "status": "completed",
                     "detail": (
-                        "Published an immutable snapshot and activated "
-                        "`knowledge_base/current`."
+                        "Published an immutable snapshot and activated `knowledge_base/current`."
                     ),
                 }
             )
@@ -4668,6 +6102,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             "build_stats": build_stats,
             "auto_repairs": auto_repairs,
             "auto_authoring": auto_authoring,
+            "hybrid_enrichment": hybrid_enrichment,
             "autonomous_steps": autonomous_steps,
             "required_capabilities": [],
             "interaction_ingest": {

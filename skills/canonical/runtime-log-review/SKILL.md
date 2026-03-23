@@ -24,7 +24,9 @@ If the agent cannot inspect local runtime logs, stop and explain that log review
 2. Use the summary modes that best match the request:
    - recent activity
    - no-result retrieval sessions
+   - artifact-rich queries that still degraded or returned the wrong source family
    - degraded answer-first traces
+   - trace cases where artifact supports existed but the final answer still remained partially grounded or unresolved
    - repeated failure patterns
    - frequently consulted sources or units
    - candidate benchmark or operator-review cases

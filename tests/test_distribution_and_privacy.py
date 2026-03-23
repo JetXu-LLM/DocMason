@@ -77,8 +77,10 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                     archive.read("distribution-manifest.json").decode("utf-8")
                 )
             self.assertIn("README.md", names)
+            self.assertIn(".github/copilot-instructions.md", names)
             self.assertIn("distribution-manifest.json", names)
             self.assertIn("original_doc/.gitkeep", names)
+            self.assertNotIn(".github/workflows/release-distributions.yml", names)
             self.assertNotIn("tests/test_foundation_and_contracts.py", names)
             self.assertNotIn("sample_corpus/README.md", names)
             self.assertNotIn("skills/optional/public-sample-workspace/SKILL.md", names)
@@ -102,6 +104,8 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                 "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             )
             self.assertEqual(manifest["source_ref"], "refs/tags/test-build")
+            self.assertIn(".github/copilot-instructions.md", names)
+            self.assertNotIn(".github/workflows/release-distributions.yml", names)
             self.assertIn("original_doc/ico/about-the-ico.md", names)
             self.assertIn("original_doc/gcs/oasis-campaign-planning.md", names)
             self.assertIn(
@@ -217,6 +221,16 @@ class DistributionAndPrivacyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         ignored = {line.strip() for line in result.stdout.splitlines() if line.strip()}
         self.assertEqual(set(candidates), ignored)
+
+    def test_copilot_workspace_instructions_remain_tracked(self) -> None:
+        result = subprocess.run(
+            ["git", "check-ignore", ".github/copilot-instructions.md"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout or result.stderr)
 
 
 if __name__ == "__main__":
