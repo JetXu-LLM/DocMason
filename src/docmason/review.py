@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .conversation import semantic_log_context_from_record
+from .control_plane import load_shared_jobs_index, load_shared_job
 from .project import WorkspacePaths, read_json
 
 RECENT_LIMIT = 10
@@ -113,6 +114,14 @@ def _compact_conversation(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _projection_conversations(paths: WorkspacePaths) -> list[dict[str, Any]]:
+    return sorted(
+        _load_log_payloads(paths.conversation_projections_dir),
+        key=lambda payload: str(payload.get("updated_at") or ""),
+        reverse=True,
+    )
+
+
 def _load_conversations(paths: WorkspacePaths) -> dict[tuple[str, str], dict[str, Any]]:
     conversations: dict[tuple[str, str], dict[str, Any]] = {}
     for payload in _load_log_payloads(paths.conversations_dir):
@@ -137,6 +146,15 @@ def _load_conversations(paths: WorkspacePaths) -> dict[tuple[str, str], dict[str
                     "turn": turn,
                 }
     return conversations
+
+
+def _run_commit_payload(paths: WorkspacePaths, run_id: str | None) -> dict[str, Any]:
+    if not isinstance(run_id, str) or not run_id:
+        return {}
+    payload = read_json(paths.runs_dir / run_id / "commit.json")
+    if payload:
+        return payload
+    return read_json(paths.runs_dir / run_id / "state.json")
 
 
 def _question_is_mixed_language(text: str) -> bool:
@@ -313,6 +331,14 @@ def build_benchmark_candidates(
         conversation_record = None
         if isinstance(conversation_id, str) and isinstance(turn_id, str):
             conversation_record = conversation_lookup.get((conversation_id, turn_id))
+            if (
+                isinstance(conversation_record, dict)
+                and not isinstance(
+                    conversation_record["turn"].get("committed_run_id"),
+                    str,
+                )
+            ):
+                continue
         question = payload.get("query")
         if not isinstance(question, str) or not question:
             question = (
@@ -325,6 +351,11 @@ def build_benchmark_candidates(
         if not isinstance(question, str) or not question:
             continue
         group_key: tuple[str | None, str | None, str | None]
+        candidate_source = (
+            "committed-turn"
+            if isinstance(conversation_record, dict)
+            else "audit-leftover"
+        )
         if isinstance(conversation_id, str) and isinstance(turn_id, str):
             group_key = (conversation_id, turn_id, None)
         else:
@@ -359,6 +390,7 @@ def build_benchmark_candidates(
                 "inner_workflow_id": payload.get("inner_workflow_id"),
                 "requires_render_inspection": False,
                 "log_origin": _effective_log_origin(payload),
+                "candidate_source": candidate_source,
                 "support_basis": payload.get("support_basis"),
                 "question_context": _merged_semantic_context(
                     payload,
@@ -455,6 +487,7 @@ def build_benchmark_candidates(
             "log_origin": group["log_origin"],
             "reason": group["reason"],
             "support_basis": group.get("support_basis"),
+            "candidate_source": group.get("candidate_source"),
             **group["question_context"],
         }
         if isinstance(group.get("reference_resolution_summary"), str):
@@ -540,11 +573,8 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
         key=_recorded_at,
         reverse=True,
     )
-    conversations = sorted(
-        _load_log_payloads(paths.conversations_dir),
-        key=lambda payload: str(payload.get("updated_at") or ""),
-        reverse=True,
-    )
+    live_conversation_lookup = _load_conversations(paths)
+    conversations = _projection_conversations(paths)
     real_query_sessions = [
         payload for payload in query_sessions if payload.get("log_origin") != "evaluation-suite"
     ]
@@ -557,6 +587,47 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
     synthetic_retrieval_traces = [
         payload for payload in retrieval_traces if payload.get("log_origin") == "evaluation-suite"
     ]
+    orphaned_query_sessions = [
+        payload
+        for payload in real_query_sessions
+        if not (
+            isinstance(payload.get("conversation_id"), str)
+            and isinstance(payload.get("turn_id"), str)
+            and (payload["conversation_id"], payload["turn_id"]) in live_conversation_lookup
+        )
+    ]
+    orphaned_retrieval_traces = [
+        payload
+        for payload in real_retrieval_traces
+        if not (
+            isinstance(payload.get("conversation_id"), str)
+            and isinstance(payload.get("turn_id"), str)
+            and (payload["conversation_id"], payload["turn_id"]) in live_conversation_lookup
+        )
+    ]
+    committed_turns = sorted(
+        [
+            {
+                "conversation_id": payload["conversation_id"],
+                "turn_id": turn["turn_id"],
+                "run_id": turn.get("committed_run_id"),
+                "recorded_at": turn.get("completed_at") or turn.get("updated_at") or turn.get("opened_at"),
+                "status": turn.get("status"),
+                "answer_state": turn.get("answer_state"),
+                "support_basis": turn.get("support_basis"),
+                "question_domain": turn.get("question_domain"),
+                "version_context": turn.get("version_context"),
+            }
+            for payload in _load_log_payloads(paths.conversations_dir)
+            if isinstance(payload.get("conversation_id"), str)
+            for turn in (payload.get("turns", []) if isinstance(payload.get("turns", []), list) else [])
+            if isinstance(turn, dict)
+            and isinstance(turn.get("turn_id"), str)
+            and isinstance(turn.get("committed_run_id"), str)
+        ],
+        key=lambda item: str(item.get("recorded_at") or ""),
+        reverse=True,
+    )
 
     source_counter: Counter[str] = Counter()
     unit_counter: Counter[str] = Counter()
@@ -703,6 +774,72 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
                 for payload in synthetic_retrieval_traces[:RECENT_LIMIT]
             ],
         },
+        "control_plane": {
+            "active_jobs": [
+                {
+                    "job_id": manifest.get("job_id"),
+                    "job_key": manifest.get("job_key"),
+                    "job_family": manifest.get("job_family"),
+                    "status": manifest.get("status"),
+                    "requires_confirmation": manifest.get("requires_confirmation"),
+                    "confirmation_kind": manifest.get("confirmation_kind"),
+                }
+                for manifest in (
+                    load_shared_job(paths, job_id)
+                    for job_id in load_shared_jobs_index(paths).get("active_by_key", {}).values()
+                    if isinstance(job_id, str) and job_id
+                )
+                if manifest
+            ][:RECENT_LIMIT],
+            "active_waiting_jobs": [
+                {
+                    "job_id": manifest.get("job_id"),
+                    "job_key": manifest.get("job_key"),
+                    "job_family": manifest.get("job_family"),
+                    "status": manifest.get("status"),
+                    "attached_run_count": len(
+                        [
+                            run_id
+                            for run_id in manifest.get("attached_run_ids", [])
+                            if isinstance(run_id, str) and run_id
+                        ]
+                    ),
+                }
+                for manifest in (
+                    load_shared_job(paths, job_id)
+                    for job_id in load_shared_jobs_index(paths).get("active_by_key", {}).values()
+                    if isinstance(job_id, str) and job_id
+                )
+                if manifest and manifest.get("status") == "running"
+            ][:RECENT_LIMIT],
+            "active_awaiting_confirmation_jobs": [
+                {
+                    "job_id": manifest.get("job_id"),
+                    "job_key": manifest.get("job_key"),
+                    "job_family": manifest.get("job_family"),
+                    "status": manifest.get("status"),
+                    "confirmation_kind": manifest.get("confirmation_kind"),
+                    "confirmation_prompt": manifest.get("confirmation_prompt"),
+                }
+                for manifest in (
+                    load_shared_job(paths, job_id)
+                    for job_id in load_shared_jobs_index(paths).get("active_by_key", {}).values()
+                    if isinstance(job_id, str) and job_id
+                )
+                if manifest and manifest.get("status") == "awaiting-confirmation"
+            ][:RECENT_LIMIT],
+            "orphaned_query_sessions": [
+                _compact_query_session(payload) for payload in orphaned_query_sessions[:RECENT_LIMIT]
+            ],
+            "orphaned_retrieval_traces": [
+                _compact_trace_record(payload)
+                for payload in orphaned_retrieval_traces[:RECENT_LIMIT]
+            ],
+        },
+        "committed_turns": {
+            "total": len(committed_turns),
+            "recent": committed_turns[:RECENT_LIMIT],
+        },
         "conversations": {
             "total": len(conversations),
             "recent": [_compact_conversation(payload) for payload in conversations[:RECENT_LIMIT]],
@@ -753,11 +890,6 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
         turns = conversation.get("turns", [])
         if not isinstance(turns, list):
             continue
-        corpus_signature = (
-            conversation.get("workspace_snapshot", {}).get("corpus_signature")
-            if isinstance(conversation.get("workspace_snapshot"), dict)
-            else None
-        )
         for turn in turns:
             if not isinstance(turn, dict):
                 continue
@@ -768,10 +900,25 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
                 continue
             if not isinstance(answer_file_path, str) or not answer_file_path:
                 continue
-            if turn.get("status") not in {"answered", "completed"} and not turn.get(
-                "response_excerpt"
-            ):
+            committed_run_id = turn.get("committed_run_id")
+            if not isinstance(committed_run_id, str) or not committed_run_id:
                 continue
+            run_commit = _run_commit_payload(paths, committed_run_id)
+            run_commit_version_context = run_commit.get("version_context")
+            turn_version_context = turn.get("version_context")
+            version_context = (
+                dict(run_commit_version_context)
+                if isinstance(run_commit_version_context, dict)
+                else (
+                    dict(turn_version_context)
+                    if isinstance(turn_version_context, dict)
+                    else {}
+                )
+            )
+            corpus_signature = (
+                version_context.get("published_source_signature")
+                or version_context.get("corpus_signature")
+            )
             session_ids = [
                 value for value in turn.get("session_ids", []) if isinstance(value, str) and value
             ]
@@ -811,7 +958,7 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
                 {
                     "conversation_id": conversation_id,
                     "turn_id": turn_id,
-                    "run_id": turn.get("committed_run_id") or turn.get("active_run_id"),
+                    "run_id": committed_run_id,
                     "question_text": question_text,
                     "question_class": turn.get("question_class"),
                     "question_domain": turn.get("question_domain"),
@@ -836,6 +983,8 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
                     or turn.get("updated_at")
                     or turn.get("opened_at"),
                     "corpus_signature": corpus_signature,
+                    "published_snapshot_id": version_context.get("published_snapshot_id"),
+                    "version_context": version_context,
                 }
             )
     records.sort(key=lambda item: str(item.get("recorded_at") or ""), reverse=True)

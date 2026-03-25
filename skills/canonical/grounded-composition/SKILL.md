@@ -43,10 +43,12 @@ If the environment cannot inspect the required evidence, stop and explain the bl
      - `spreadsheet_sheet/*.json`
      - `pdf_document.json`
      - `semantic_overlay/*.json` when present
-   - if the composition task still depends on unresolved hard-artifact semantics, prefer a narrowed source-scoped hybrid refresh before source fallback
+   - if the composition task still depends on unresolved hard-artifact semantics, the canonical path must enter governed Lane C before any source fallback
+     - use `recommended_hybrid_targets` as the only legal narrowing entrypoint
      - write the current-turn `hybrid_refresh_work.json`
-     - complete the selected source's current hybrid candidates
-     - rerun retrieve and trace before drafting the final synthesis
+     - reuse a matching shared Lane C result when the turn is a waiter
+     - complete the selected source's current hybrid candidates, then rerun retrieve and trace before drafting the final synthesis
+     - if Lane C settles `blocked`, stop with `abstained + governed-boundary` instead of improvising around the gap
    - inspect direct source files or rerender only when the published-artifact plan says the knowledge base is insufficient for style, visual structure, or low-level detail
    - bring in external verification or stable model knowledge only when the composition task genuinely needs it, and keep the support basis explicit
 3. Start complex work with a visible method or plan summary before diving into the deeper evidence loop.

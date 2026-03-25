@@ -53,9 +53,11 @@ def version_context(paths: WorkspacePaths) -> dict[str, Any]:
     from .conversation import current_corpus_signature, utc_now
 
     publish_manifest = read_json(paths.current_publish_manifest_path)
+    corpus_signature = current_corpus_signature(paths)
     return {
         "captured_at": utc_now(),
-        "corpus_signature": current_corpus_signature(paths),
+        "corpus_signature": corpus_signature,
+        "published_source_signature": corpus_signature,
         "published_at": publish_manifest.get("published_at"),
         "published_snapshot_id": publish_manifest.get("snapshot_id"),
         "answer_workflow_version": RUN_WORKFLOW_VERSION,
@@ -92,6 +94,119 @@ def record_run_event(
     return event
 
 
+def record_run_event_if_present(
+    paths: WorkspacePaths,
+    *,
+    run_id: str | None,
+    stage: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Append a run-journal event when the run still exists."""
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    if not load_run_state(paths, run_id):
+        return None
+    return record_run_event(
+        paths,
+        run_id=run_id,
+        stage=stage,
+        event_type=event_type,
+        payload=payload,
+    )
+
+
+def record_run_event_for_runs(
+    paths: WorkspacePaths,
+    *,
+    run_ids: list[str] | None,
+    stage: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Append the same event to each existing run in one run-id list."""
+    if not isinstance(run_ids, list):
+        return
+    for run_id in run_ids:
+        record_run_event_if_present(
+            paths,
+            run_id=run_id if isinstance(run_id, str) else None,
+            stage=stage,
+            event_type=event_type,
+            payload=payload,
+        )
+
+
+def update_run_state(paths: WorkspacePaths, *, run_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """Merge updates into one run state."""
+    state = load_run_state(paths, run_id)
+    if not state:
+        raise FileNotFoundError(run_state_path(paths, run_id))
+    state.update(updates)
+    write_json(run_state_path(paths, run_id), state)
+    return state
+
+
+def attach_shared_job_to_run(
+    paths: WorkspacePaths,
+    *,
+    run_id: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Attach one shared job to a run's tracked dependencies."""
+    state = load_run_state(paths, run_id)
+    if not state:
+        raise FileNotFoundError(run_state_path(paths, run_id))
+    attached = state.get("attached_shared_job_ids", [])
+    if not isinstance(attached, list):
+        attached = []
+    added = False
+    if job_id not in attached:
+        attached.append(job_id)
+        added = True
+    state["attached_shared_job_ids"] = attached
+    write_json(run_state_path(paths, run_id), state)
+    if added:
+        record_run_event(
+            paths,
+            run_id=run_id,
+            stage="control-plane",
+            event_type="shared-job-attached",
+            payload={"job_id": job_id},
+        )
+    return state
+
+
+def refresh_turn_run_version_truth(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    run_id: str | None,
+) -> dict[str, Any]:
+    """Refresh the active run and turn version truth from current published state."""
+    from .conversation import update_conversation_turn
+    from .control_plane import workspace_state_ref
+
+    refreshed_context = version_context(paths)
+    if isinstance(run_id, str) and run_id and load_run_state(paths, run_id):
+        update_run_state(
+            paths,
+            run_id=run_id,
+            updates={
+                "version_context": refreshed_context,
+                "workspace_state_ref": workspace_state_ref(paths),
+            },
+        )
+    update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates={"version_context": refreshed_context},
+    )
+    return refreshed_context
+
+
 def ensure_run_for_turn(
     paths: WorkspacePaths,
     *,
@@ -102,6 +217,7 @@ def ensure_run_for_turn(
 ) -> dict[str, Any]:
     """Create or reuse the governed run for one canonical turn."""
     from .conversation import load_turn_record, update_conversation_turn, utc_now
+    from .control_plane import workspace_state_ref
 
     turn: dict[str, Any] = {}
     try:
@@ -127,6 +243,11 @@ def ensure_run_for_turn(
         "event_count": 0,
         "capability_profile": capability_profile(paths),
         "version_context": version_context(paths),
+        "workspace_state_ref": workspace_state_ref(paths),
+        "attached_shared_job_ids": [],
+        "admissibility_gate_result": None,
+        "published_snapshot_id_used": None,
+        "published_source_signature_used": None,
     }
     run_dir(paths, run_id).mkdir(parents=True, exist_ok=True)
     write_json(run_state_path(paths, run_id), payload)
@@ -170,6 +291,7 @@ def commit_run(
     support_manifest_path: str | None,
     answer_file_path: str | None,
     response_excerpt: str | None,
+    admissibility_gate_result: dict[str, Any] | None = None,
     turn_updates: dict[str, Any],
 ) -> dict[str, Any]:
     """Commit one governed turn outcome through the shared commit barrier."""
@@ -190,7 +312,9 @@ def commit_run(
             f"Turn `{turn_id}` is already committed by run `{committed_run_id}`."
         )
 
-    effective_version_context = turn.get("version_context")
+    effective_version_context = run_payload.get("version_context")
+    if not isinstance(effective_version_context, dict):
+        effective_version_context = turn.get("version_context")
     if not isinstance(effective_version_context, dict):
         effective_version_context = version_context(paths)
     validate_commit_contract(
@@ -226,6 +350,7 @@ def commit_run(
         "answer_file_path": effective_answer_file,
         "response_excerpt": derived_excerpt,
         "version_context": effective_version_context,
+        "admissibility_gate_result": admissibility_gate_result,
     }
     write_json(run_commit_path(paths, run_id), commit_payload)
     run_payload.update(
@@ -235,6 +360,12 @@ def commit_run(
             "last_stage": "commit",
             "last_event_type": "turn-committed",
             "version_context": effective_version_context,
+            "admissibility_gate_result": admissibility_gate_result,
+            "published_snapshot_id_used": effective_version_context.get("published_snapshot_id"),
+            "published_source_signature_used": (
+                effective_version_context.get("published_source_signature")
+                or effective_version_context.get("corpus_signature")
+            ),
         }
     )
     write_json(run_state_path(paths, run_id), run_payload)
@@ -260,7 +391,7 @@ def commit_run(
             **turn_updates,
             "active_run_id": run_id,
             "committed_run_id": run_id,
-            "turn_state": "committed",
+            "turn_state": turn_updates.get("turn_state", "committed"),
             "version_context": effective_version_context,
             "capability_profile": run_payload.get("capability_profile"),
             "answer_file_path": effective_answer_file,

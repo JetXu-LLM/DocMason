@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON output.",
     )
+    sync_kb_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Approve a confirmation-required sync and continue.",
+    )
 
     retrieve_parser = subparsers.add_parser(
         "retrieve",
@@ -192,7 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "status":
         return emit_report(status_workspace(), as_json=args.json)
     if args.command == "sync":
-        return emit_report(sync_workspace(), as_json=args.json)
+        return emit_report(sync_workspace(assume_yes=args.yes), as_json=args.json)
     if args.command == "retrieve":
         return emit_report(
             retrieve_knowledge(

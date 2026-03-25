@@ -10,8 +10,19 @@ SUPPORT_BASIS_VALUES = (
     "external-source-verified",
     "model-knowledge",
     "mixed",
+    "governed-boundary",
 )
-TURN_STATES = frozenset({"opened", "prepared", "reconciled", "committed", "completed"})
+TURN_STATES = frozenset(
+    {
+        "opened",
+        "prepared",
+        "reconciled",
+        "waiting-shared-job",
+        "awaiting-confirmation",
+        "committed",
+        "completed",
+    }
+)
 MEMORY_KIND_VALUES = frozenset(
     {
         "working-note",

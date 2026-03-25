@@ -9,6 +9,7 @@ import shutil
 import site
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,9 +21,26 @@ from .interaction import (
     maybe_reconcile_active_thread,
     refresh_generated_connector_manifests,
 )
+from .control_plane import (
+    approve_shared_job,
+    block_shared_job,
+    classify_sync_materiality,
+    complete_shared_job,
+    ensure_shared_job,
+    load_shared_job,
+    load_shared_jobs_index,
+    pending_interaction_signature,
+    required_prepare_capabilities,
+    shared_job_control_plane_payload,
+    shared_job_is_settled,
+    strong_source_fingerprint_signature,
+    sync_input_signature,
+    workspace_state_snapshot,
+)
 from .knowledge import (
     office_renderer_snapshot,
     pdf_renderer_snapshot,
+    preview_source_changes,
     validate_workspace,
 )
 from .knowledge import (
@@ -51,6 +69,7 @@ from .project import (
 )
 from .retrieval import retrieve_corpus, trace_answer_file, trace_session, trace_source
 from .review import refresh_log_review_summary
+from .run_control import record_run_event_for_runs
 from .workflows import (
     WorkflowMetadata,
     WorkflowMetadataError,
@@ -106,6 +125,11 @@ def summarize_command_failure(command: Sequence[str], execution: CommandExecutio
     """Render a compact failure summary for subprocess-driven steps."""
     details = execution.stderr or execution.stdout or "no output"
     return f"{' '.join(command)} failed with exit code {execution.exit_code}: {details}"
+
+
+def _unique_command_owner(job_family: str) -> dict[str, str]:
+    """Return a unique control-plane owner identity for one command invocation."""
+    return {"kind": "command", "id": f"{job_family}-command:{uuid.uuid4()}"}
 
 
 def python_supported() -> bool:
@@ -521,9 +545,17 @@ def workspace_stage(
     kb = knowledge_base_snapshot(paths)
     adapters = adapter_snapshot(paths)
     interaction = interaction_ingest_snapshot(paths)
+    control_plane = workspace_state_snapshot(paths)
     claude = adapters["claude"]
+    active_confirmation_jobs = [
+        job
+        for job in control_plane.get("active_answer_critical_jobs", [])
+        if isinstance(job, dict) and job.get("status") == "awaiting-confirmation"
+    ]
 
-    if kb["stale"]:
+    if active_confirmation_jobs:
+        stage = "control-plane-pending-confirmation"
+    elif kb["stale"]:
         stage = "knowledge-base-stale"
     elif kb["staging_present"] and kb["validation_status"] in {
         "blocking-errors",
@@ -542,6 +574,12 @@ def workspace_stage(
     pending_actions: list[str] = []
     if not environment["ready"]:
         pending_actions.append("prepare")
+    if active_confirmation_jobs:
+        primary_job = active_confirmation_jobs[0]
+        if primary_job.get("job_family") == "prepare":
+            pending_actions.append("prepare --yes")
+        elif primary_job.get("job_family") == "sync":
+            pending_actions.append("sync --yes")
     if source_total > 0 and (not kb["present"] or kb["stale"] or stage == "knowledge-base-invalid"):
         pending_actions.append("sync")
     if kb["staging_present"] and kb["validation_status"] in {"blocking-errors", "warnings"}:
@@ -561,6 +599,7 @@ def workspace_stage(
         },
         "knowledge_base": kb,
         "interaction_ingest": interaction,
+        "control_plane": control_plane,
         "adapters": adapters,
         "pending_actions": deduplicate(pending_actions),
     }
@@ -575,6 +614,8 @@ def prepare_workspace(
     editable_install_probe: EditableInstallProbe = inspect_editable_install,
     prompt: Callable[[str], str] = input,
     interactive: bool | None = None,
+    owner: dict[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> CommandReport:
     """Bootstrap repo-local state and install DocMason into the workspace environment."""
     workspace = paths or locate_workspace()
@@ -647,6 +688,7 @@ def prepare_workspace(
     bootstrap_python = str(Path(sys.executable).resolve())
     package_manager = "pip"
     status = READY
+    effective_owner = owner or _unique_command_owner("prepare")
     uv_binary = find_uv_binary()
     should_attempt_uv_install = False
     uv_install_command, uv_install_display = preferred_uv_install_command(bootstrap_python)
@@ -962,7 +1004,108 @@ def prepare_workspace(
             "Refreshed repo-local skill shims under .agents/skills and .claude/skills."
         )
 
+    prepare_shared_job: dict[str, Any] = {}
     office_snapshot = office_renderer_snapshot(workspace)
+    prepare_requirements = required_prepare_capabilities(
+        workspace,
+        editable_install=editable_install,
+        editable_detail=editable_detail,
+        office_snapshot=office_snapshot,
+    )
+    if prepare_requirements["high_intrusion_required"]:
+        prepare_job_info = ensure_shared_job(
+            workspace,
+            job_key=(
+                "prepare:"
+                f"{workspace.root}:"
+                f"{prepare_requirements['intrusion_class']}:"
+                f"{prepare_requirements['required_capability_signature']}"
+            ),
+            job_family="prepare",
+            criticality="answer-critical",
+            scope={
+                "workspace_root": str(workspace.root),
+                "intrusion_class": prepare_requirements["intrusion_class"],
+                "required_capabilities": prepare_requirements["required_capabilities"],
+            },
+            input_signature=prepare_requirements["required_capability_signature"],
+            owner=effective_owner,
+            run_id=run_id,
+            requires_confirmation=not assume_yes,
+            confirmation_kind="high-intrusion-prepare",
+            confirmation_prompt="当前问题需要补齐本地依赖才能继续，是否现在开始准备环境？",
+            confirmation_reason="; ".join(prepare_requirements["reasons"]),
+        )
+        prepare_shared_job = prepare_job_info["manifest"]
+        caller_role = str(prepare_job_info.get("caller_role") or "owner")
+        if prepare_shared_job.get("status") == "awaiting-confirmation" and not assume_yes:
+            payload = {
+                "status": ACTION_REQUIRED,
+                "prepare_status": "awaiting-confirmation",
+                "actions_performed": actions_performed,
+                "actions_skipped": actions_skipped,
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
+                "environment": {
+                    "python_executable": bootstrap_python,
+                    "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+                    "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
+                    "package_manager": package_manager,
+                },
+                "control_plane": shared_job_control_plane_payload(
+                    prepare_shared_job,
+                    next_command="docmason prepare --yes",
+                ),
+                "next_steps": ["Run `docmason prepare --yes` to approve and continue."],
+            }
+            lines = [
+                f"Prepare status: {ACTION_REQUIRED}",
+                str(
+                    prepare_shared_job.get("confirmation_prompt")
+                    or prepare_shared_job.get("confirmation_reason")
+                ),
+                "Next step: run `docmason prepare --yes` to approve and continue.",
+            ]
+            return make_report(ACTION_REQUIRED, payload, lines)
+        if prepare_shared_job.get("status") == "awaiting-confirmation" and assume_yes:
+            prepare_shared_job = approve_shared_job(
+                workspace,
+                str(prepare_shared_job["job_id"]),
+                owner=effective_owner,
+                run_id=run_id,
+            )
+            record_run_event_for_runs(
+                workspace,
+                run_ids=prepare_shared_job.get("attached_run_ids"),
+                stage="control-plane",
+                event_type="shared-job-approved",
+                payload={"job_id": prepare_shared_job.get("job_id")},
+            )
+        elif caller_role == "waiter" and prepare_shared_job.get("status") == "running":
+            payload = {
+                "status": DEGRADED,
+                "prepare_status": "waiting-shared-job",
+                "actions_performed": actions_performed,
+                "actions_skipped": actions_skipped,
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
+                "environment": {
+                    "python_executable": bootstrap_python,
+                    "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+                    "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
+                    "package_manager": package_manager,
+                },
+                "control_plane": shared_job_control_plane_payload(
+                    prepare_shared_job,
+                    state="waiting-shared-job",
+                ),
+                "next_steps": [
+                    "Wait for the active shared prepare job to settle, then retry if needed."
+                ],
+            }
+            lines = [
+                f"Prepare status: {DEGRADED}",
+                "A matching shared prepare job is already running.",
+            ]
+            return make_report(DEGRADED, payload, lines)
     if office_snapshot["required"] and not office_snapshot["ready"] and assume_yes:
         brew_plan = homebrew_auto_install_plan(command_runner=command_runner, cwd=workspace.root)
         if find_brew_binary() is None and brew_plan["feasible"]:
@@ -1022,12 +1165,41 @@ def prepare_workspace(
     )
     refresh_generated_connector_manifests(workspace)
     actions_performed.append("Recorded bootstrap state in runtime/bootstrap_state.json.")
+    if prepare_shared_job:
+        if office_snapshot["required"] and not office_snapshot["ready"]:
+            prepare_shared_job = block_shared_job(
+                workspace,
+                str(prepare_shared_job["job_id"]),
+                result={"detail": office_snapshot["detail"]},
+            )
+        else:
+            prepare_shared_job = complete_shared_job(
+                workspace,
+                str(prepare_shared_job["job_id"]),
+                result={"status": status, "detail": "Prepare completed."},
+            )
+        record_run_event_for_runs(
+            workspace,
+            run_ids=prepare_shared_job.get("attached_run_ids"),
+            stage="control-plane",
+            event_type="shared-job-settled",
+            payload={
+                "job_id": prepare_shared_job.get("job_id"),
+                "status": prepare_shared_job.get("status"),
+            },
+        )
 
     payload = {
         "status": status,
+        "prepare_status": status,
         "actions_performed": actions_performed,
         "actions_skipped": actions_skipped,
         "manual_recovery_doc": manual_workspace_recovery_doc(),
+        "control_plane": (
+            shared_job_control_plane_payload(prepare_shared_job)
+            if prepare_shared_job
+            else {}
+        ),
         "environment": {
             "python_executable": bootstrap_python,
             "python_version": ".".join(str(part) for part in sys.version_info[:3]),
@@ -1362,6 +1534,35 @@ def doctor_workspace(
             "Interaction-ingest runtime state is available and does not currently require sync.",
         )
 
+    control_plane = workspace_state_snapshot(workspace)
+    pending_confirmations = [
+        job
+        for job in control_plane.get("active_answer_critical_jobs", [])
+        if isinstance(job, dict) and job.get("status") == "awaiting-confirmation"
+    ]
+    if pending_confirmations:
+        primary_job = pending_confirmations[0]
+        next_step = (
+            "Run `docmason prepare --yes` to approve and continue."
+            if primary_job.get("job_family") == "prepare"
+            else "Run `docmason sync --yes` to approve and continue."
+        )
+        add_check(
+            "control-plane",
+            ACTION_REQUIRED,
+            (
+                "A confirmation-required shared control-plane job is blocking safe continuation: "
+                f"{primary_job.get('job_family')}."
+            ),
+            next_step,
+        )
+    else:
+        add_check(
+            "control-plane",
+            READY,
+            "No confirmation-required shared control-plane job is currently blocking the workspace.",
+        )
+
     overall = READY
     if any(check["status"] == ACTION_REQUIRED for check in checks):
         overall = ACTION_REQUIRED
@@ -1459,6 +1660,13 @@ def status_workspace(
                 else ""
             )
         ),
+        (
+            "Control plane: "
+            + str(
+                len(payload.get("control_plane", {}).get("active_answer_critical_jobs", []))
+            )
+            + " active answer-critical job(s)"
+        ),
     ]
     if pending_actions:
         lines.append(f"Pending actions: {', '.join(pending_actions)}")
@@ -1471,35 +1679,230 @@ def sync_workspace(
     paths: WorkspacePaths | None = None,
     *,
     autonomous: bool = True,
+    assume_yes: bool = False,
+    owner: dict[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> CommandReport:
     """Stage, validate, and publish the Phase 4 knowledge base."""
     workspace = paths or locate_workspace()
     maybe_reconcile_active_thread(workspace)
+    effective_owner = owner or _unique_command_owner("sync")
+    if autonomous:
+        sync_readiness = cached_bootstrap_readiness(workspace, require_sync_capability=True)
+        if not sync_readiness["ready"]:
+            reason = str(sync_readiness.get("reason") or "")
+            readiness_next_steps: list[str] = []
+            required_capabilities: list[str] = []
+            if reason == "office-renderer-required":
+                readiness_next_steps.append(office_renderer_next_step())
+                required_capabilities.append("office-rendering")
+            elif reason == "pdf-renderer-required":
+                readiness_next_steps.append(pdf_renderer_next_step())
+                required_capabilities.append("pdf-rendering")
+            else:
+                readiness_next_steps.append("Run `docmason prepare` before retrying `docmason sync`.")
+            detail = str(sync_readiness.get("detail") or "The workspace is not ready for sync.")
+            payload = {
+                "status": ACTION_REQUIRED,
+                "sync_status": ACTION_REQUIRED,
+                "detail": detail,
+                "control_plane": {},
+                "change_set": {},
+                "pending_sources": [],
+                "validation": None,
+                "published": False,
+                "interaction_ingest": interaction_ingest_snapshot(workspace),
+                "rebuilt": False,
+                "build_stats": {},
+                "auto_repairs": {"repair_count": 0},
+                "auto_authoring": {"attempted": 0, "authored": [], "authored_count": 0},
+                "hybrid_enrichment": {},
+                "autonomous_steps": [],
+                "required_capabilities": required_capabilities,
+                "pending_work_path": None,
+                "next_workflows": [],
+                "next_steps": readiness_next_steps,
+            }
+            lines = [
+                f"Sync status: {ACTION_REQUIRED}",
+                detail,
+            ]
+            return make_report(ACTION_REQUIRED, payload, lines)
+        _index_payload, active_sources, _ambiguous_match, preview_change_set = preview_source_changes(
+            workspace
+        )
+        interaction_signature = pending_interaction_signature(workspace)
+        kb_snapshot = knowledge_base_snapshot(workspace)
+        sync_signature = sync_input_signature(
+            active_sources=active_sources,
+            change_set=preview_change_set,
+            pending_interaction_signature_value=interaction_signature,
+        )
+        materiality = classify_sync_materiality(
+            change_set=preview_change_set,
+            active_source_count=len(active_sources),
+            published_present=bool(kb_snapshot.get("present")),
+        )
+        job_info = ensure_shared_job(
+            workspace,
+            job_key=f"sync:{sync_signature}",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "strong_source_fingerprint_signature": strong_source_fingerprint_signature(
+                    active_sources
+                ),
+                "materiality": materiality["materiality"],
+            },
+            input_signature=sync_signature,
+            owner=effective_owner,
+            run_id=run_id,
+            requires_confirmation=materiality["materiality"] == "material" and not assume_yes,
+            confirmation_kind="material-sync"
+            if materiality["materiality"] == "material"
+            else None,
+            confirmation_prompt=(
+                "检测到大量未构建变更，建议先构建知识库后再继续当前问题，是否现在开始？"
+                if materiality["materiality"] == "material"
+                else None
+            ),
+            confirmation_reason=(
+                "; ".join(materiality["materiality_reasons"])
+                if materiality["materiality_reasons"]
+                else None
+            ),
+        )
+        shared_job = job_info["manifest"]
+        caller_role = str(job_info.get("caller_role") or "owner")
+        if shared_job.get("status") == "awaiting-confirmation" and not assume_yes:
+            detail = str(shared_job.get("confirmation_reason") or "Sync approval is required.")
+            prompt = str(shared_job.get("confirmation_prompt") or detail)
+            payload = {
+                "status": ACTION_REQUIRED,
+                "sync_status": "awaiting-confirmation",
+                "detail": detail,
+                "control_plane": shared_job_control_plane_payload(
+                    shared_job,
+                    next_command="docmason sync --yes",
+                ),
+                "change_set": preview_change_set,
+                "pending_sources": [],
+                "validation": None,
+                "published": False,
+                "interaction_ingest": interaction_ingest_snapshot(workspace),
+                "rebuilt": False,
+                "build_stats": {},
+                "auto_repairs": {"repair_count": 0},
+                "auto_authoring": {"attempted": 0, "authored": [], "authored_count": 0},
+                "hybrid_enrichment": {},
+                "autonomous_steps": [],
+                "required_capabilities": [],
+                "pending_work_path": None,
+                "next_workflows": [],
+                "next_steps": ["Run `docmason sync --yes` to approve and continue."],
+            }
+            lines = [
+                f"Sync status: {ACTION_REQUIRED}",
+                prompt,
+                "Next step: run `docmason sync --yes` to approve and continue.",
+            ]
+            return make_report(ACTION_REQUIRED, payload, lines)
+        if shared_job.get("status") == "awaiting-confirmation" and assume_yes:
+            shared_job = approve_shared_job(
+                workspace,
+                str(shared_job["job_id"]),
+                owner=effective_owner,
+                run_id=run_id,
+            )
+            record_run_event_for_runs(
+                workspace,
+                run_ids=shared_job.get("attached_run_ids"),
+                stage="control-plane",
+                event_type="shared-job-approved",
+                payload={"job_id": shared_job.get("job_id")},
+            )
+        elif caller_role == "waiter" and shared_job.get("status") == "running":
+            detail = "A matching shared sync job is already running."
+            payload = {
+                "status": DEGRADED,
+                "sync_status": "waiting-shared-job",
+                "detail": detail,
+                "control_plane": shared_job_control_plane_payload(
+                    shared_job,
+                    state="waiting-shared-job",
+                ),
+                "change_set": preview_change_set,
+                "pending_sources": [],
+                "validation": None,
+                "published": False,
+                "interaction_ingest": interaction_ingest_snapshot(workspace),
+                "rebuilt": False,
+                "build_stats": {},
+                "auto_repairs": {"repair_count": 0},
+                "auto_authoring": {"attempted": 0, "authored": [], "authored_count": 0},
+                "hybrid_enrichment": {},
+                "autonomous_steps": [],
+                "required_capabilities": [],
+                "pending_work_path": None,
+                "next_workflows": [],
+                "next_steps": ["Wait for the active shared sync job to settle, then retry if needed."],
+            }
+            lines = [
+                f"Sync status: {DEGRADED}",
+                detail,
+            ]
+            return make_report(DEGRADED, payload, lines)
+    else:
+        shared_job = {}
     result = run_phase4_sync(workspace, autonomous=autonomous)
+    if autonomous and shared_job:
+        if result["status"] in {"valid", "warnings"} and bool(result.get("published")):
+            shared_job = complete_shared_job(workspace, str(shared_job["job_id"]), result=result)
+        elif result["status"] in {"action-required", "blocking-errors"}:
+            shared_job = block_shared_job(
+                workspace,
+                str(shared_job["job_id"]),
+                result={"detail": result.get("detail"), "status": result.get("status")},
+            )
+        if shared_job_is_settled(shared_job):
+            record_run_event_for_runs(
+                workspace,
+                run_ids=shared_job.get("attached_run_ids"),
+                stage="control-plane",
+                event_type="shared-job-settled",
+                payload={
+                    "job_id": shared_job.get("job_id"),
+                    "status": shared_job.get("status"),
+                },
+            )
     status = validation_command_status(result["status"])
     next_workflows: list[str] = []
-    next_steps: list[str] = []
+    follow_up_steps: list[str] = []
     pending_work_path = None
     if result["status"] == "pending-synthesis":
         pending_work_path = "knowledge_base/staging/pending_work.json"
         next_workflows = ["knowledge-construction", "knowledge-base-sync"]
-        next_steps.append(
+        follow_up_steps.append(
             "Complete staged authoring from "
             "`knowledge_base/staging/pending_work.json`, then rerun "
             "`docmason sync` or `docmason workflow knowledge-base-sync`."
         )
     elif result["status"] == "blocking-errors":
         next_workflows = ["validation-repair", "knowledge-base-sync"]
-        next_steps.append(
+        follow_up_steps.append(
             "Repair staged validation blockers, then rerun `docmason sync` "
             "or `docmason workflow knowledge-base-sync`."
         )
     elif result["status"] == "action-required":
-        next_steps.append(result["detail"])
+        follow_up_steps.append(str(result["detail"]))
     payload = {
         "status": status,
         "sync_status": result["status"],
         "detail": result["detail"],
+        "control_plane": (
+            shared_job_control_plane_payload(shared_job) if autonomous and shared_job else {}
+        ),
         "pending_sources": result["pending_sources"],
         "validation": result["validation"],
         "published": result["published"],
@@ -1514,7 +1917,7 @@ def sync_workspace(
         "required_capabilities": result.get("required_capabilities", []),
         "pending_work_path": pending_work_path,
         "next_workflows": next_workflows,
-        "next_steps": next_steps,
+        "next_steps": follow_up_steps,
     }
     lines = [
         f"Sync status: {status}",
@@ -1579,8 +1982,8 @@ def sync_workspace(
             "Pending synthesis: "
             + ", ".join(source["source_id"] for source in result["pending_sources"])
         )
-    if next_steps:
-        lines.append("Next steps: " + " ".join(next_steps))
+    if follow_up_steps:
+        lines.append("Next steps: " + " ".join(follow_up_steps))
     validation = result["validation"]
     if isinstance(validation, dict):
         lines.append(
@@ -2188,7 +2591,13 @@ def run_workflow(
         sync_report = sync_workspace(workspace)
         steps.append(("sync", sync_report))
         sync_status = sync_report.payload.get("sync_status")
-        if sync_status == "pending-synthesis":
+        if sync_status == "awaiting-confirmation":
+            workflow_status = "needs-confirmation"
+            next_steps.extend(sync_report.payload.get("next_steps", []))
+        elif sync_status == "waiting-shared-job":
+            workflow_status = "waiting-shared-job"
+            next_steps.extend(sync_report.payload.get("next_steps", []))
+        elif sync_status == "pending-synthesis":
             workflow_status = "needs-agent-authoring"
             next_workflows = ["knowledge-construction", "knowledge-base-sync"]
             next_steps.append(

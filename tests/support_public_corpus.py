@@ -41,11 +41,19 @@ def make_minimal_workspace(root: Path) -> WorkspacePaths:
     write_json(
         workspace.bootstrap_state_path,
         {
+            "schema_version": 2,
+            "status": "ready",
             "prepared_at": "2026-03-22T00:00:00Z",
+            "environment_ready": True,
+            "workspace_root": str(workspace.root.resolve()),
             "package_manager": "uv",
             "python_executable": "/usr/bin/python3",
             "venv_python": ".venv/bin/python",
             "editable_install": True,
+            "editable_install_detail": "Editable install resolves to the workspace source tree.",
+            "office_renderer_ready": True,
+            "pdf_renderer_ready": True,
+            "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
         },
     )
     return workspace
@@ -66,5 +74,5 @@ def build_public_markdown_workspace(root: Path) -> tuple[WorkspacePaths, dict[st
     """Create a temp workspace, materialize public markdown fixtures, and run sync."""
     workspace = make_minimal_workspace(root)
     materialize_public_markdown_subset(workspace)
-    report = sync_workspace(workspace).payload
+    report = sync_workspace(workspace, assume_yes=True).payload
     return workspace, report

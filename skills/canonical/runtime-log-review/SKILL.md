@@ -21,6 +21,7 @@ If the agent cannot inspect local runtime logs, stop and explain that log review
 ## Procedure
 
 1. Start with `runtime/logs/review/summary.json` and `runtime/logs/review/benchmark-candidates.json` when they exist.
+   - treat live conversation state under `runtime/state/` as the owner and `runtime/logs/conversations/` as projection-only
 2. Use the summary modes that best match the request:
    - recent activity
    - no-result retrieval sessions
@@ -31,6 +32,9 @@ If the agent cannot inspect local runtime logs, stop and explain that log review
    - frequently consulted sources or units
    - candidate benchmark or operator-review cases
    - real interaction activity versus synthetic evaluation traffic
+   - active waiting shared jobs
+   - active confirmation-required shared jobs
+   - orphaned query sessions or retrieval traces that are not backed by committed truth
 3. When the summary shows a case worth deeper inspection, open the referenced query-session or retrieval-trace JSON directly.
 4. If the operator needs the underlying evidence, route to retrieval, provenance tracing, or grounded-answer rather than guessing from log metadata alone.
 5. Keep the workflow descriptive and review-oriented. Do not mutate prompts, skills, overlays, or benchmarks from inside this workflow.
@@ -51,5 +55,6 @@ If the agent cannot inspect local runtime logs, stop and explain that log review
 
 - This is an explicit operator-facing workflow, not a public `docmason review-logs` command.
 - The review summary is read-only and derived from runtime logs under `runtime/logs/`.
+- The summary should distinguish committed truth from orphaned leftovers instead of reconstructing legality from mixed artifacts.
 - `runtime/logs/review/benchmark-candidates.json` is a read-only derived artifact that suggests future benchmark cases from conversation turns, retrieval sessions, and trace outcomes.
 - Real operator and user interactions should stay at the top of the main recent-activity views; evaluation-suite traffic is intentionally demoted into separate synthetic buckets.

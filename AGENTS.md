@@ -100,6 +100,7 @@ Treat other workflows as inner or follow-on workflows discovered from those top-
 - If the published knowledge base is stale but still usable, answer from the published corpus and attach one concise freshness notice.
 - If the user explicitly needs the latest local document state, prefer a routed auto-sync before answering when the workspace question truly depends on it.
 - If pending interaction-derived knowledge is relevant and still awaits promotion, prefer a routed auto-sync before answering when the environment is ready.
+- If routed sync pauses for explicit confirmation, preserve the same live task and use `docmason sync --yes` as the operator approval surface.
 - Do not inject workspace freshness or sync notices into external-factual or general-stable answers unless the workspace is part of the evidence path.
 - For odd questions that depend on layout, style, screenshots, or other non-purely-factual signals, inspect published KB artifacts first and escalate to source rerender or `original_doc/` only when the published artifacts are actually insufficient.
 - If published KB artifacts already expose the required evidence channels, do not jump back to `original_doc/` out of habit.

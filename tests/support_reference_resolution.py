@@ -57,11 +57,19 @@ class ReferenceResolutionTests(unittest.TestCase):
         write_json(
             workspace.bootstrap_state_path,
             {
+                "schema_version": 2,
+                "status": "ready",
                 "prepared_at": "2026-03-18T00:00:00Z",
+                "environment_ready": True,
+                "workspace_root": str(workspace.root.resolve()),
                 "package_manager": "uv",
                 "python_executable": "/usr/bin/python3",
                 "venv_python": ".venv/bin/python",
                 "editable_install": True,
+                "editable_install_detail": "Editable install resolves to the workspace source tree.",
+                "office_renderer_ready": True,
+                "pdf_renderer_ready": True,
+                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
             },
         )
 
@@ -467,7 +475,9 @@ class ReferenceResolutionTests(unittest.TestCase):
         moved_dir.mkdir()
         (workspace.source_dir / "example.pdf").rename(moved_dir / "renamed-example.pdf")
 
-        published = sync_workspace(workspace)
+        preview = sync_workspace(workspace)
+        self.assertEqual(preview.payload["sync_status"], "awaiting-confirmation")
+        published = sync_workspace(workspace, assume_yes=True)
         self.assertEqual(published.payload["sync_status"], "valid")
 
         report = retrieve_knowledge(

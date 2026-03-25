@@ -1673,6 +1673,8 @@ def _turn_record_from_answer_file(
     *,
     answer_file_path: str | None,
 ) -> dict[str, Any]:
+    from .conversation import load_turn_record
+
     if not isinstance(answer_file_path, str) or not answer_file_path:
         return {}
     answer_path = Path(answer_file_path)
@@ -1686,15 +1688,31 @@ def _turn_record_from_answer_file(
     turn_id = relative.stem
     if not conversation_id or not turn_id:
         return {}
-    conversation = read_json(paths.conversations_dir / f"{conversation_id}.json")
-    turns = conversation.get("turns", [])
-    if not isinstance(turns, list):
+    try:
+        enriched = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
+    except KeyError:
         return {}
-    for turn in turns:
-        if isinstance(turn, dict) and turn.get("turn_id") == turn_id:
-            enriched = dict(turn)
-            enriched.setdefault("conversation_id", conversation_id)
-            return enriched
+    enriched = dict(enriched)
+    enriched.setdefault("conversation_id", conversation_id)
+    return enriched
+
+
+def _turn_record_from_log_payload(
+    paths: WorkspacePaths,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    from .conversation import load_turn_record
+
+    conversation_id = payload.get("conversation_id")
+    turn_id = payload.get("turn_id")
+    if isinstance(conversation_id, str) and conversation_id and isinstance(turn_id, str) and turn_id:
+        try:
+            return load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
+        except KeyError:
+            return {}
+    answer_file_path = payload.get("answer_file_path")
+    if isinstance(answer_file_path, str) and answer_file_path:
+        return _turn_record_from_answer_file(paths, answer_file_path=answer_file_path)
     return {}
 
 
@@ -3551,6 +3569,7 @@ def trace_answer_text(
     prefer_published_artifacts: bool | None = None,
     declared_answer_state: str | None = None,
     reference_resolution: dict[str, Any] | None = None,
+    version_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Trace free-form answer text back to knowledge-base evidence."""
     effective_log_context = log_context or _log_context_from_env()
@@ -3603,6 +3622,21 @@ def trace_answer_text(
     )
     effective_reference_resolution = (
         dict(reference_resolution) if isinstance(reference_resolution, dict) else None
+    )
+    fallback_turn_record = (
+        _turn_record_from_answer_file(paths, answer_file_path=answer_file_path)
+        if isinstance(answer_file_path, str) and answer_file_path
+        else {}
+    )
+    fallback_version_context = fallback_turn_record.get("version_context")
+    effective_version_context = (
+        dict(version_context)
+        if isinstance(version_context, dict)
+        else (
+            dict(fallback_version_context)
+            if isinstance(fallback_version_context, dict)
+            else None
+        )
     )
 
     recorded_at = utc_now()
@@ -3729,15 +3763,21 @@ def trace_answer_text(
         for support in segment.get("supporting_units", [])
         if isinstance(support, dict)
     ]
+    trace_supporting_results = [
+        result
+        for segment in segment_traces
+        for result in segment.get("supporting_results", [])
+        if isinstance(result, dict)
+    ]
     used_published_channels = support_channels_from_supports(all_supports)
     published_evidence_plan = plan_published_evidence(
-        results=[
-            result
-            for segment in segment_traces
-            for result in segment.get("supporting_results", [])
-            if isinstance(result, dict)
-        ],
+        results=trace_supporting_results,
         evidence_requirements=effective_evidence_requirements,
+    )
+    recommended_hybrid_targets = _recommended_hybrid_targets(
+        paths,
+        target=target,
+        results=trace_supporting_results,
     )
     render_inspection_required = combined_render_requirement(
         kb_render_required=kb_render_required,
@@ -3776,10 +3816,12 @@ def trace_answer_text(
         "published_artifacts_sufficient": published_evidence_plan.get(
             "published_artifacts_sufficient"
         ),
+        "recommended_hybrid_targets": recommended_hybrid_targets,
         "reference_resolution": effective_reference_resolution,
         "reference_resolution_summary": build_reference_resolution_summary(
             effective_reference_resolution
         ),
+        "version_context": effective_version_context,
         "source_escalation_required": published_evidence_plan.get("source_escalation_required"),
         "source_escalation_reason": published_evidence_plan.get("source_escalation_reason"),
         "render_inspection_required": render_inspection_required,
@@ -3838,10 +3880,12 @@ def trace_answer_text(
                 "published_artifacts_sufficient": published_evidence_plan.get(
                     "published_artifacts_sufficient"
                 ),
+                "recommended_hybrid_targets": recommended_hybrid_targets,
                 "reference_resolution": effective_reference_resolution,
                 "reference_resolution_summary": build_reference_resolution_summary(
                     effective_reference_resolution
                 ),
+                "version_context": effective_version_context,
                 "source_escalation_required": published_evidence_plan.get(
                     "source_escalation_required"
                 ),
@@ -3923,6 +3967,11 @@ def trace_answer_file(
             if isinstance(turn_record.get("answer_state"), str)
             else None
         ),
+        version_context=(
+            turn_record.get("version_context")
+            if isinstance(turn_record.get("version_context"), dict)
+            else None
+        ),
     )
 
 
@@ -3941,6 +3990,8 @@ def trace_session(
     session_payload = read_json(session_path)
     if not session_payload:
         raise FileNotFoundError(session_path)
+    fallback_turn_record = _turn_record_from_log_payload(paths, session_payload)
+    fallback_version_context = fallback_turn_record.get("version_context")
     effective_log_context = _merge_log_context(
         explicit_log_context=log_context or _log_context_from_env(),
         fallback_record=session_payload,
@@ -3949,6 +4000,7 @@ def trace_session(
         log_context=effective_log_context,
         explicit_log_origin=log_origin or _log_origin_from_env(),
     )
+    session_version_context = session_payload.get("version_context")
     if isinstance(session_payload.get("segment_traces"), list) and session_payload.get(
         "final_answer"
     ):
@@ -4010,15 +4062,21 @@ def trace_session(
             for support in segment.get("supporting_units", [])
             if isinstance(support, dict)
         ]
+        trace_supporting_results = [
+            result
+            for segment in segment_traces
+            for result in segment.get("supporting_results", [])
+            if isinstance(result, dict)
+        ]
         used_published_channels = support_channels_from_supports(all_supports)
         published_evidence_plan = plan_published_evidence(
-            results=[
-                result
-                for segment in segment_traces
-                for result in segment.get("supporting_results", [])
-                if isinstance(result, dict)
-            ],
+            results=trace_supporting_results,
             evidence_requirements=effective_evidence_requirements,
+        )
+        recommended_hybrid_targets = _recommended_hybrid_targets(
+            paths,
+            target=target,
+            results=trace_supporting_results,
         )
         supporting_source_ids = session_payload.get("supporting_source_ids")
         supporting_unit_ids = session_payload.get("supporting_unit_ids")
@@ -4073,6 +4131,7 @@ def trace_session(
             "published_artifacts_sufficient": published_evidence_plan.get(
                 "published_artifacts_sufficient"
             ),
+            "recommended_hybrid_targets": recommended_hybrid_targets,
             "reference_resolution": (
                 session_payload.get("reference_resolution")
                 if isinstance(session_payload.get("reference_resolution"), dict)
@@ -4082,6 +4141,15 @@ def trace_session(
                 session_payload.get("reference_resolution")
                 if isinstance(session_payload.get("reference_resolution"), dict)
                 else None
+            ),
+            "version_context": (
+                dict(session_version_context)
+                if isinstance(session_version_context, dict)
+                else (
+                    dict(fallback_version_context)
+                    if isinstance(fallback_version_context, dict)
+                    else None
+                )
             ),
             "source_escalation_required": published_evidence_plan.get("source_escalation_required"),
             "source_escalation_reason": published_evidence_plan.get("source_escalation_reason"),
@@ -4161,5 +4229,14 @@ def trace_session(
             session_payload.get("answer_state")
             if isinstance(session_payload.get("answer_state"), str)
             else None
+        ),
+        version_context=(
+            session_payload.get("version_context")
+            if isinstance(session_payload.get("version_context"), dict)
+            else (
+                fallback_turn_record.get("version_context")
+                if isinstance(fallback_turn_record.get("version_context"), dict)
+                else None
+            )
         ),
     )

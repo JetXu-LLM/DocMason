@@ -84,11 +84,19 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         write_json(
             workspace.bootstrap_state_path,
             {
+                "schema_version": 2,
+                "status": "ready",
                 "prepared_at": "2026-03-16T00:00:00Z",
+                "environment_ready": True,
+                "workspace_root": str(workspace.root.resolve()),
                 "package_manager": "uv",
                 "python_executable": "/usr/bin/python3",
                 "venv_python": ".venv/bin/python",
                 "editable_install": True,
+                "editable_install_detail": "Editable install resolves to the workspace source tree.",
+                "office_renderer_ready": True,
+                "pdf_renderer_ready": True,
+                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
             },
         )
 

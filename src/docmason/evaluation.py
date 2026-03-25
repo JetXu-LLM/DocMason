@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .contracts import ANSWER_STATES
+from .contracts import ANSWER_STATES, SUPPORT_BASIS_VALUES
 from .project import WorkspacePaths, read_json, write_json
 from .retrieval import (
     ANSWER_WORKFLOW_ID,
@@ -44,7 +44,6 @@ FEEDBACK_TAXONOMY = (
     "alternate_format_double_count",
     "coverage_gap",
 )
-SUPPORT_BASIS_VALUES = ("kb-grounded", "external-source-verified", "model-knowledge", "mixed")
 RUN_STATUS_ORDER = {"passed": 0, "degraded": 1, "failed": 2, "incompatible": 3}
 
 

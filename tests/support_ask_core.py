@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from docmason.ask import complete_ask_turn, prepare_ask_turn
+from docmason.commands import CommandReport
 from docmason.conversation import open_conversation_turn, update_conversation_turn
 from docmason.coordination import workspace_lease
 from docmason.project import WorkspacePaths, read_json, source_inventory_signature, write_json
@@ -86,11 +87,19 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         write_json(
             workspace.bootstrap_state_path,
             {
+                "schema_version": 2,
+                "status": "ready",
                 "prepared_at": "2026-03-16T00:00:00Z",
+                "environment_ready": True,
+                "workspace_root": str(workspace.root.resolve()),
                 "package_manager": "uv",
                 "python_executable": "/usr/bin/python3",
                 "venv_python": ".venv/bin/python",
                 "editable_install": True,
+                "editable_install_detail": "Editable install resolves to the workspace source tree.",
+                "office_renderer_ready": True,
+                "pdf_renderer_ready": True,
+                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
             },
         )
 
@@ -295,10 +304,24 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                     question_domain="workspace-corpus",
                 ),
             )
-        self.assertEqual(missing["status"], "prepared")
+        self.assertEqual(missing["status"], "awaiting-confirmation")
         self.assertTrue(missing["auto_sync_triggered"])
-        self.assertEqual(missing["auto_sync_summary"]["status"], "valid")
-        self.assertFalse(missing["knowledge_base_missing"])
+        self.assertEqual(missing["auto_sync_summary"]["status"], "awaiting-confirmation")
+        self.assertTrue(missing["knowledge_base_missing"])
+        self.assertTrue(missing["attached_shared_job_ids"])
+        self.assertEqual(missing["confirmation_kind"], "material-sync")
+
+        artifact = workspace.knowledge_base_current_dir / "artifact.md"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("compiled knowledge\n", encoding="utf-8")
+        write_json(
+            workspace.sync_state_path,
+            {
+                "published_source_signature": source_inventory_signature(workspace),
+                "last_publish_at": "2026-03-21T00:05:00Z",
+                "last_sync_at": "2026-03-21T00:05:00Z",
+            },
+        )
 
         self.create_pdf(workspace.source_dir / "companion.pdf")
         source_path = workspace.source_dir / "example.pdf"
@@ -313,11 +336,12 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                     needs_latest_workspace_state=True,
                 ),
             )
-        self.assertFalse(stale["knowledge_base_stale"])
+        self.assertEqual(stale["status"], "awaiting-confirmation")
+        self.assertTrue(stale["knowledge_base_stale"])
         self.assertTrue(stale["auto_sync_triggered"])
-        self.assertEqual(stale["auto_sync_summary"]["status"], "valid")
-        self.assertFalse(stale["sync_suggested"])
-        self.assertFalse(stale["prefer_sync_before_answer"])
+        self.assertEqual(stale["auto_sync_summary"]["status"], "awaiting-confirmation")
+        self.assertTrue(stale["sync_suggested"])
+        self.assertTrue(stale["prefer_sync_before_answer"])
 
     def test_prepare_ask_turn_auto_prepares_workspace_before_auto_sync(self) -> None:
         workspace = self.make_workspace()
@@ -364,7 +388,8 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 },
             )()
 
-        def fake_sync(_paths: WorkspacePaths) -> dict[str, object]:
+        def fake_sync(_paths: WorkspacePaths, assume_yes: bool = False) -> CommandReport:
+            del assume_yes
             artifact = workspace.knowledge_base_current_dir / "artifact.md"
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text("compiled knowledge\n", encoding="utf-8")
@@ -376,19 +401,24 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                     "last_sync_at": "2026-03-21T00:05:00Z",
                 },
             )
-            return {
-                "status": "valid",
-                "detail": "Published.",
-                "published": True,
-                "change_set": {"stats": {}},
-                "auto_repairs": {"repair_count": 0},
-                "auto_authoring": {"authored_count": 0},
-                "autonomous_steps": [],
-            }
+            return CommandReport(
+                0,
+                {
+                    "status": "ready",
+                    "sync_status": "valid",
+                    "detail": "Published.",
+                    "published": True,
+                    "change_set": {"stats": {}},
+                    "auto_repairs": {"repair_count": 0},
+                    "auto_authoring": {"authored_count": 0},
+                    "autonomous_steps": [],
+                },
+                [],
+            )
 
         with (
             mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare),
-            mock.patch("docmason.ask.sync_knowledge_base", side_effect=fake_sync),
+            mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
             mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-auto-prepare"}, clear=False),
         ):
             turn = prepare_ask_turn(
@@ -452,7 +482,18 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
     def test_prepare_ask_turn_refreshes_legacy_marker_before_auto_sync(self) -> None:
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")
-        self.mark_environment_ready(workspace)
+        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        write_json(
+            workspace.bootstrap_state_path,
+            {
+                "prepared_at": "2026-03-16T00:00:00Z",
+                "package_manager": "uv",
+                "python_executable": "/usr/bin/python3",
+                "venv_python": ".venv/bin/python",
+                "editable_install": True,
+            },
+        )
 
         def fake_prepare(*args: object, **kwargs: object) -> object:
             del args, kwargs
@@ -491,7 +532,8 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 },
             )()
 
-        def fake_sync(_paths: WorkspacePaths) -> dict[str, object]:
+        def fake_sync(_paths: WorkspacePaths, assume_yes: bool = False) -> CommandReport:
+            del assume_yes
             artifact = workspace.knowledge_base_current_dir / "artifact.md"
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text("compiled knowledge\n", encoding="utf-8")
@@ -503,19 +545,24 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                     "last_sync_at": "2026-03-21T00:05:00Z",
                 },
             )
-            return {
-                "status": "valid",
-                "detail": "Published.",
-                "published": True,
-                "change_set": {"stats": {}},
-                "auto_repairs": {"repair_count": 0},
-                "auto_authoring": {"authored_count": 0},
-                "autonomous_steps": [],
-            }
+            return CommandReport(
+                0,
+                {
+                    "status": "ready",
+                    "sync_status": "valid",
+                    "detail": "Published.",
+                    "published": True,
+                    "change_set": {"stats": {}},
+                    "auto_repairs": {"repair_count": 0},
+                    "auto_authoring": {"authored_count": 0},
+                    "autonomous_steps": [],
+                },
+                [],
+            )
 
         with (
             mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare) as mocked_prepare,
-            mock.patch("docmason.ask.sync_knowledge_base", side_effect=fake_sync),
+            mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
             mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-legacy-sync"}, clear=False),
         ):
             turn = prepare_ask_turn(
@@ -532,6 +579,111 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.assertTrue(turn["auto_prepare_triggered"])
         self.assertTrue(turn["auto_sync_triggered"])
         self.assertFalse(turn["knowledge_base_missing"])
+
+    def test_prepare_ask_turn_refreshes_run_and_turn_version_truth_after_auto_sync(self) -> None:
+        workspace = self.make_workspace()
+        self.create_pdf(workspace.source_dir / "example.pdf")
+        self.create_pdf(workspace.source_dir / "companion.pdf")
+
+        def fake_prepare(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
+            workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            write_json(
+                workspace.bootstrap_state_path,
+                {
+                    "schema_version": 2,
+                    "status": "ready",
+                    "environment_ready": True,
+                    "prepared_at": "2026-03-21T00:00:00Z",
+                    "workspace_root": str(workspace.root.resolve()),
+                    "package_manager": "uv",
+                    "python_executable": "/usr/bin/python3",
+                    "venv_python": ".venv/bin/python",
+                    "editable_install": True,
+                    "editable_install_detail": "Editable install resolves to the workspace source tree.",
+                    "office_renderer_ready": True,
+                    "pdf_renderer_ready": True,
+                    "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                },
+            )
+            return type(
+                "PrepareReport",
+                (),
+                {
+                    "payload": {
+                        "status": "ready",
+                        "actions_performed": ["Created .venv."],
+                        "actions_skipped": [],
+                        "next_steps": [],
+                        "environment": {
+                            "package_manager": "uv",
+                            "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                        },
+                    }
+                },
+            )()
+
+        def fake_sync(_paths: WorkspacePaths, assume_yes: bool = False) -> CommandReport:
+            del assume_yes
+            artifact = workspace.knowledge_base_current_dir / "artifact.md"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("compiled knowledge\n", encoding="utf-8")
+            write_json(
+                workspace.current_publish_manifest_path,
+                {
+                    "snapshot_id": "snapshot-auto-sync",
+                    "published_at": "2026-03-21T00:05:00Z",
+                },
+            )
+            write_json(
+                workspace.sync_state_path,
+                {
+                    "published_source_signature": source_inventory_signature(workspace),
+                    "last_publish_at": "2026-03-21T00:05:00Z",
+                    "last_sync_at": "2026-03-21T00:05:00Z",
+                },
+            )
+            return CommandReport(
+                0,
+                {
+                    "status": "ready",
+                    "sync_status": "valid",
+                    "detail": "Published.",
+                    "published": True,
+                    "change_set": {"stats": {}},
+                    "auto_repairs": {"repair_count": 0},
+                    "auto_authoring": {"authored_count": 0},
+                    "autonomous_steps": [],
+                },
+                [],
+            )
+
+        with (
+            mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare),
+            mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-auto-sync-version"}, clear=False),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What do the documents say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        conversation = read_json(workspace.conversations_dir / "thread-auto-sync-version.json")
+        live_turn = conversation["turns"][0]
+        run_state = read_json(workspace.runs_dir / turn["run_id"] / "state.json")
+        self.assertEqual(
+            live_turn["version_context"]["published_snapshot_id"],
+            "snapshot-auto-sync",
+        )
+        self.assertEqual(
+            run_state["version_context"]["published_snapshot_id"],
+            "snapshot-auto-sync",
+        )
 
     def test_prepare_ask_turn_reports_bootstrap_blocker_when_auto_prepare_fails(self) -> None:
         workspace = self.make_workspace()

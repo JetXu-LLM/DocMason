@@ -22,8 +22,10 @@ from docmason.commands import (
     doctor_workspace,
     prepare_workspace,
     status_workspace,
+    sync_workspace,
     sync_adapters,
 )
+from docmason.control_plane import ensure_shared_job, load_shared_job
 from docmason.project import (
     WorkspacePaths,
     cached_bootstrap_readiness,
@@ -128,7 +130,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "prepare": ["prepare", "--json", "--yes"],
             "doctor": ["doctor", "--json"],
             "status": ["status", "--json"],
-            "sync": ["sync", "--json"],
+            "sync": ["sync", "--json", "--yes"],
             "retrieve": ["retrieve", "architecture", "--json"],
             "trace": ["trace", "--source-id", "source-1", "--json"],
             "validate-kb": ["validate-kb", "--json", "--target", "staging"],
@@ -165,7 +167,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "prepare": ["prepare", "--json", "--yes"],
             "doctor": ["doctor", "--json"],
             "status": ["status", "--json"],
-            "sync": ["sync", "--json"],
+            "sync": ["sync", "--json", "--yes"],
             "retrieve": ["retrieve", "architecture", "--json"],
             "trace": ["trace", "--source-id", "source-1", "--json"],
             "validate-kb": ["validate-kb", "--json"],
@@ -357,9 +359,18 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 editable_install_probe=self.ready_probe,
                 interactive=False,
             )
-        self.assertEqual(report.exit_code, 2)
-        self.assertEqual(report.payload["status"], DEGRADED)
-        self.assertIn("libreoffice.org/download/download/", report.payload["next_steps"][0])
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(report.payload["status"], ACTION_REQUIRED)
+        self.assertEqual(report.payload["prepare_status"], "awaiting-confirmation")
+        self.assertEqual(
+            report.payload["control_plane"]["confirmation_kind"],
+            "high-intrusion-prepare",
+        )
+        self.assertIn("是否现在开始准备环境", report.payload["control_plane"]["confirmation_prompt"])
+        self.assertEqual(
+            report.payload["next_steps"][0],
+            "Run `docmason prepare --yes` to approve and continue.",
+        )
 
     def test_prepare_auto_installs_libreoffice_with_brew_when_assume_yes(self) -> None:
         workspace = self.make_workspace()
@@ -660,6 +671,104 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         os.utime(source_file, None)
         kb_stale = status_workspace(workspace, editable_install_probe=self.ready_probe)
         self.assertEqual(kb_stale.payload["stage"], "knowledge-base-stale")
+
+    def test_sync_reports_material_confirmation_payload(self) -> None:
+        workspace = self.make_workspace()
+        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        write_json(
+            workspace.bootstrap_state_path,
+            {
+                "schema_version": 2,
+                "status": "ready",
+                "environment_ready": True,
+                "prepared_at": "2026-03-15T00:00:00Z",
+                "workspace_root": str(workspace.root.resolve()),
+                "package_manager": "uv",
+                "python_executable": "/usr/bin/python3",
+                "venv_python": ".venv/bin/python",
+                "editable_install": True,
+                "editable_install_detail": "Editable install resolves to the workspace source tree.",
+                "office_renderer_ready": True,
+                "pdf_renderer_ready": True,
+                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+            },
+        )
+        for index in range(12):
+            (workspace.source_dir / f"sample-{index:02d}.pdf").write_text(
+                "pdf placeholder\n",
+                encoding="utf-8",
+            )
+
+        report = sync_workspace(workspace)
+
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(report.payload["status"], ACTION_REQUIRED)
+        self.assertEqual(report.payload["sync_status"], "awaiting-confirmation")
+        self.assertEqual(
+            report.payload["control_plane"]["confirmation_kind"],
+            "material-sync",
+        )
+        self.assertEqual(
+            report.payload["control_plane"]["next_command"],
+            "docmason sync --yes",
+        )
+
+    def test_status_and_doctor_surface_pending_control_plane_confirmation(self) -> None:
+        workspace = self.make_workspace()
+        ensure_shared_job(
+            workspace,
+            job_key=f"prepare:{workspace.root}:high-intrusion:cap",
+            job_family="prepare",
+            criticality="answer-critical",
+            scope={"workspace_root": str(workspace.root)},
+            input_signature="cap",
+            owner={"kind": "command", "id": "prepare-command"},
+            requires_confirmation=True,
+            confirmation_kind="high-intrusion-prepare",
+            confirmation_prompt="当前问题需要补齐本地依赖才能继续，是否现在开始准备环境？",
+            confirmation_reason="office-rendering",
+        )
+
+        status_report = status_workspace(workspace, editable_install_probe=self.missing_probe)
+        self.assertEqual(status_report.payload["stage"], "control-plane-pending-confirmation")
+        self.assertIn("prepare --yes", status_report.payload["pending_actions"])
+
+        doctor_report = doctor_workspace(workspace, editable_install_probe=self.missing_probe)
+        checks = {check["name"]: check for check in doctor_report.payload["checks"]}
+        self.assertEqual(checks["control-plane"]["status"], ACTION_REQUIRED)
+
+    def test_shared_job_acquisition_distinguishes_owner_and_waiter(self) -> None:
+        workspace = self.make_workspace()
+        owner_run_id = "run-owner"
+        waiter_run_id = "run-waiter"
+
+        first = ensure_shared_job(
+            workspace,
+            job_key="sync:test-signature",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={"target": "current"},
+            input_signature="test-signature",
+            owner={"kind": "command", "id": "sync-command:1"},
+            run_id=owner_run_id,
+        )
+        second = ensure_shared_job(
+            workspace,
+            job_key="sync:test-signature",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={"target": "current"},
+            input_signature="test-signature",
+            owner={"kind": "command", "id": "sync-command:2"},
+            run_id=waiter_run_id,
+        )
+
+        self.assertEqual(first["caller_role"], "owner")
+        self.assertEqual(second["caller_role"], "waiter")
+        self.assertEqual(first["manifest"]["job_id"], second["manifest"]["job_id"])
+        manifest = load_shared_job(workspace, str(first["manifest"]["job_id"]))
+        self.assertCountEqual(manifest["attached_run_ids"], [owner_run_id, waiter_run_id])
 
     def test_sync_adapters_generates_deterministic_claude_files(self) -> None:
         workspace = self.make_workspace()

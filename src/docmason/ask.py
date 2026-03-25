@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .commands import prepare_workspace
+from .commands import ACTION_REQUIRED, prepare_workspace, sync_workspace as run_sync_command
+from .admissibility import evaluate_commit_admissibility
 from .conversation import (
     build_log_context,
     load_turn_record,
@@ -13,14 +14,29 @@ from .conversation import (
     semantic_log_context_from_record,
     update_conversation_turn,
 )
-from .front_controller import question_execution_profile, write_external_support_manifest
+from .control_plane import (
+    attach_run_to_shared_job,
+    approve_shared_job,
+    block_shared_job,
+    complete_shared_job,
+    decline_shared_job,
+    ensure_shared_job,
+    find_conversation_confirmation_job,
+    lane_c_job_key,
+    load_shared_job,
+    normalize_confirmation_reply,
+)
+from .front_controller import (
+    question_execution_profile,
+    write_external_support_manifest,
+    write_hybrid_refresh_work,
+)
 from .interaction import (
     interaction_ingest_snapshot,
     interaction_overlay_relevance,
     maybe_reconcile_active_thread,
 )
 from .knowledge import preview_source_changes
-from .knowledge import sync_workspace as sync_knowledge_base
 from .project import (
     WorkspacePaths,
     cached_bootstrap_readiness,
@@ -31,7 +47,15 @@ from .project import (
 )
 from .projections import refresh_runtime_projections
 from .routing import tokenize_text
-from .run_control import commit_run, ensure_run_for_turn, record_run_event
+from .run_control import (
+    attach_shared_job_to_run,
+    commit_run,
+    ensure_run_for_turn,
+    record_run_event,
+    record_run_event_if_present,
+    record_run_event_for_runs,
+    refresh_turn_run_version_truth,
+)
 from .source_references import (
     build_reference_resolution_summary,
     resolve_workspace_reference,
@@ -99,6 +123,14 @@ def _resolve_mapping(
     if isinstance(current_value, dict):
         return current_value
     return None
+
+
+def _resolved_string_list(value: list[Any] | None) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(item for item in value if isinstance(item, str) and item)
+    )
 
 
 def _sync_turn_log_artifacts(
@@ -228,7 +260,8 @@ def _changed_source_relevance(
 
 def _auto_sync_summary(sync_result: dict[str, Any]) -> dict[str, Any]:
     return {
-        "status": sync_result.get("status"),
+        "status": sync_result.get("sync_status") or sync_result.get("status"),
+        "command_status": sync_result.get("status"),
         "detail": sync_result.get("detail"),
         "published": bool(sync_result.get("published")),
         "change_stats": dict(sync_result.get("change_set", {}).get("stats", {})),
@@ -257,6 +290,9 @@ def _auto_prepare_summary(report: Any) -> dict[str, Any]:
         "actions_performed": list(payload.get("actions_performed", [])),
         "actions_skipped": list(payload.get("actions_skipped", [])),
         "next_steps": list(payload.get("next_steps", [])),
+        "control_plane": dict(payload.get("control_plane", {}))
+        if isinstance(payload.get("control_plane"), dict)
+        else {},
         "package_manager": environment.get("package_manager"),
         "manual_recovery_doc": (
             payload.get("manual_recovery_doc")
@@ -266,10 +302,53 @@ def _auto_prepare_summary(report: Any) -> dict[str, Any]:
     }
 
 
+def _prepare_with_optional_owner(
+    paths: WorkspacePaths,
+    *,
+    assume_yes: bool,
+    interactive: bool,
+    run_id: str | None = None,
+) -> Any:
+    owner = {"kind": "run", "id": run_id} if isinstance(run_id, str) and run_id else None
+    try:
+        return prepare_workspace(
+            paths,
+            assume_yes=assume_yes,
+            interactive=interactive,
+            owner=owner,
+            run_id=run_id,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return prepare_workspace(paths, assume_yes=assume_yes, interactive=interactive)
+
+
+def _sync_with_optional_owner(
+    paths: WorkspacePaths,
+    *,
+    assume_yes: bool,
+    run_id: str | None = None,
+) -> Any:
+    owner = {"kind": "run", "id": run_id} if isinstance(run_id, str) and run_id else None
+    try:
+        return run_sync_command(
+            paths,
+            assume_yes=assume_yes,
+            owner=owner,
+            run_id=run_id,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        return run_sync_command(paths, assume_yes=assume_yes)
+
+
 def _ensure_workspace_environment(
     paths: WorkspacePaths,
     *,
     require_sync_capability: bool = False,
+    run_id: str | None = None,
 ) -> tuple[bool, dict[str, Any], bool, str | None, dict[str, Any] | None]:
     """Use the cached bootstrap marker first, then silently repair the workspace when needed."""
     cached = cached_bootstrap_readiness(paths, require_sync_capability=require_sync_capability)
@@ -277,10 +356,777 @@ def _ensure_workspace_environment(
         return True, cached, False, None, None
 
     reason = str(cached.get("detail") or "The cached bootstrap marker is missing or invalid.")
-    report = prepare_workspace(paths, assume_yes=True, interactive=False)
+    report = _prepare_with_optional_owner(
+        paths,
+        assume_yes=False,
+        interactive=False,
+        run_id=run_id,
+    )
     summary = _auto_prepare_summary(report)
     refreshed = cached_bootstrap_readiness(paths, require_sync_capability=require_sync_capability)
     return bool(refreshed["ready"]), refreshed, True, reason, summary
+
+
+def _commit_governed_boundary_turn(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    reason: str,
+    extra_turn_updates: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
+    run_id = (
+        str(turn.get("active_run_id"))
+        if isinstance(turn.get("active_run_id"), str) and turn.get("active_run_id")
+        else None
+    )
+    answer_file_path = str(turn.get("answer_file_path") or "")
+    answer_path = paths.root / answer_file_path
+    answer_path.parent.mkdir(parents=True, exist_ok=True)
+    answer_path.write_text(reason.strip() + "\n", encoding="utf-8")
+    updated = commit_run(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        status="completed",
+        answer_state="abstained",
+        support_basis="governed-boundary",
+        support_manifest_path=None,
+        answer_file_path=answer_file_path,
+        response_excerpt=reason.strip(),
+        admissibility_gate_result={
+            "allowed": True,
+            "reason": None,
+            "issues": [],
+            "run_id": turn.get("active_run_id"),
+        },
+        turn_updates={
+            **(extra_turn_updates or {}),
+            "status": "completed",
+            "turn_state": "completed",
+            "answer_state": "abstained",
+            "support_basis": "governed-boundary",
+            "response_excerpt": reason.strip(),
+        },
+    )
+    refresh_runtime_projections(paths)
+    record_run_event_if_present(
+        paths,
+        run_id=run_id,
+        stage="projection",
+        event_type="projection-refreshed",
+        payload={"conversation_id": conversation_id, "turn_id": turn_id},
+    )
+    return {
+        "conversation_id": conversation_id,
+        "turn_id": turn_id,
+        **updated,
+    }
+
+
+def _apply_control_plane_pause(
+    paths: WorkspacePaths,
+    *,
+    run_id: str,
+    control_plane: dict[str, Any],
+    attached_shared_job_ids: list[str],
+    control_plane_pause_state: str | None,
+    confirmation_kind: str | None,
+    confirmation_prompt: str | None,
+    confirmation_reason: str | None,
+) -> tuple[list[str], str | None, str | None, str | None, str | None]:
+    """Apply one control-plane pause payload onto the current ask turn state."""
+    if control_plane.get("state") not in {"awaiting-confirmation", "waiting-shared-job"}:
+        return (
+            attached_shared_job_ids,
+            control_plane_pause_state,
+            confirmation_kind,
+            confirmation_prompt,
+            confirmation_reason,
+        )
+
+    pause_state = str(control_plane["state"])
+    job_id = (
+        str(control_plane.get("shared_job_id"))
+        if isinstance(control_plane.get("shared_job_id"), str) and control_plane.get("shared_job_id")
+        else None
+    )
+    if job_id:
+        attached_shared_job_ids = [job_id]
+        try:
+            attach_run_to_shared_job(paths, job_id=job_id, run_id=run_id)
+        except FileNotFoundError:
+            attach_shared_job_to_run(paths, run_id=run_id, job_id=job_id)
+        record_run_event_if_present(
+            paths,
+            run_id=run_id,
+            stage="control-plane",
+            event_type="shared-job-waiting",
+            payload={"job_id": job_id, "state": pause_state},
+        )
+    return (
+        attached_shared_job_ids,
+        pause_state,
+        (
+            str(control_plane.get("confirmation_kind"))
+            if isinstance(control_plane.get("confirmation_kind"), str)
+            else confirmation_kind
+        ),
+        (
+            str(control_plane.get("confirmation_prompt"))
+            if isinstance(control_plane.get("confirmation_prompt"), str)
+            else confirmation_prompt
+        ),
+        (
+            str(control_plane.get("confirmation_reason"))
+            if isinstance(control_plane.get("confirmation_reason"), str)
+            else confirmation_reason
+        ),
+    )
+
+
+def _maybe_handle_confirmation_reply(
+    paths: WorkspacePaths,
+    *,
+    question: str,
+    semantic_analysis: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any] | None] | None:
+    action = normalize_confirmation_reply(question)
+    if action is None:
+        return None
+    active = read_json(paths.active_conversation_path)
+    if not active:
+        active = read_json(paths.legacy_active_conversation_path)
+    conversation_id = active.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return None
+    pending = find_conversation_confirmation_job(paths, conversation_id)
+    if not pending:
+        return None
+    turn = pending["turn"]
+    manifest = pending["manifest"]
+    turn_id = str(turn["turn_id"])
+    run_id = (
+        str(turn.get("active_run_id"))
+        if isinstance(turn.get("active_run_id"), str) and turn.get("active_run_id")
+        else None
+    )
+    if action == "decline":
+        declined_job = decline_shared_job(
+            paths,
+            str(manifest["job_id"]),
+            reason=str(
+                manifest.get("confirmation_reason")
+                or manifest.get("confirmation_prompt")
+                or "The confirmation-required shared job was declined."
+            ),
+        )
+        record_run_event_for_runs(
+            paths,
+            run_ids=declined_job.get("attached_run_ids"),
+            stage="control-plane",
+            event_type="shared-job-declined",
+            payload={"job_id": declined_job.get("job_id")},
+        )
+        record_run_event_for_runs(
+            paths,
+            run_ids=declined_job.get("attached_run_ids"),
+            stage="control-plane",
+            event_type="shared-job-settled",
+            payload={"job_id": declined_job.get("job_id"), "status": "declined"},
+        )
+        reason = (
+            str(manifest.get("confirmation_prompt") or "The confirmation-required step was declined.")
+            + " 未继续执行当前任务。"
+        )
+        return "declined", _commit_governed_boundary_turn(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            reason=reason,
+        )
+    approved_job = approve_shared_job(
+        paths,
+        str(manifest["job_id"]),
+        owner={"kind": "run", "id": run_id} if isinstance(run_id, str) and run_id else None,
+        run_id=run_id,
+    )
+    record_run_event_for_runs(
+        paths,
+        run_ids=approved_job.get("attached_run_ids"),
+        stage="control-plane",
+        event_type="shared-job-approved",
+        payload={"job_id": approved_job.get("job_id")},
+    )
+    job_family = str(manifest.get("job_family") or "")
+    report = None
+    if job_family == "prepare":
+        report = _prepare_with_optional_owner(
+            paths,
+            assume_yes=True,
+            interactive=False,
+            run_id=run_id,
+        )
+    elif job_family == "sync":
+        report = _sync_with_optional_owner(
+            paths,
+            assume_yes=True,
+            run_id=run_id,
+        )
+        if report.payload.get("sync_status") in {"valid", "warnings"} and bool(
+            report.payload.get("published")
+        ):
+            refresh_turn_run_version_truth(
+                paths,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                run_id=run_id,
+            )
+    if report is not None and report.payload.get("status") == ACTION_REQUIRED:
+        current_turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
+        updated = update_conversation_turn(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            updates={
+                "status": "action-required",
+                "turn_state": "awaiting-confirmation"
+                if report.payload.get("control_plane", {}).get("state") == "awaiting-confirmation"
+                else "prepared",
+                "freshness_notice": report.payload.get("detail"),
+            },
+        )
+        return "blocked", updated
+    original_question = str(turn.get("user_question") or "").strip()
+    if not original_question:
+        return None
+    restored_analysis = (
+        dict(turn.get("semantic_analysis"))
+        if isinstance(turn.get("semantic_analysis"), dict)
+        else semantic_analysis
+    )
+    return original_question, restored_analysis
+
+
+def begin_lane_c_shared_refresh(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    run_id: str,
+    query: str,
+    recommended_targets: list[dict[str, Any]],
+    selected_source_id: str | None = None,
+    target: str = "current",
+) -> dict[str, Any]:
+    """Create or attach the governed Lane C shared job for one source-scoped refresh."""
+    from .run_control import load_run_state
+
+    run_state = load_run_state(paths, run_id)
+    raw_version_truth = run_state.get("version_context")
+    version_truth = dict(raw_version_truth) if isinstance(raw_version_truth, dict) else {}
+    published_snapshot_id = str(version_truth.get("published_snapshot_id") or "")
+    if not published_snapshot_id:
+        raise ValueError("Lane C requires a published snapshot id.")
+
+    normalized_targets = [
+        item
+        for item in recommended_targets
+        if isinstance(item, dict) and isinstance(item.get("source_id"), str) and item.get("source_id")
+    ]
+    if not normalized_targets:
+        raise ValueError("Lane C requires at least one recommended hybrid target.")
+    chosen_target = None
+    if isinstance(selected_source_id, str) and selected_source_id:
+        for item in normalized_targets:
+            if item.get("source_id") == selected_source_id:
+                chosen_target = item
+                break
+        if chosen_target is None:
+            raise ValueError(f"Selected Lane C source `{selected_source_id}` is not recommended.")
+    else:
+        chosen_target = normalized_targets[0]
+    source_id = str(chosen_target["source_id"])
+    work_path = write_hybrid_refresh_work(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        query=query,
+        source_ids=[source_id],
+        recommended_targets=[chosen_target],
+        target=target,
+    )
+    job_key = lane_c_job_key(
+        published_snapshot_id=published_snapshot_id,
+        source_id=source_id,
+    )
+    job_info = ensure_shared_job(
+        paths,
+        job_key=job_key,
+        job_family="lane-c",
+        criticality="answer-critical",
+        scope={
+            "target": target,
+            "published_snapshot_id": published_snapshot_id,
+            "source_id": source_id,
+            "required_overlay_slots": list(chosen_target.get("required_overlay_slots", [])),
+            "target_artifact_ids": list(chosen_target.get("target_artifact_ids", [])),
+        },
+        input_signature=job_key,
+        owner={"kind": "run", "id": run_id},
+        run_id=run_id,
+    )
+    manifest = job_info["manifest"]
+    caller_role = str(job_info.get("caller_role") or "owner")
+    updates: dict[str, Any] = {
+        "turn_state": "waiting-shared-job",
+        "status": "waiting-shared-job",
+        "freshness_notice": "The ask is waiting on a governed Lane C refresh.",
+        "hybrid_refresh_triggered": True,
+        "hybrid_refresh_sources": [source_id],
+        "hybrid_refresh_snapshot_id": published_snapshot_id,
+        "hybrid_refresh_job_ids": [str(manifest["job_id"])],
+        "hybrid_refresh_summary": {
+            "mode": "ask-hybrid",
+            "work_path": work_path,
+            "recommended_target_count": len(normalized_targets),
+            "selected_source_id": source_id,
+            "caller_role": caller_role,
+        },
+        "attached_shared_job_ids": [str(manifest["job_id"])],
+    }
+    if caller_role in {"owner", "waiter"}:
+        record_run_event_if_present(
+            paths,
+            run_id=run_id,
+            stage="control-plane",
+            event_type="shared-job-waiting",
+            payload={"job_id": manifest.get("job_id"), "state": "waiting-shared-job"},
+        )
+    update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates=updates,
+    )
+    return {
+        "job_id": manifest.get("job_id"),
+        "job_key": manifest.get("job_key"),
+        "caller_role": caller_role,
+        "work_path": work_path,
+        "published_snapshot_id": published_snapshot_id,
+        "selected_source_id": source_id,
+    }
+
+
+def settle_lane_c_shared_refresh(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    job_id: str,
+    completion_status: str,
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Settle one governed Lane C shared job and persist turn-visible state."""
+    from .run_control import load_run_state
+
+    if completion_status not in {"covered", "blocked"}:
+        raise ValueError("Lane C completion_status must be `covered` or `blocked`.")
+    if completion_status == "covered":
+        manifest = complete_shared_job(paths, job_id, result=summary or {"status": "covered"})
+    else:
+        manifest = block_shared_job(paths, job_id, result=summary or {"status": "blocked"})
+    record_run_event_for_runs(
+        paths,
+        run_ids=manifest.get("attached_run_ids"),
+        stage="control-plane",
+        event_type="shared-job-settled",
+        payload={"job_id": manifest.get("job_id"), "status": manifest.get("status")},
+    )
+    scope = manifest.get("scope", {})
+    settled_snapshot_id = (
+        str(scope.get("published_snapshot_id"))
+        if isinstance(scope.get("published_snapshot_id"), str) and scope.get("published_snapshot_id")
+        else None
+    )
+    settled_source_id = (
+        str(scope.get("source_id"))
+        if isinstance(scope.get("source_id"), str) and scope.get("source_id")
+        else None
+    )
+    attached_turn_refs: list[tuple[str, str, str | None]] = []
+    seen_turns: set[tuple[str, str]] = set()
+    for attached_run_id in manifest.get("attached_run_ids", []):
+        if not isinstance(attached_run_id, str) or not attached_run_id:
+            continue
+        try:
+            run_state = load_run_state(paths, attached_run_id)
+        except FileNotFoundError:
+            continue
+        attached_conversation_id = run_state.get("conversation_id")
+        attached_turn_id = run_state.get("turn_id")
+        if (
+            isinstance(attached_conversation_id, str)
+            and attached_conversation_id
+            and isinstance(attached_turn_id, str)
+            and attached_turn_id
+            and (attached_conversation_id, attached_turn_id) not in seen_turns
+        ):
+            seen_turns.add((attached_conversation_id, attached_turn_id))
+            attached_turn_refs.append(
+                (attached_conversation_id, attached_turn_id, attached_run_id)
+            )
+    if (conversation_id, turn_id) not in seen_turns:
+        attached_turn_refs.append((conversation_id, turn_id, None))
+
+    settled_turns: list[dict[str, Any]] = []
+    common_updates = {
+        "hybrid_refresh_triggered": True,
+        "hybrid_refresh_sources": [settled_source_id] if settled_source_id else [],
+        "hybrid_refresh_snapshot_id": settled_snapshot_id,
+        "hybrid_refresh_completion_status": completion_status,
+        "hybrid_refresh_job_ids": [job_id],
+        "hybrid_refresh_summary": summary or {},
+        "attached_shared_job_ids": [job_id],
+    }
+    if completion_status == "covered":
+        for attached_conversation_id, attached_turn_id, _attached_run_id in attached_turn_refs:
+            settled_turns.append(
+                update_conversation_turn(
+                    paths,
+                    conversation_id=attached_conversation_id,
+                    turn_id=attached_turn_id,
+                    updates={
+                        **common_updates,
+                        "status": "prepared",
+                        "turn_state": "prepared",
+                        "freshness_notice": (
+                            "Lane C settled. Reretrieve and retrace before committing the answer."
+                        ),
+                    },
+                )
+            )
+        return {"manifest": manifest, "turns": settled_turns}
+
+    boundary_reason = str(
+        (summary or {}).get("detail")
+        or (summary or {}).get("reason")
+        or "The required multimodal source refresh could not continue safely."
+    )
+    for attached_conversation_id, attached_turn_id, _attached_run_id in attached_turn_refs:
+        settled_turns.append(
+            _commit_governed_boundary_turn(
+                paths,
+                conversation_id=attached_conversation_id,
+                turn_id=attached_turn_id,
+                reason=boundary_reason,
+                extra_turn_updates=common_updates,
+            )
+        )
+    return {"manifest": manifest, "turns": settled_turns}
+
+
+def _effective_turn_snapshot(
+    current_turn: dict[str, Any],
+    *,
+    session_ids: list[str],
+    trace_ids: list[str],
+    question_domain: str | None,
+    support_basis: str,
+    support_manifest_path: str | None,
+    render_inspection_required: Any,
+    inspection_scope: Any,
+    preferred_channels: list[str],
+    used_published_channels: list[str],
+    published_artifacts_sufficient: Any,
+    reference_resolution: dict[str, Any] | None,
+    reference_resolution_summary: Any,
+    source_escalation_required: Any,
+    source_escalation_reason: Any,
+    auto_sync_triggered: Any,
+    auto_sync_reason: Any,
+    auto_sync_summary: dict[str, Any] | None,
+    hybrid_refresh_triggered: Any,
+    hybrid_refresh_sources: list[str],
+    hybrid_refresh_completion_status: Any,
+    hybrid_refresh_summary: dict[str, Any] | None,
+    hybrid_refresh_snapshot_id: Any,
+    hybrid_refresh_job_ids: list[str],
+) -> dict[str, Any]:
+    snapshot = dict(current_turn)
+    snapshot.update(
+        {
+            "session_ids": session_ids,
+            "trace_ids": trace_ids,
+            "question_domain": question_domain,
+            "support_basis": support_basis,
+            "support_manifest_path": support_manifest_path,
+            "render_inspection_required": render_inspection_required,
+            "inspection_scope": inspection_scope,
+            "preferred_channels": preferred_channels,
+            "used_published_channels": used_published_channels,
+            "published_artifacts_sufficient": published_artifacts_sufficient,
+            "reference_resolution": reference_resolution,
+            "reference_resolution_summary": reference_resolution_summary,
+            "source_escalation_required": source_escalation_required,
+            "source_escalation_reason": source_escalation_reason,
+            "auto_sync_triggered": auto_sync_triggered,
+            "auto_sync_reason": auto_sync_reason,
+            "auto_sync_summary": auto_sync_summary,
+            "hybrid_refresh_triggered": hybrid_refresh_triggered,
+            "hybrid_refresh_sources": hybrid_refresh_sources,
+            "hybrid_refresh_completion_status": hybrid_refresh_completion_status,
+            "hybrid_refresh_summary": hybrid_refresh_summary,
+            "hybrid_refresh_snapshot_id": hybrid_refresh_snapshot_id,
+            "hybrid_refresh_job_ids": hybrid_refresh_job_ids,
+        }
+    )
+    return snapshot
+
+
+def _maybe_begin_lane_c_before_commit(
+    paths: WorkspacePaths,
+    *,
+    current_turn: dict[str, Any],
+    run_id: str | None,
+    latest_trace_payload: dict[str, Any],
+    effective_turn_snapshot: dict[str, Any],
+    inner_workflow_id: str,
+) -> dict[str, Any] | None:
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    if effective_turn_snapshot.get("question_domain") not in {"workspace-corpus", "composition"}:
+        return None
+    if effective_turn_snapshot.get("source_escalation_required") is not True:
+        return None
+    if effective_turn_snapshot.get("published_artifacts_sufficient") is not False:
+        return None
+    if effective_turn_snapshot.get("support_basis") in {
+        "external-source-verified",
+        "model-knowledge",
+        "governed-boundary",
+    }:
+        return None
+    if bool(effective_turn_snapshot.get("hybrid_refresh_triggered")):
+        return None
+    recommended_targets = [
+        item
+        for item in latest_trace_payload.get("recommended_hybrid_targets", [])
+        if isinstance(item, dict)
+    ]
+    if not recommended_targets:
+        raise ValueError(
+            "Lane C is required for this turn, but the trace payload does not include "
+            "recommended_hybrid_targets."
+        )
+    target = (
+        str(latest_trace_payload.get("target"))
+        if isinstance(latest_trace_payload.get("target"), str) and latest_trace_payload.get("target")
+        else "current"
+    )
+    begin_lane_c_shared_refresh(
+        paths,
+        conversation_id=str(current_turn["conversation_id"]),
+        turn_id=str(current_turn["turn_id"]),
+        run_id=run_id,
+        query=str(current_turn.get("user_question") or ""),
+        recommended_targets=recommended_targets,
+        target=target,
+    )
+    update_conversation_turn(
+        paths,
+        conversation_id=str(current_turn["conversation_id"]),
+        turn_id=str(current_turn["turn_id"]),
+        updates={
+            "session_ids": _resolved_string_list(effective_turn_snapshot.get("session_ids")),
+            "trace_ids": _resolved_string_list(effective_turn_snapshot.get("trace_ids")),
+            "question_domain": effective_turn_snapshot.get("question_domain"),
+            "support_basis": effective_turn_snapshot.get("support_basis"),
+            "support_manifest_path": effective_turn_snapshot.get("support_manifest_path"),
+            "render_inspection_required": effective_turn_snapshot.get("render_inspection_required"),
+            "inspection_scope": effective_turn_snapshot.get("inspection_scope"),
+            "preferred_channels": _resolved_string_list(
+                effective_turn_snapshot.get("preferred_channels")
+            ),
+            "used_published_channels": _resolved_string_list(
+                effective_turn_snapshot.get("used_published_channels")
+            ),
+            "published_artifacts_sufficient": effective_turn_snapshot.get(
+                "published_artifacts_sufficient"
+            ),
+            "reference_resolution": effective_turn_snapshot.get("reference_resolution"),
+            "reference_resolution_summary": effective_turn_snapshot.get(
+                "reference_resolution_summary"
+            ),
+            "source_escalation_required": effective_turn_snapshot.get(
+                "source_escalation_required"
+            ),
+            "source_escalation_reason": effective_turn_snapshot.get("source_escalation_reason"),
+        },
+    )
+    updated_turn = load_turn_record(
+        paths,
+        conversation_id=str(current_turn["conversation_id"]),
+        turn_id=str(current_turn["turn_id"]),
+    )
+    _sync_turn_log_artifacts(
+        paths,
+        conversation_id=str(current_turn["conversation_id"]),
+        turn_id=str(current_turn["turn_id"]),
+        run_id=run_id,
+        session_ids=_resolved_string_list(updated_turn.get("session_ids")),
+        trace_ids=_resolved_string_list(updated_turn.get("trace_ids")),
+        inner_workflow_id=inner_workflow_id,
+        native_turn_id=updated_turn.get("native_turn_id")
+        if isinstance(updated_turn.get("native_turn_id"), str)
+        else None,
+        semantic_log_context={
+            **semantic_log_context_from_record(updated_turn),
+            **semantic_log_context_fields(
+                question_domain=updated_turn.get("question_domain")
+                if isinstance(updated_turn.get("question_domain"), str)
+                else None,
+                support_basis=updated_turn.get("support_basis")
+                if isinstance(updated_turn.get("support_basis"), str)
+                else None,
+                support_manifest_path=updated_turn.get("support_manifest_path")
+                if isinstance(updated_turn.get("support_manifest_path"), str)
+                else None,
+            ),
+        },
+        answer_file_path=updated_turn.get("answer_file_path")
+        if isinstance(updated_turn.get("answer_file_path"), str)
+        else None,
+        answer_state=updated_turn.get("answer_state")
+        if isinstance(updated_turn.get("answer_state"), str)
+        else None,
+        render_inspection_required=updated_turn.get("render_inspection_required")
+        if isinstance(updated_turn.get("render_inspection_required"), bool)
+        else None,
+        inspection_scope=updated_turn.get("inspection_scope")
+        if isinstance(updated_turn.get("inspection_scope"), str)
+        else None,
+        preferred_channels=_resolved_string_list(updated_turn.get("preferred_channels")),
+        used_published_channels=_resolved_string_list(updated_turn.get("used_published_channels")),
+        published_artifacts_sufficient=updated_turn.get("published_artifacts_sufficient")
+        if isinstance(updated_turn.get("published_artifacts_sufficient"), bool)
+        else None,
+        reference_resolution=updated_turn.get("reference_resolution")
+        if isinstance(updated_turn.get("reference_resolution"), dict)
+        else None,
+        reference_resolution_summary=updated_turn.get("reference_resolution_summary")
+        if isinstance(updated_turn.get("reference_resolution_summary"), str)
+        else None,
+        source_escalation_required=updated_turn.get("source_escalation_required")
+        if isinstance(updated_turn.get("source_escalation_required"), bool)
+        else None,
+        source_escalation_reason=updated_turn.get("source_escalation_reason")
+        if isinstance(updated_turn.get("source_escalation_reason"), str)
+        else None,
+        hybrid_refresh_triggered=True,
+        hybrid_refresh_sources=_resolved_string_list(updated_turn.get("hybrid_refresh_sources")),
+        hybrid_refresh_completion_status=updated_turn.get("hybrid_refresh_completion_status")
+        if isinstance(updated_turn.get("hybrid_refresh_completion_status"), str)
+        else None,
+        hybrid_refresh_summary=updated_turn.get("hybrid_refresh_summary")
+        if isinstance(updated_turn.get("hybrid_refresh_summary"), dict)
+        else None,
+    )
+    return {
+        "conversation_id": str(current_turn["conversation_id"]),
+        "turn_id": str(current_turn["turn_id"]),
+        **updated_turn,
+    }
+
+
+def _prepared_turn_response(
+    *,
+    opened: dict[str, Any],
+    run_id: str,
+    inner_workflow_id: str,
+    question_class: str,
+    question_domain: str,
+    route_reason: str,
+    knowledge_base_missing: bool,
+    knowledge_base_stale: bool,
+    auto_prepare_triggered: bool,
+    auto_prepare_reason: str | None,
+    auto_prepare_summary: dict[str, Any] | None,
+    sync_suggested: bool,
+    auto_sync_triggered: bool,
+    auto_sync_reason: str | None,
+    auto_sync_summary: dict[str, Any] | None,
+    interaction_sync_suggested: bool,
+    interaction_snapshot: dict[str, Any],
+    memory_query_profile: dict[str, Any],
+    evidence_mode: str,
+    support_strategy: str,
+    evidence_requirements: dict[str, Any],
+    inspection_scope: str,
+    preferred_channels: list[str],
+    reference_resolution: dict[str, Any] | None,
+    reference_resolution_summary: str | None,
+    prefer_published_artifacts: bool,
+    analysis_origin: str,
+    normalized_semantic_analysis: dict[str, Any],
+    research_depth: str,
+    bundle_paths: list[str],
+    warm_start: dict[str, Any],
+    prefer_sync_before_answer: bool,
+    freshness_notice: str | None,
+    status: str,
+) -> dict[str, Any]:
+    return {
+        **opened,
+        "run_id": run_id,
+        "entry_workflow_id": "ask",
+        "inner_workflow_id": inner_workflow_id,
+        "question_class": question_class,
+        "question_domain": question_domain,
+        "route_reason": route_reason,
+        "knowledge_base_missing": knowledge_base_missing,
+        "knowledge_base_stale": knowledge_base_stale,
+        "auto_prepare_triggered": auto_prepare_triggered,
+        "auto_prepare_reason": auto_prepare_reason,
+        "auto_prepare_summary": auto_prepare_summary,
+        "sync_suggested": sync_suggested,
+        "sync_requested": auto_sync_triggered,
+        "auto_sync_triggered": auto_sync_triggered,
+        "auto_sync_reason": auto_sync_reason,
+        "auto_sync_summary": auto_sync_summary,
+        "interaction_sync_suggested": interaction_sync_suggested,
+        "pending_interaction_count": interaction_snapshot["pending_promotion_count"],
+        "memory_query_profile": memory_query_profile,
+        "evidence_mode": evidence_mode,
+        "support_strategy": support_strategy,
+        "evidence_requirements": evidence_requirements,
+        "inspection_scope": inspection_scope,
+        "preferred_channels": preferred_channels,
+        "reference_resolution": reference_resolution,
+        "reference_resolution_summary": reference_resolution_summary,
+        "prefer_published_artifacts": prefer_published_artifacts,
+        "analysis_origin": analysis_origin,
+        "semantic_analysis": normalized_semantic_analysis,
+        "research_depth": research_depth,
+        "bundle_paths": bundle_paths,
+        "warm_start_evidence": warm_start,
+        "prefer_sync_before_answer": prefer_sync_before_answer,
+        "freshness_notice": freshness_notice,
+        "status": status,
+        "log_context": build_log_context(
+            conversation_id=opened["conversation_id"],
+            turn_id=opened["turn_id"],
+            run_id=run_id,
+            entry_workflow_id="ask",
+            inner_workflow_id=inner_workflow_id,
+            question_class=question_class,
+            question_domain=question_domain,
+            support_strategy=support_strategy,
+            analysis_origin=analysis_origin,
+        ),
+    }
 
 
 def prepare_ask_turn(
@@ -291,6 +1137,17 @@ def prepare_ask_turn(
 ) -> dict[str, Any]:
     """Prepare one `ask` turn with routing, freshness guidance, and conversation linkage."""
     maybe_reconcile_active_thread(paths)
+    confirmation_resolution = _maybe_handle_confirmation_reply(
+        paths,
+        question=question,
+        semantic_analysis=semantic_analysis,
+    )
+    if confirmation_resolution is not None:
+        if confirmation_resolution[0] in {"declined", "blocked"}:
+            return dict(confirmation_resolution[1] or {})
+        question = confirmation_resolution[0]
+        if isinstance(confirmation_resolution[1], dict):
+            semantic_analysis = confirmation_resolution[1]
     opened = open_conversation_turn(paths, user_question=question, entry_workflow_id="ask")
     run_payload = ensure_run_for_turn(
         paths,
@@ -313,6 +1170,17 @@ def prepare_ask_turn(
     question_domain = str(profile["question_domain"])
     inner_workflow_id = str(profile["inner_workflow_id"])
     route_reason = str(profile["route_reason"])
+    record_run_event(
+        paths,
+        run_id=run_id,
+        stage="prepare",
+        event_type="preanswer-governance-started",
+        payload={
+            "question_class": question_class,
+            "question_domain": question_domain,
+            "inner_workflow_id": inner_workflow_id,
+        },
+    )
     interaction_relevance = interaction_overlay_relevance(
         paths,
         question,
@@ -360,6 +1228,11 @@ def prepare_ask_turn(
     auto_sync_triggered = False
     auto_sync_reason = None
     auto_sync_summary = None
+    control_plane_pause_state: str | None = None
+    attached_shared_job_ids: list[str] = []
+    confirmation_kind: str | None = None
+    confirmation_prompt: str | None = None
+    confirmation_reason: str | None = None
 
     if workspace_notices_enabled:
         (
@@ -368,7 +1241,29 @@ def prepare_ask_turn(
             auto_prepare_triggered,
             auto_prepare_reason,
             auto_prepare_summary,
-        ) = _ensure_workspace_environment(paths)
+        ) = _ensure_workspace_environment(paths, run_id=run_id)
+        control_plane = (
+            dict(auto_prepare_summary.get("control_plane", {}))
+            if isinstance(auto_prepare_summary, dict)
+            and isinstance(auto_prepare_summary.get("control_plane"), dict)
+            else {}
+        )
+        (
+            attached_shared_job_ids,
+            control_plane_pause_state,
+            confirmation_kind,
+            confirmation_prompt,
+            confirmation_reason,
+        ) = _apply_control_plane_pause(
+            paths,
+            run_id=run_id,
+            control_plane=control_plane,
+            attached_shared_job_ids=attached_shared_job_ids,
+            control_plane_pause_state=control_plane_pause_state,
+            confirmation_kind=confirmation_kind,
+            confirmation_prompt=confirmation_prompt,
+            confirmation_reason=confirmation_reason,
+        )
 
     if not knowledge_base["present"] and workspace_notices_enabled and not environment_ready:
         action_required = True
@@ -476,7 +1371,11 @@ def prepare_ask_turn(
             sync_auto_prepare_triggered,
             sync_auto_prepare_reason,
             sync_auto_prepare_summary,
-        ) = _ensure_workspace_environment(paths, require_sync_capability=True)
+        ) = _ensure_workspace_environment(
+            paths,
+            require_sync_capability=True,
+            run_id=run_id,
+        )
         if sync_auto_prepare_triggered:
             auto_prepare_triggered = True
             auto_prepare_reason = sync_auto_prepare_reason
@@ -496,14 +1395,53 @@ def prepare_ask_turn(
                 or "The workspace is not ready for an automatic sync."
             )
         else:
-            sync_result = sync_knowledge_base(paths)
+            sync_report = _sync_with_optional_owner(
+                paths,
+                assume_yes=False,
+                run_id=run_id,
+            )
+            sync_payload = dict(sync_report.payload)
             auto_sync_triggered = True
-            auto_sync_summary = _auto_sync_summary(sync_result)
-            knowledge_base = knowledge_base_snapshot(paths)
-            interaction_snapshot = interaction_ingest_snapshot(paths)
-            if sync_result.get("status") in {"valid", "warnings"} and bool(
-                sync_result.get("published")
+            auto_sync_summary = _auto_sync_summary(sync_payload)
+            control_plane = (
+                dict(sync_payload.get("control_plane", {}))
+                if isinstance(sync_payload.get("control_plane"), dict)
+                else {}
+            )
+            if control_plane.get("state") in {"awaiting-confirmation", "waiting-shared-job"}:
+                (
+                    attached_shared_job_ids,
+                    control_plane_pause_state,
+                    confirmation_kind,
+                    confirmation_prompt,
+                    confirmation_reason,
+                ) = _apply_control_plane_pause(
+                    paths,
+                    run_id=run_id,
+                    control_plane=control_plane,
+                    attached_shared_job_ids=attached_shared_job_ids,
+                    control_plane_pause_state=control_plane_pause_state,
+                    confirmation_kind=confirmation_kind,
+                    confirmation_prompt=confirmation_prompt,
+                    confirmation_reason=confirmation_reason,
+                )
+                freshness_notice = str(
+                    control_plane.get("confirmation_prompt")
+                    or sync_payload.get("detail")
+                    or "The ask is waiting on a shared sync job."
+                )
+                sync_suggested = True
+            elif sync_payload.get("sync_status") in {"valid", "warnings"} and bool(
+                sync_payload.get("published")
             ):
+                refresh_turn_run_version_truth(
+                    paths,
+                    conversation_id=opened["conversation_id"],
+                    turn_id=opened["turn_id"],
+                    run_id=run_id,
+                )
+                knowledge_base = knowledge_base_snapshot(paths)
+                interaction_snapshot = interaction_ingest_snapshot(paths)
                 freshness_notice = (
                     "The knowledge base was refreshed automatically before answering."
                 )
@@ -527,7 +1465,7 @@ def prepare_ask_turn(
                     "workspace evidence, but final publication did not succeed."
                 )
                 freshness_notice = str(
-                    sync_result.get("detail") or "Automatic sync did not complete."
+                    sync_payload.get("detail") or "Automatic sync did not complete."
                 )
     elif not knowledge_base["present"] and workspace_notices_enabled:
         action_required = True
@@ -553,7 +1491,14 @@ def prepare_ask_turn(
         )
     )
 
-    status = "action-required" if action_required else "prepared"
+    if control_plane_pause_state == "awaiting-confirmation":
+        status = "awaiting-confirmation"
+        if confirmation_prompt:
+            freshness_notice = confirmation_prompt
+    elif control_plane_pause_state == "waiting-shared-job":
+        status = "waiting-shared-job"
+    else:
+        status = "action-required" if action_required else "prepared"
     update_conversation_turn(
         paths,
         conversation_id=opened["conversation_id"],
@@ -584,6 +1529,11 @@ def prepare_ask_turn(
             "research_depth": research_depth,
             "bundle_paths": bundle_paths,
             "reused_previous_evidence": bool(warm_start.get("matched_records")),
+            "attached_shared_job_ids": attached_shared_job_ids,
+            "confirmation_kind": confirmation_kind,
+            "confirmation_prompt": confirmation_prompt,
+            "confirmation_reason": confirmation_reason,
+            "turn_state": status if status in {"awaiting-confirmation", "waiting-shared-job"} else "prepared",
             "status": status,
             "route_reason": route_reason,
             "freshness_notice": freshness_notice,
@@ -600,57 +1550,50 @@ def prepare_ask_turn(
             "status": status,
             "auto_prepare_triggered": auto_prepare_triggered,
             "auto_sync_triggered": auto_sync_triggered,
+            "attached_shared_job_ids": attached_shared_job_ids,
         },
     )
-    return {
-        **opened,
-        "run_id": run_id,
-        "entry_workflow_id": "ask",
-        "inner_workflow_id": inner_workflow_id,
-        "question_class": question_class,
-        "question_domain": question_domain,
-        "route_reason": route_reason,
-        "knowledge_base_missing": not knowledge_base["present"],
-        "knowledge_base_stale": knowledge_base["stale"],
-        "auto_prepare_triggered": auto_prepare_triggered,
-        "auto_prepare_reason": auto_prepare_reason,
-        "auto_prepare_summary": auto_prepare_summary,
-        "sync_suggested": sync_suggested,
-        "sync_requested": auto_sync_triggered,
-        "auto_sync_triggered": auto_sync_triggered,
-        "auto_sync_reason": auto_sync_reason,
-        "auto_sync_summary": auto_sync_summary,
-        "interaction_sync_suggested": interaction_sync_suggested,
-        "pending_interaction_count": interaction_snapshot["pending_promotion_count"],
-        "memory_query_profile": memory_query_profile,
-        "evidence_mode": evidence_mode,
-        "support_strategy": support_strategy,
-        "evidence_requirements": evidence_requirements,
-        "inspection_scope": inspection_scope,
-        "preferred_channels": preferred_channels,
-        "reference_resolution": reference_resolution,
-        "reference_resolution_summary": reference_resolution_summary,
-        "prefer_published_artifacts": prefer_published_artifacts,
-        "analysis_origin": analysis_origin,
-        "semantic_analysis": normalized_semantic_analysis,
-        "research_depth": research_depth,
-        "bundle_paths": bundle_paths,
-        "warm_start_evidence": warm_start,
-        "prefer_sync_before_answer": prefer_sync_before_answer,
-        "freshness_notice": freshness_notice,
-        "status": status,
-        "log_context": build_log_context(
-            conversation_id=opened["conversation_id"],
-            turn_id=opened["turn_id"],
-            run_id=run_id,
-            entry_workflow_id="ask",
-            inner_workflow_id=inner_workflow_id,
-            question_class=question_class,
-            question_domain=question_domain,
-            support_strategy=support_strategy,
-            analysis_origin=analysis_origin,
-        ),
-    }
+    response = _prepared_turn_response(
+        opened=opened,
+        run_id=run_id,
+        inner_workflow_id=inner_workflow_id,
+        question_class=question_class,
+        question_domain=question_domain,
+        route_reason=route_reason,
+        knowledge_base_missing=not knowledge_base["present"],
+        knowledge_base_stale=knowledge_base["stale"],
+        auto_prepare_triggered=auto_prepare_triggered,
+        auto_prepare_reason=auto_prepare_reason,
+        auto_prepare_summary=auto_prepare_summary,
+        sync_suggested=sync_suggested,
+        auto_sync_triggered=auto_sync_triggered,
+        auto_sync_reason=auto_sync_reason,
+        auto_sync_summary=auto_sync_summary,
+        interaction_sync_suggested=interaction_sync_suggested,
+        interaction_snapshot=interaction_snapshot,
+        memory_query_profile=memory_query_profile,
+        evidence_mode=evidence_mode,
+        support_strategy=support_strategy,
+        evidence_requirements=evidence_requirements,
+        inspection_scope=inspection_scope,
+        preferred_channels=preferred_channels,
+        reference_resolution=reference_resolution,
+        reference_resolution_summary=reference_resolution_summary,
+        prefer_published_artifacts=prefer_published_artifacts,
+        analysis_origin=analysis_origin,
+        normalized_semantic_analysis=normalized_semantic_analysis,
+        research_depth=research_depth,
+        bundle_paths=bundle_paths,
+        warm_start=warm_start,
+        prefer_sync_before_answer=prefer_sync_before_answer,
+        freshness_notice=freshness_notice,
+        status=status,
+    )
+    response["attached_shared_job_ids"] = attached_shared_job_ids
+    response["confirmation_kind"] = confirmation_kind
+    response["confirmation_prompt"] = confirmation_prompt
+    response["confirmation_reason"] = confirmation_reason
+    return response
 
 
 def complete_ask_turn(
@@ -686,16 +1629,32 @@ def complete_ask_turn(
     hybrid_refresh_sources: list[str] | None = None,
     hybrid_refresh_completion_status: str | None = None,
     hybrid_refresh_summary: dict[str, Any] | None = None,
+    hybrid_refresh_snapshot_id: str | None = None,
+    hybrid_refresh_job_ids: list[str] | None = None,
     status: str = "completed",
 ) -> dict[str, Any]:
     """Complete one `ask` turn after the routed workflow finishes."""
     current_turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
+    current_turn = {
+        "conversation_id": conversation_id,
+        "turn_id": turn_id,
+        **current_turn,
+    }
     run_id = (
         str(current_turn.get("active_run_id"))
         if isinstance(current_turn.get("active_run_id"), str) and current_turn.get("active_run_id")
         else None
     )
-    effective_trace_ids = trace_ids or current_turn.get("trace_ids")
+    resolved_session_ids = (
+        _resolved_string_list(session_ids)
+        if session_ids is not None
+        else _resolved_string_list(current_turn.get("session_ids"))
+    )
+    effective_trace_ids = (
+        _resolved_string_list(trace_ids)
+        if trace_ids is not None
+        else _resolved_string_list(current_turn.get("trace_ids"))
+    )
     latest_trace_payload = _latest_trace_record(paths, effective_trace_ids)
     resolved_question_domain = _resolve_scalar(
         question_domain,
@@ -818,6 +1777,18 @@ def complete_ask_turn(
         current_turn,
         "hybrid_refresh_summary",
     )
+    resolved_hybrid_refresh_snapshot_id = _resolve_scalar(
+        hybrid_refresh_snapshot_id,
+        latest_trace_payload,
+        current_turn,
+        "hybrid_refresh_snapshot_id",
+    )
+    resolved_hybrid_refresh_job_ids = _resolve_list(
+        hybrid_refresh_job_ids,
+        latest_trace_payload,
+        current_turn,
+        "hybrid_refresh_job_ids",
+    )
     effective_support_basis = (
         resolved_support_basis
         if isinstance(resolved_support_basis, str)
@@ -830,7 +1801,10 @@ def complete_ask_turn(
     effective_answer_state = (
         resolved_answer_state
         if isinstance(resolved_answer_state, str)
-        else (
+        else ("abstained" if effective_support_basis == "governed-boundary" else None)
+    )
+    if effective_answer_state is None:
+        effective_answer_state = (
             "grounded"
             if effective_support_basis == "external-source-verified"
             and isinstance(resolved_support_manifest_path, str)
@@ -843,7 +1817,6 @@ def complete_ask_turn(
                 else "unresolved"
             )
         )
-    )
     if (
         effective_support_basis == "external-source-verified"
         and not resolved_support_manifest_path
@@ -868,6 +1841,87 @@ def complete_ask_turn(
         and resolved_support_manifest_path
     ):
         effective_answer_state = "grounded"
+    effective_turn_snapshot = _effective_turn_snapshot(
+        current_turn,
+        session_ids=resolved_session_ids,
+        trace_ids=effective_trace_ids,
+        question_domain=resolved_question_domain
+        if isinstance(resolved_question_domain, str)
+        else None,
+        support_basis=effective_support_basis,
+        support_manifest_path=resolved_support_manifest_path
+        if isinstance(resolved_support_manifest_path, str)
+        else None,
+        render_inspection_required=resolved_render_inspection_required,
+        inspection_scope=resolved_inspection_scope,
+        preferred_channels=resolved_preferred_channels,
+        used_published_channels=resolved_used_published_channels,
+        published_artifacts_sufficient=resolved_published_artifacts_sufficient,
+        reference_resolution=resolved_reference_resolution,
+        reference_resolution_summary=resolved_reference_resolution_summary,
+        source_escalation_required=resolved_source_escalation_required,
+        source_escalation_reason=resolved_source_escalation_reason,
+        auto_sync_triggered=resolved_auto_sync_triggered,
+        auto_sync_reason=resolved_auto_sync_reason,
+        auto_sync_summary=resolved_auto_sync_summary,
+        hybrid_refresh_triggered=resolved_hybrid_refresh_triggered,
+        hybrid_refresh_sources=resolved_hybrid_refresh_sources,
+        hybrid_refresh_completion_status=resolved_hybrid_refresh_completion_status,
+        hybrid_refresh_summary=resolved_hybrid_refresh_summary,
+        hybrid_refresh_snapshot_id=resolved_hybrid_refresh_snapshot_id,
+        hybrid_refresh_job_ids=resolved_hybrid_refresh_job_ids,
+    )
+    lane_c_transition = _maybe_begin_lane_c_before_commit(
+        paths,
+        current_turn=current_turn,
+        run_id=run_id,
+        latest_trace_payload=latest_trace_payload,
+        effective_turn_snapshot=effective_turn_snapshot,
+        inner_workflow_id=inner_workflow_id,
+    )
+    if lane_c_transition is not None:
+        return lane_c_transition
+    admissibility_gate_result = evaluate_commit_admissibility(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        run_id=run_id,
+        turn_snapshot=effective_turn_snapshot,
+        answer_file_path=(
+            resolved_answer_file_path if isinstance(resolved_answer_file_path, str) else None
+        ),
+        answer_state=effective_answer_state,
+        support_basis=effective_support_basis,
+        support_manifest_path=(
+            resolved_support_manifest_path
+            if isinstance(resolved_support_manifest_path, str)
+            else None
+        ),
+        trace_ids=effective_trace_ids,
+    )
+    if effective_trace_ids:
+        record_run_event_if_present(
+            paths,
+            run_id=run_id,
+            stage="trace",
+            event_type="trace-completed",
+            payload={"trace_ids": effective_trace_ids},
+        )
+    record_run_event_if_present(
+        paths,
+        run_id=run_id,
+        stage="admissibility",
+        event_type=(
+            "admissibility-passed"
+            if admissibility_gate_result["allowed"]
+            else "admissibility-failed"
+        ),
+        payload={"issues": admissibility_gate_result.get("issues", [])},
+    )
+    if not admissibility_gate_result["allowed"]:
+        raise ValueError(
+            str(admissibility_gate_result.get("reason") or "The turn is not commit-admissible.")
+        )
     updated = commit_run(
         paths,
         conversation_id=conversation_id,
@@ -884,10 +1938,11 @@ def complete_ask_turn(
             resolved_answer_file_path if isinstance(resolved_answer_file_path, str) else None
         ),
         response_excerpt=response_excerpt,
+        admissibility_gate_result=admissibility_gate_result,
         turn_updates={
             "inner_workflow_id": inner_workflow_id,
-            "session_ids": session_ids or [],
-            "trace_ids": effective_trace_ids or [],
+            "session_ids": resolved_session_ids,
+            "trace_ids": effective_trace_ids,
             "answer_state": effective_answer_state,
             "render_inspection_required": resolved_render_inspection_required,
             "sync_requested": sync_requested,
@@ -910,6 +1965,8 @@ def complete_ask_turn(
             "hybrid_refresh_sources": resolved_hybrid_refresh_sources,
             "hybrid_refresh_completion_status": resolved_hybrid_refresh_completion_status,
             "hybrid_refresh_summary": resolved_hybrid_refresh_summary,
+            "hybrid_refresh_snapshot_id": resolved_hybrid_refresh_snapshot_id,
+            "hybrid_refresh_job_ids": resolved_hybrid_refresh_job_ids,
             "evidence_mode": evidence_mode,
             "research_depth": research_depth,
             "bundle_paths": bundle_paths or [],
@@ -920,8 +1977,8 @@ def complete_ask_turn(
         conversation_id=conversation_id,
         turn_id=turn_id,
         run_id=run_id,
-        session_ids=session_ids or [],
-        trace_ids=effective_trace_ids or [],
+        session_ids=resolved_session_ids,
+        trace_ids=effective_trace_ids,
         inner_workflow_id=inner_workflow_id,
         native_turn_id=updated.get("native_turn_id")
         if isinstance(updated.get("native_turn_id"), str)
@@ -990,4 +2047,11 @@ def complete_ask_turn(
         hybrid_refresh_summary=resolved_hybrid_refresh_summary,
     )
     refresh_runtime_projections(paths)
+    record_run_event_if_present(
+        paths,
+        run_id=run_id,
+        stage="projection",
+        event_type="projection-refreshed",
+        payload={"conversation_id": conversation_id, "turn_id": turn_id},
+    )
     return updated

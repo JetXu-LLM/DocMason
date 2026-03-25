@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _safe_python_executable() -> str:
+    framework_python = (
+        Path(sys.exec_prefix) / "Resources" / "Python.app" / "Contents" / "MacOS" / "Python"
+    )
+    if framework_python.exists():
+        return str(framework_python)
+    return sys.executable
+
+
+PYTHON = _safe_python_executable()
 
 
 class DistributionAndPrivacyTests(unittest.TestCase):
@@ -22,7 +35,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             target.mkdir()
             result = subprocess.run(
                 [
-                    "python3",
+                    PYTHON,
                     str(ROOT / "scripts" / "use-sample-corpus.py"),
                     "--repo-root",
                     str(ROOT),
@@ -44,7 +57,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             tempdir = Path(tempdir_name)
             result = subprocess.run(
                 [
-                    "python3",
+                    PYTHON,
                     str(ROOT / "scripts" / "build-distributions.py"),
                     "--repo-root",
                     str(ROOT),
@@ -163,7 +176,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
 
             result = subprocess.run(
                 [
-                    "python3",
+                    PYTHON,
                     str(ROOT / "scripts" / "update-docmason-core.py"),
                     "--workspace",
                     str(workspace),
@@ -183,7 +196,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
 
     def test_repo_safety_check_passes_for_current_tree(self) -> None:
         result = subprocess.run(
-            ["python3", str(ROOT / "scripts" / "check-repo-safety.py"), "--repo-root", str(ROOT)],
+            [PYTHON, str(ROOT / "scripts" / "check-repo-safety.py"), "--repo-root", str(ROOT)],
             check=False,
             capture_output=True,
             text=True,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,18 @@ from pathlib import Path
 from tests.support_public_corpus import build_public_markdown_workspace
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _safe_python_executable() -> str:
+    framework_python = (
+        Path(sys.exec_prefix) / "Resources" / "Python.app" / "Contents" / "MacOS" / "Python"
+    )
+    if framework_python.exists():
+        return str(framework_python)
+    return sys.executable
+
+
+PYTHON = _safe_python_executable()
 
 
 class PublicCorpusSyncAndMaterializationTests(unittest.TestCase):
@@ -53,7 +66,7 @@ class PublicCorpusSyncAndMaterializationTests(unittest.TestCase):
             target.mkdir()
             result = subprocess.run(
                 [
-                    "python3",
+                    PYTHON,
                     str(ROOT / "scripts" / "use-sample-corpus.py"),
                     "--repo-root",
                     str(ROOT),
@@ -84,7 +97,7 @@ class PublicCorpusSyncAndMaterializationTests(unittest.TestCase):
             (target / "private.txt").write_text("secret\n", encoding="utf-8")
             result = subprocess.run(
                 [
-                    "python3",
+                    PYTHON,
                     str(ROOT / "scripts" / "use-sample-corpus.py"),
                     "--repo-root",
                     str(ROOT),

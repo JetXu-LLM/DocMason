@@ -176,6 +176,7 @@ SUPPORTED_STAGES = (
     "foundation-only",
     "workspace-bootstrapped",
     "adapter-ready",
+    "control-plane-pending-confirmation",
     "knowledge-base-invalid",
     "knowledge-base-present",
     "knowledge-base-stale",
@@ -257,12 +258,40 @@ class WorkspacePaths:
         return self.runtime_dir / "dependency_state.json"
 
     @property
+    def control_plane_dir(self) -> Path:
+        return self.runtime_dir / "control_plane"
+
+    @property
+    def workspace_state_path(self) -> Path:
+        return self.control_plane_dir / "workspace_state.json"
+
+    @property
+    def shared_jobs_dir(self) -> Path:
+        return self.control_plane_dir / "shared_jobs"
+
+    @property
+    def shared_jobs_index_path(self) -> Path:
+        return self.shared_jobs_dir / "index.json"
+
+    @property
+    def projection_state_path(self) -> Path:
+        return self.control_plane_dir / "projection_state.json"
+
+    @property
     def runs_dir(self) -> Path:
         return self.runtime_dir / "runs"
 
     @property
     def coordination_dir(self) -> Path:
         return self.runtime_dir / "coordination"
+
+    @property
+    def state_dir(self) -> Path:
+        return self.runtime_dir / "state"
+
+    @property
+    def live_conversations_dir(self) -> Path:
+        return self.state_dir / "conversations"
 
     @property
     def logs_dir(self) -> Path:
@@ -278,6 +307,10 @@ class WorkspacePaths:
 
     @property
     def conversations_dir(self) -> Path:
+        return self.live_conversations_dir
+
+    @property
+    def conversation_projections_dir(self) -> Path:
         return self.logs_dir / "conversations"
 
     @property
@@ -350,6 +383,10 @@ class WorkspacePaths:
 
     @property
     def active_conversation_path(self) -> Path:
+        return self.state_dir / "active_conversation.json"
+
+    @property
+    def legacy_active_conversation_path(self) -> Path:
         return self.runtime_dir / "active_conversation.json"
 
     @property

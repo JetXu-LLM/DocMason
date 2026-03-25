@@ -216,14 +216,22 @@ def warm_start_evidence(
     limit: int = 3,
 ) -> dict[str, Any]:
     """Return evidence pointers from similar historical answers without reusing answer text."""
+    from .conversation import current_corpus_signature
+
     history = read_json(paths.answer_history_index_path).get("records", [])
     if not isinstance(history, list):
+        return {"matched_records": [], "session_ids": [], "trace_ids": [], "external_urls": []}
+    current_signature = current_corpus_signature(paths)
+    require_exact_corpus_match = question_domain in {"workspace-corpus", "composition"}
+    if require_exact_corpus_match and not isinstance(current_signature, str):
         return {"matched_records": [], "session_ids": [], "trace_ids": [], "external_urls": []}
     scored: list[tuple[int, dict[str, Any]]] = []
     for record in history:
         if not isinstance(record, dict):
             continue
         if record.get("question_domain") != question_domain:
+            continue
+        if require_exact_corpus_match and record.get("corpus_signature") != current_signature:
             continue
         score = _answer_history_similarity(question, str(record.get("question_text", "")))
         if score <= 1:
@@ -256,6 +264,8 @@ def warm_start_evidence(
                 "support_strategy": record.get("support_strategy"),
                 "analysis_origin": record.get("analysis_origin"),
                 "support_basis": record.get("support_basis"),
+                "corpus_signature": record.get("corpus_signature"),
+                "published_snapshot_id": record.get("published_snapshot_id"),
                 "session_ids": record.get("session_ids", []),
                 "trace_ids": record.get("trace_ids", []),
                 "external_urls": record.get("external_urls", []),

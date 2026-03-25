@@ -78,11 +78,19 @@ class SourceBuildTextTests(unittest.TestCase):
         write_json(
             workspace.bootstrap_state_path,
             {
+                "schema_version": 2,
+                "status": "ready",
                 "prepared_at": "2026-03-19T00:00:00Z",
+                "environment_ready": True,
+                "workspace_root": str(workspace.root.resolve()),
                 "package_manager": "uv",
                 "python_executable": "/usr/bin/python3",
                 "venv_python": ".venv/bin/python",
                 "editable_install": True,
+                "editable_install_detail": "Editable install resolves to the workspace source tree.",
+                "office_renderer_ready": True,
+                "pdf_renderer_ready": True,
+                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
             },
         )
 
@@ -592,6 +600,11 @@ class SourceBuildTextTests(unittest.TestCase):
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.seed_text_sources(workspace)
+        for index in range(1, 4):
+            (workspace.source_dir / f"extra-{index}.txt").write_text(
+                f"Extra supporting note {index}.\n",
+                encoding="utf-8",
+            )
         source_ids = self.publish_seeded_text_corpus(workspace)
         markdown_source_id = source_ids["original_doc/architecture.md"]
 

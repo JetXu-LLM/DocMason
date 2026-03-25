@@ -78,10 +78,22 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["version_context"] = None
     if "capability_profile" not in turn:
         turn["capability_profile"] = None
+    if "attached_shared_job_ids" not in turn:
+        turn["attached_shared_job_ids"] = []
+    if "confirmation_kind" not in turn:
+        turn["confirmation_kind"] = None
+    if "confirmation_prompt" not in turn:
+        turn["confirmation_prompt"] = None
+    if "confirmation_reason" not in turn:
+        turn["confirmation_reason"] = None
     if "hybrid_refresh_triggered" not in turn:
         turn["hybrid_refresh_triggered"] = False
     if "hybrid_refresh_sources" not in turn:
         turn["hybrid_refresh_sources"] = []
+    if "hybrid_refresh_snapshot_id" not in turn:
+        turn["hybrid_refresh_snapshot_id"] = None
+    if "hybrid_refresh_job_ids" not in turn:
+        turn["hybrid_refresh_job_ids"] = []
     if "hybrid_refresh_completion_status" not in turn:
         turn["hybrid_refresh_completion_status"] = None
     if "hybrid_refresh_summary" not in turn:
@@ -221,7 +233,16 @@ def native_conversation_id() -> tuple[str | None, str | None]:
 
 
 def _load_active_conversation(paths: WorkspacePaths) -> dict[str, Any]:
-    return read_json(paths.active_conversation_path)
+    active = read_json(paths.active_conversation_path)
+    if active:
+        return active
+    return read_json(paths.legacy_active_conversation_path)
+
+
+def _conversation_record_exists(paths: WorkspacePaths, conversation_id: str) -> bool:
+    return conversation_path(paths, conversation_id).exists() or legacy_conversation_path(
+        paths, conversation_id
+    ).exists()
 
 
 def resolve_conversation_id(paths: WorkspacePaths, *, agent_surface: str) -> tuple[str, str]:
@@ -230,7 +251,7 @@ def resolve_conversation_id(paths: WorkspacePaths, *, agent_surface: str) -> tup
     if native_id is not None and native_source is not None:
         return native_id, native_source
 
-    active = _load_active_conversation(paths)
+    active = read_json(paths.active_conversation_path)
     active_id = active.get("conversation_id")
     active_agent = active.get("agent_surface")
     updated_at = _parse_timestamp(active.get("updated_at"))
@@ -242,12 +263,25 @@ def resolve_conversation_id(paths: WorkspacePaths, *, agent_surface: str) -> tup
         and datetime.now(tz=UTC) - updated_at <= ACTIVE_CONVERSATION_IDLE_WINDOW
     ):
         return active_id, "workspace-active-fallback"
+    legacy_active = read_json(paths.legacy_active_conversation_path)
+    legacy_id = legacy_active.get("conversation_id")
+    if (
+        isinstance(legacy_id, str)
+        and legacy_id
+        and _conversation_record_exists(paths, legacy_id)
+    ):
+        return legacy_id, "workspace-active-fallback"
     return str(uuid.uuid4()), "generated"
 
 
 def conversation_path(paths: WorkspacePaths, conversation_id: str) -> Path:
     """Return the runtime path for one parent conversation record."""
     return paths.conversations_dir / f"{conversation_id}.json"
+
+
+def legacy_conversation_path(paths: WorkspacePaths, conversation_id: str) -> Path:
+    """Return the legacy projection path for one parent conversation record."""
+    return paths.conversation_projections_dir / f"{conversation_id}.json"
 
 
 def answer_file_path(paths: WorkspacePaths, *, conversation_id: str, turn_id: str) -> Path:
@@ -258,6 +292,8 @@ def answer_file_path(paths: WorkspacePaths, *, conversation_id: str, turn_id: st
 def load_conversation_record(paths: WorkspacePaths, conversation_id: str) -> dict[str, Any]:
     """Load one persisted conversation record."""
     conversation = read_json(conversation_path(paths, conversation_id))
+    if not conversation:
+        conversation = read_json(legacy_conversation_path(paths, conversation_id))
     turns = conversation.get("turns")
     if isinstance(turns, list):
         conversation["turns"] = [
@@ -286,6 +322,10 @@ def base_turn_record(
         "turn_state": "opened",
         "version_context": None,
         "capability_profile": None,
+        "attached_shared_job_ids": [],
+        "confirmation_kind": None,
+        "confirmation_prompt": None,
+        "confirmation_reason": None,
         "opened_at": now,
         "updated_at": now,
         "completed_at": None,
@@ -301,6 +341,8 @@ def base_turn_record(
         "auto_sync_summary": None,
         "hybrid_refresh_triggered": False,
         "hybrid_refresh_sources": [],
+        "hybrid_refresh_snapshot_id": None,
+        "hybrid_refresh_job_ids": [],
         "hybrid_refresh_completion_status": None,
         "hybrid_refresh_summary": None,
         "session_ids": [],
@@ -353,6 +395,9 @@ def ensure_conversation_record(
     now = utc_now()
     conversation = load_conversation_record(paths, conversation_id)
     if conversation:
+        if not conversation_path(paths, conversation_id).exists():
+            ensure_json_parent(conversation_path(paths, conversation_id))
+            write_json(conversation_path(paths, conversation_id), conversation)
         return conversation
     conversation = {
         "conversation_id": conversation_id,
@@ -409,6 +454,8 @@ def find_reusable_open_turn_index(
     updated_at = _parse_timestamp(latest_turn.get("updated_at"))
     if updated_at is None or datetime.now(tz=UTC) - updated_at > OPEN_TURN_REUSE_WINDOW:
         return None
+    if latest_turn.get("turn_state") in {"awaiting-confirmation", "waiting-shared-job"}:
+        return len(turns) - 1
     if latest_turn.get("response_excerpt"):
         return None
     if latest_turn.get("session_ids") or latest_turn.get("trace_ids"):
@@ -545,6 +592,8 @@ def update_conversation_turn(
     with workspace_lease(paths, _conversation_resource(conversation_id)):
         conversation = read_json(path)
         if not conversation:
+            conversation = read_json(legacy_conversation_path(paths, conversation_id))
+        if not conversation:
             raise FileNotFoundError(path)
         turns = conversation.get("turns", [])
         if not isinstance(turns, list):
@@ -559,7 +608,13 @@ def update_conversation_turn(
             raise KeyError(turn_id)
 
         for key, value in updates.items():
-            if key in {"session_ids", "trace_ids", "captured_interaction_ids", "bundle_paths"}:
+            if key in {
+                "session_ids",
+                "trace_ids",
+                "captured_interaction_ids",
+                "bundle_paths",
+                "attached_shared_job_ids",
+            }:
                 current_values = updated_turn.get(key, [])
                 if not isinstance(current_values, list):
                     current_values = []
