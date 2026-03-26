@@ -14,6 +14,7 @@ from docmason.commands import doctor_workspace, status_workspace, sync_workspace
 from docmason.email_sources import parse_email_source
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import retrieve_corpus, trace_source
+from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,25 +56,9 @@ class SourceBuildEmailTests(unittest.TestCase):
         return WorkspacePaths(root=root)
 
     def mark_environment_ready(self, workspace: WorkspacePaths) -> None:
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "schema_version": 2,
-                "status": "ready",
-                "prepared_at": "2026-03-19T00:00:00Z",
-                "environment_ready": True,
-                "workspace_root": str(workspace.root.resolve()),
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-            },
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-19T00:00:00Z",
         )
 
     def make_email(

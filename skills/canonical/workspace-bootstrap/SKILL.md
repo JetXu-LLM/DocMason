@@ -23,9 +23,12 @@ If the agent cannot perform these capabilities, stop and explain that the enviro
    - if it already says the current workspace root is ready and `.venv` still exists, do not
      rerun deep bootstrap work by default
    - if it belongs to another workspace root, treat that as a moved-repo repair case
+   - treat `self-contained` as the only ordinary ask-time ready environment grade
+   - treat `mixed` and `degraded` as repair-needed states
 2. If `.venv` is absent or `docmason` is not yet runnable from the repo-local environment, start with:
    - `./scripts/bootstrap-workspace.sh --yes`
    - add `--json` when machine-readable output helps
+   - the launcher should only choose a bootstrap Python and delegate to `docmason prepare --yes`
 3. Once the launcher succeeds, prefer the repo-local environment for subsequent commands:
    - `./.venv/bin/python -m docmason doctor --json`
    - `./.venv/bin/python -m docmason prepare --json --yes`
@@ -61,10 +64,10 @@ If the agent cannot perform these capabilities, stop and explain that the enviro
 - `prepare` bootstraps repo-local state only.
 - `./scripts/bootstrap-workspace.sh --yes` is the preferred zero-to-working launcher from a raw checkout because it can prepare `.venv` before the package is importable from the `src/` layout.
 - `runtime/bootstrap_state.json` is the cached ready marker that ordinary ask-time work should reuse.
+- The steady-state runtime is repo-local managed Python `3.13` under `.docmason/toolchain/python/`.
 - On the native Codex path, bootstrap should refresh repo-local skill shims under `.agents/skills/` rather than writing into `~/.codex/skills`.
-- The preferred package workflow is `uv`, but `venv` plus `pip` is the supported fallback.
-- On macOS, prefer installing `uv` with Homebrew when Homebrew is already available because that usually gives the cleanest PATH behavior for non-technical users.
-- When Homebrew is not available, a user-scoped `pip` installation for `uv` is an acceptable fallback.
+- `prepare` may use shared/system Python only as a bootstrap or repair helper; ordinary steady-state commands should not depend on it.
+- When `uv` is missing, `prepare` should provision the repo-local bootstrap helper venv under `.docmason/toolchain/bootstrap/venv` and install `uv` there.
 - On the native macOS path, `prepare --yes` should auto-attempt supported installs such as uv and LibreOffice rather than pushing those steps back to the user.
 - After preparation, prefer `./.venv/bin/python -m docmason ...` or the CLI installed inside `.venv` for ordinary workspace operations.
 - For Office rendering, DocMason detects the standard macOS `soffice` path inside `/Applications/LibreOffice.app/Contents/MacOS/soffice`, so shell-profile changes are usually unnecessary.

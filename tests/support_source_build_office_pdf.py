@@ -41,6 +41,7 @@ from docmason.knowledge import (
 )
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.semantic_overlays import semantic_overlay_candidates
+from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 
 class SourceBuildOfficePdfTests(unittest.TestCase):
@@ -79,25 +80,9 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         return True, "Editable install resolves to the workspace source tree."
 
     def mark_environment_ready(self, workspace: WorkspacePaths) -> None:
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "schema_version": 2,
-                "status": "ready",
-                "prepared_at": "2026-03-16T00:00:00Z",
-                "environment_ready": True,
-                "workspace_root": str(workspace.root.resolve()),
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-            },
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-16T00:00:00Z",
         )
 
     def create_pdf(self, path: Path) -> None:

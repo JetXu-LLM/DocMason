@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections import Counter, defaultdict
@@ -44,6 +45,10 @@ ROLE_HINT_PATTERNS = {
     "overview-like": ("overview", "summary", "at a glance"),
     "appendix-like": ("appendix", "backup"),
 }
+_PYMUPDF_LOGGER = logging.getLogger("docmason.pymupdf")
+_PYMUPDF_LOGGER.addHandler(logging.NullHandler())
+_PYMUPDF_LOGGER.propagate = False
+
 MONTH_TOKENS = (
     "jan",
     "feb",
@@ -215,7 +220,11 @@ def _configure_pymupdf_console_output(pymupdf: Any) -> None:
     except Exception:
         pass
     try:
-        pymupdf.set_messages(path=os.devnull)
+        pymupdf.set_messages(
+            pylogging=True,
+            pylogging_logger=_PYMUPDF_LOGGER,
+            pylogging_level=logging.WARNING,
+        )
     except Exception:
         pass
 

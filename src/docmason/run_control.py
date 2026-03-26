@@ -10,6 +10,13 @@ from .contracts import validate_commit_contract
 from .project import WorkspacePaths, append_jsonl, read_json, write_json
 
 RUN_WORKFLOW_VERSION = "phase-1-run-control"
+RUN_ORIGIN_NATIVE_RECONCILIATION = "native-reconciliation"
+RUN_ORIGIN_ASK_FRONT_DOOR = "ask-front-door"
+_RUN_ORIGIN_PRIORITY = {
+    None: 0,
+    RUN_ORIGIN_NATIVE_RECONCILIATION: 1,
+    RUN_ORIGIN_ASK_FRONT_DOOR: 2,
+}
 
 
 def run_dir(paths: WorkspacePaths, run_id: str) -> Path:
@@ -147,6 +154,25 @@ def update_run_state(paths: WorkspacePaths, *, run_id: str, updates: dict[str, A
     return state
 
 
+def normalize_run_origin(value: Any) -> str | None:
+    """Normalize one run-origin value into the supported contract."""
+    if isinstance(value, str) and value in {
+        RUN_ORIGIN_NATIVE_RECONCILIATION,
+        RUN_ORIGIN_ASK_FRONT_DOOR,
+    }:
+        return value
+    return None
+
+
+def stronger_run_origin(current: Any, candidate: Any) -> str | None:
+    """Return the stronger run-origin value without demotion."""
+    current_origin = normalize_run_origin(current)
+    candidate_origin = normalize_run_origin(candidate)
+    if _RUN_ORIGIN_PRIORITY[candidate_origin] > _RUN_ORIGIN_PRIORITY[current_origin]:
+        return candidate_origin
+    return current_origin
+
+
 def attach_shared_job_to_run(
     paths: WorkspacePaths,
     *,
@@ -214,6 +240,7 @@ def ensure_run_for_turn(
     turn_id: str,
     user_question: str,
     entry_workflow_id: str = "ask",
+    run_origin: str | None = None,
 ) -> dict[str, Any]:
     """Create or reuse the governed run for one canonical turn."""
     from .conversation import load_turn_record, update_conversation_turn, utc_now
@@ -226,7 +253,16 @@ def ensure_run_for_turn(
         turn = {}
     existing_run_id = turn.get("active_run_id") or turn.get("committed_run_id")
     if isinstance(existing_run_id, str) and existing_run_id and load_run_state(paths, existing_run_id):
-        return load_run_state(paths, existing_run_id)
+        existing_state = load_run_state(paths, existing_run_id)
+        requested_origin = normalize_run_origin(run_origin)
+        effective_origin = stronger_run_origin(existing_state.get("run_origin"), requested_origin)
+        if effective_origin != normalize_run_origin(existing_state.get("run_origin")):
+            existing_state = update_run_state(
+                paths,
+                run_id=existing_run_id,
+                updates={"run_origin": effective_origin},
+            )
+        return existing_state
 
     run_id = str(uuid.uuid4())
     payload = {
@@ -248,6 +284,7 @@ def ensure_run_for_turn(
         "admissibility_gate_result": None,
         "published_snapshot_id_used": None,
         "published_source_signature_used": None,
+        "run_origin": normalize_run_origin(run_origin),
     }
     run_dir(paths, run_id).mkdir(parents=True, exist_ok=True)
     write_json(run_state_path(paths, run_id), payload)

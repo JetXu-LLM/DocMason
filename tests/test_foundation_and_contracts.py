@@ -237,6 +237,61 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("original_doc/", text)
         self.assertIn("knowledge_base/", text)
 
+    def test_front_door_contract_surfaces_are_current_and_explicit(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        ask_skill = (ROOT / "skills" / "canonical" / "ask" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        answer_skill = (
+            ROOT / "skills" / "canonical" / "grounded-answer" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        composition_skill = (
+            ROOT / "skills" / "canonical" / "grounded-composition" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        trace_skill = (
+            ROOT / "skills" / "canonical" / "provenance-trace" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        retrieval_skill = (
+            ROOT / "skills" / "canonical" / "retrieval-workflow" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        review_skill = (
+            ROOT / "skills" / "canonical" / "runtime-log-review" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        orchestration_doc = (
+            ROOT / "docs" / "workflows" / "execution-orchestration.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("`ask` remains the only ordinary natural-language front door", agents)
+        self.assertIn("`rg --files`", agents)
+        self.assertIn("do not guess how this repository should map onto your platform", agents)
+        self.assertIn("what you are, or which assistant is operating here", agents)
+        self.assertIn("canonical self-reference contract", agents)
+        self.assertIn("Final user-facing replies should normally match the user's language", agents)
+        self.assertIn("Do not commit or expose private corpus inputs", agents)
+        self.assertIn("inspect the matching canonical skill instead of guessing from memory", agents)
+        self.assertNotIn("## Procedure", agents)
+        self.assertNotIn("## Completion Signal", agents)
+        self.assertLess(
+            len(agents.splitlines()),
+            len(ask_skill.splitlines())
+            + len(answer_skill.splitlines())
+            + len(composition_skill.splitlines()),
+        )
+        self.assertIn("Reading this skill is not legal ask execution.", ask_skill)
+        self.assertIn("Native-thread reconciliation is not legal ask execution.", ask_skill)
+        self.assertIn("The routed inner workflow owns the deeper evidence loop.", ask_skill)
+        self.assertIn("keep one concise `route_reason`", ask_skill)
+        self.assertIn("route to `knowledge-base-sync`", ask_skill)
+        self.assertNotIn("recommended_hybrid_targets", ask_skill)
+        self.assertNotIn("Lane C owner", ask_skill)
+        self.assertIn("not a free-standing ordinary front door", answer_skill)
+        self.assertIn("canonical ask runtime ownership", answer_skill)
+        self.assertIn("never a free-standing ordinary front door", composition_skill)
+        self.assertIn("legal operator provenance surface", trace_skill)
+        self.assertIn("legal operator evidence surface", retrieval_skill)
+        self.assertIn("require canonical ask ownership", review_skill)
+        self.assertIn("do not replace canonical `ask`", orchestration_doc)
+
     def test_public_contributor_docs_point_to_optional_sample_skill(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")

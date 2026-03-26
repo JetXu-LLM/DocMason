@@ -16,11 +16,14 @@ from .affordances import (
     merge_derived_affordances,
 )
 from .conversation import (
+    FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY,
     base_turn_record,
     ensure_conversation_record,
     find_turn_by_question,
     find_turn_index,
     semantic_log_context_fields,
+    stronger_front_door_state,
+    turn_has_canonical_ask_ownership,
     workspace_snapshot,
 )
 from .coordination import workspace_lease
@@ -34,7 +37,7 @@ from .routing import (
     infer_question_domain,
     normalize_memory_semantics,
 )
-from .run_control import ensure_run_for_turn
+from .run_control import RUN_ORIGIN_NATIVE_RECONCILIATION, ensure_run_for_turn
 from .transcript import (
     codex_sessions_root,
     codex_state_db_path,
@@ -82,6 +85,17 @@ INTERACTION_REQUIRED_KNOWLEDGE_KEYS = (
     "confidence",
     "citations",
     "related_sources",
+)
+_RECONCILIATION_PROTECTED_TURN_STATES = frozenset(
+    {
+        "prepared",
+        "awaiting-confirmation",
+        "waiting-shared-job",
+        "action-required",
+        "answered",
+        "completed",
+        "committed",
+    }
 )
 
 
@@ -1122,6 +1136,14 @@ def _next_turn_id(conversation: dict[str, Any]) -> str:
     return f"turn-{len(turns) + 1:03d}"
 
 
+def _preserve_reconciled_turn_state(turn: dict[str, Any]) -> bool:
+    if turn_has_canonical_ask_ownership(turn):
+        return True
+    if isinstance(turn.get("committed_run_id"), str) and turn.get("committed_run_id"):
+        return True
+    return str(turn.get("turn_state") or "") in _RECONCILIATION_PROTECTED_TURN_STATES
+
+
 def reconcile_codex_thread(
     paths: WorkspacePaths,
     *,
@@ -1275,6 +1297,7 @@ def reconcile_codex_thread(
                 turn_id=turn_id,
                 user_question=user_text,
                 entry_workflow_id="ask",
+                run_origin=RUN_ORIGIN_NATIVE_RECONCILIATION,
             )
             answer_file_reference = _write_answer_file_if_missing(
                 paths,
@@ -1282,6 +1305,7 @@ def reconcile_codex_thread(
                 turn_id=turn_id,
                 assistant_text=final_assistant_text,
             )
+            preserve_turn_state = _preserve_reconciled_turn_state(turn_record)
             existing_inner_workflow_id = str(turn_record.get("inner_workflow_id") or "")
             repaired_inner_workflow_id = existing_inner_workflow_id
             if existing_inner_workflow_id in {"", "grounded-answer"}:
@@ -1306,11 +1330,35 @@ def reconcile_codex_thread(
                     "inspection_scope": str(evidence_requirements.get("inspection_scope")),
                     "preferred_channels": preferred_channels,
                     "response_excerpt": (
-                        final_assistant_text[:500] or turn_record.get("response_excerpt")
+                        turn_record.get("response_excerpt")
+                        if preserve_turn_state
+                        else (final_assistant_text[:500] or turn_record.get("response_excerpt"))
                     ),
                     "answer_file_path": answer_file_reference,
-                    "status": "answered" if final_assistant_text.strip() else "completed",
-                    "turn_state": "reconciled",
+                    "status": (
+                        turn_record.get("status")
+                        if preserve_turn_state
+                        else ("answered" if final_assistant_text.strip() else "completed")
+                    ),
+                    "turn_state": (
+                        turn_record.get("turn_state")
+                        if preserve_turn_state
+                        else "reconciled"
+                    ),
+                    "front_door_state": stronger_front_door_state(
+                        turn_record.get("front_door_state"),
+                        FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY,
+                    ),
+                    "front_door_opened_at": (
+                        turn_record.get("front_door_opened_at")
+                        if turn_has_canonical_ask_ownership(turn_record)
+                        else None
+                    ),
+                    "front_door_run_id": (
+                        turn_record.get("front_door_run_id")
+                        if turn_has_canonical_ask_ownership(turn_record)
+                        else None
+                    ),
                     "continuation_type": continuation_type,
                     "reused_previous_evidence": reused_previous_evidence,
                     "new_retrieval_executed": "docmason retrieve"
@@ -1554,6 +1602,7 @@ def reconcile_claude_code_thread(
                 turn_id=turn_id,
                 user_question=user_text,
                 entry_workflow_id="ask",
+                run_origin=RUN_ORIGIN_NATIVE_RECONCILIATION,
             )
 
             answer_file_reference = _write_answer_file_if_missing(
@@ -1562,6 +1611,7 @@ def reconcile_claude_code_thread(
                 turn_id=turn_id,
                 assistant_text=final_assistant_text,
             )
+            preserve_turn_state = _preserve_reconciled_turn_state(turn_record)
 
             existing_inner_workflow_id = str(turn_record.get("inner_workflow_id") or "")
             repaired_inner_workflow_id = existing_inner_workflow_id
@@ -1589,11 +1639,35 @@ def reconcile_claude_code_thread(
                     "inspection_scope": str(evidence_requirements.get("inspection_scope")),
                     "preferred_channels": preferred_channels,
                     "response_excerpt": (
-                        final_assistant_text[:500] or turn_record.get("response_excerpt")
+                        turn_record.get("response_excerpt")
+                        if preserve_turn_state
+                        else (final_assistant_text[:500] or turn_record.get("response_excerpt"))
                     ),
                     "answer_file_path": answer_file_reference,
-                    "status": "answered" if final_assistant_text.strip() else "completed",
-                    "turn_state": "reconciled",
+                    "status": (
+                        turn_record.get("status")
+                        if preserve_turn_state
+                        else ("answered" if final_assistant_text.strip() else "completed")
+                    ),
+                    "turn_state": (
+                        turn_record.get("turn_state")
+                        if preserve_turn_state
+                        else "reconciled"
+                    ),
+                    "front_door_state": stronger_front_door_state(
+                        turn_record.get("front_door_state"),
+                        FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY,
+                    ),
+                    "front_door_opened_at": (
+                        turn_record.get("front_door_opened_at")
+                        if turn_has_canonical_ask_ownership(turn_record)
+                        else None
+                    ),
+                    "front_door_run_id": (
+                        turn_record.get("front_door_run_id")
+                        if turn_has_canonical_ask_ownership(turn_record)
+                        else None
+                    ),
                     "continuation_type": continuation_type,
                     "reused_previous_evidence": reused_previous_evidence,
                     "new_retrieval_executed": "docmason retrieve"

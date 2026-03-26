@@ -24,6 +24,9 @@ Phase 4b intentionally does not add public `docmason answer` or `docmason review
 Phase 5 also intentionally keeps benchmarking and evaluation private-first instead of adding a public `docmason eval` command before the operator-review layer exists.
 The Phase 6 hardening patch adds `docmason workflow` as an advanced public execution surface without weakening `ask` as the only natural-language question entry.
 
+Direct public evidence commands such as `retrieve` and `trace` remain legal operator tools.
+They are not ordinary question-completion surfaces, and they do not replace canonical `ask`.
+
 ## Canonical Workflow Surface
 
 The canonical workflow surface includes thirteen workflows, but they are not all peer user-entry points.
@@ -34,6 +37,7 @@ The canonical workflow surface includes thirteen workflows, but they are not all
 
 `ask` is the user-facing top-level workflow.
 It is the default route for ordinary freeform business questions inside a valid workspace.
+Reading `AGENTS.md`, reading a skill, or reconciling a native thread is not equivalent to opening canonical ask ownership.
 
 ### Explicit Top-Level Operator Workflows
 
@@ -89,6 +93,7 @@ Each workflow directory includes:
 ## User-Intent Policy
 
 - Ordinary business questions should route to `ask`.
+- If an active native thread has only reconciliation truth and not canonical ask ownership, direct operator evidence may continue with explicit warning context, but that is still not ordinary ask completion.
 - The primary semantic routing decision for `ask` should come from agent-supplied structured analysis rather than growing repo-side keyword classifiers.
 - For odd or non-typical workspace questions, the agent should prefer choosing required published evidence channels over inventing a new special-question taxonomy.
 - Explicit setup, readiness, status, sync, adapter, or runtime-review requests should route to their matching top-level workflows directly.

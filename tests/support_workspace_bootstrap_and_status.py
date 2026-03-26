@@ -6,7 +6,10 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
+import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,12 +29,14 @@ from docmason.commands import (
     sync_adapters,
 )
 from docmason.control_plane import ensure_shared_job, load_shared_job
+from docmason.coordination import LeaseConflictError
 from docmason.project import (
     WorkspacePaths,
     cached_bootstrap_readiness,
     source_inventory_signature,
     write_json,
 )
+from docmason.toolchain import inspect_toolchain
 
 
 class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
@@ -111,12 +116,199 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def fake_prepare_runner(self, workspace: WorkspacePaths):
         def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
+            del cwd
+            command_list = list(command)
+            if command_list[:3] == [sys.executable, "-m", "venv"]:
+                workspace.toolchain_bootstrap_python.parent.mkdir(parents=True, exist_ok=True)
+                workspace.toolchain_bootstrap_python.write_text(
+                    "#!/bin/sh\n"
+                    f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+                    encoding="utf-8",
+                )
+                workspace.toolchain_bootstrap_python.chmod(0o755)
+            if "python" in command_list and "install" in command_list:
+                self.seed_repo_local_managed_python(workspace)
             if "venv" in command:
-                workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-                workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+                managed_python = self.seed_repo_local_managed_python(workspace)
+                self.seed_repo_local_venv(workspace, managed_python=managed_python)
+            if command_list[:2] == [str(workspace.venv_python), "-c"]:
+                if "pdf_renderer_snapshot" in str(command_list[-1]):
+                    return CommandExecution(
+                        exit_code=0,
+                        stdout=json.dumps(
+                            {
+                                "ready": True,
+                                "detail": "PDF rendering and extraction dependencies are available.",
+                                "missing": [],
+                            }
+                        ),
+                    )
+                return CommandExecution(exit_code=0)
+            if command_list[:4] == [
+                str(workspace.venv_python),
+                "-m",
+                "docmason",
+                "status",
+            ]:
+                return CommandExecution(exit_code=0, stdout='{"status": "ready"}')
+            if command_list[:2] == [str(workspace.venv_docmason), "--help"]:
+                return CommandExecution(exit_code=0, stdout="DocMason CLI")
+            if command_list[:4] == [
+                str(workspace.toolchain_bootstrap_python),
+                "-m",
+                "pip",
+                "install",
+            ]:
+                workspace.toolchain_bootstrap_uv.parent.mkdir(parents=True, exist_ok=True)
+                workspace.toolchain_bootstrap_uv.write_text(
+                    "#!/bin/sh\n"
+                    f"exec {shlex.quote(sys.executable)} -m uv \"$@\"\n",
+                    encoding="utf-8",
+                )
+                workspace.toolchain_bootstrap_uv.chmod(0o755)
             return CommandExecution(exit_code=0)
 
         return runner
+
+    def seed_repo_local_managed_python(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        version: str = "3.13.5",
+    ) -> Path:
+        minor_version = ".".join(version.split(".")[:2])
+        install_root = workspace.toolchain_python_installs_dir / f"cpython-{version}"
+        python_path = install_root / "bin" / f"python{minor_version}"
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        python_path.write_text(
+            "#!/bin/sh\n"
+            f"export PYTHONPATH={shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        python_path.chmod(python_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        workspace.toolchain_python_current_dir.parent.mkdir(parents=True, exist_ok=True)
+        if workspace.toolchain_python_current_dir.exists() or workspace.toolchain_python_current_dir.is_symlink():
+            if workspace.toolchain_python_current_dir.is_dir() and not workspace.toolchain_python_current_dir.is_symlink():
+                shutil.rmtree(workspace.toolchain_python_current_dir)
+            else:
+                workspace.toolchain_python_current_dir.unlink()
+        os.symlink(
+            os.path.relpath(install_root, workspace.toolchain_python_current_dir.parent),
+            workspace.toolchain_python_current_dir,
+        )
+        return python_path
+
+    def seed_repo_local_venv(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        managed_python: Path | None = None,
+        version: str = "3.13.5",
+    ) -> None:
+        managed = managed_python or self.seed_repo_local_managed_python(workspace, version=version)
+        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        if workspace.venv_python.exists() or workspace.venv_python.is_symlink():
+            workspace.venv_python.unlink()
+        os.symlink(os.path.relpath(managed, workspace.venv_python.parent), workspace.venv_python)
+        workspace.venv_docmason.parent.mkdir(parents=True, exist_ok=True)
+        workspace.venv_docmason.write_text(
+            "#!/bin/sh\n"
+            "printf 'DocMason CLI\\n'\n",
+            encoding="utf-8",
+        )
+        workspace.venv_docmason.chmod(0o755)
+        workspace.venv_pyvenv_cfg.write_text(
+            f"home = {managed.parent}\nversion = {version}\n",
+            encoding="utf-8",
+        )
+
+    def seed_external_python(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        name: str = "python3",
+    ) -> str:
+        external_python = workspace.root / ".external-python" / "bin" / name
+        external_python.parent.mkdir(parents=True, exist_ok=True)
+        external_python.write_text(
+            "#!/bin/sh\n"
+            f"export PYTHONPATH={shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        external_python.chmod(
+            external_python.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        )
+        return str(external_python)
+
+    def seed_external_venv(self, workspace: WorkspacePaths, *, external_python: str) -> None:
+        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        if workspace.venv_python.exists() or workspace.venv_python.is_symlink():
+            workspace.venv_python.unlink()
+        os.symlink(external_python, workspace.venv_python)
+        workspace.venv_docmason.parent.mkdir(parents=True, exist_ok=True)
+        workspace.venv_docmason.write_text(
+            "#!/bin/sh\n"
+            "printf 'DocMason CLI\\n'\n",
+            encoding="utf-8",
+        )
+        workspace.venv_docmason.chmod(0o755)
+        workspace.venv_pyvenv_cfg.write_text(
+            f"home = {Path(external_python).parent}\nversion = 3.11.0\n",
+            encoding="utf-8",
+        )
+
+    def seed_self_contained_bootstrap_state(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        package_manager: str = "uv",
+        office_renderer_ready: bool = True,
+        pdf_renderer_ready: bool = True,
+    ) -> None:
+        managed_python = self.seed_repo_local_managed_python(workspace)
+        self.seed_repo_local_venv(workspace, managed_python=managed_python)
+        write_json(
+            workspace.bootstrap_state_path,
+            {
+                "schema_version": 3,
+                "status": "ready",
+                "environment_ready": True,
+                "checked_at": "2026-03-25T00:00:00Z",
+                "prepared_at": "2026-03-25T00:00:00Z",
+                "workspace_root": str(workspace.root.resolve()),
+                "package_manager": package_manager,
+                "python_executable": str(managed_python),
+                "venv_python": ".venv/bin/python",
+                "editable_install": True,
+                "editable_install_detail": "Editable install resolves to the workspace source tree.",
+                "python_baseline": "3.13",
+                "toolchain_root": ".docmason/toolchain",
+                "toolchain_mode": "repo-local-managed",
+                "managed_python_executable": str(managed_python),
+                "managed_python_version": "3.13.5",
+                "managed_python_origin": "repo-local-managed",
+                "venv_base_executable": str(managed_python),
+                "venv_health": "ready",
+                "entrypoint_health": "ready",
+                "uv_bootstrap_mode": "shared-uv",
+                "uv_cache_dir": ".docmason/toolchain/cache/uv",
+                "pip_cache_dir": ".docmason/toolchain/cache/pip",
+                "isolation_grade": "self-contained",
+                "shared_host_dependency": False,
+                "shared_host_dependencies": [],
+                "repair_recommended": False,
+                "repair_reason": None,
+                "last_repair_at": "2026-03-25T00:00:00Z",
+                "pdf_renderer_ready": pdf_renderer_ready,
+                "office_renderer_ready": office_renderer_ready,
+                "office_renderer_required": False,
+                "requires_pdf_renderer": False,
+                "requires_office_renderer": False,
+                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+            },
+        )
 
     def ready_probe(self, _workspace: WorkspacePaths) -> tuple[bool, str]:
         return True, "Editable install resolves to the workspace source tree."
@@ -181,7 +373,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 self.assertEqual(exit_code, reports[command].exit_code)
                 self.assertTrue(buffer.getvalue().strip())
 
-    def test_prepare_uses_pip_fallback_when_uv_is_missing(self) -> None:
+    def test_prepare_requests_repo_local_uv_bootstrap_when_uv_is_missing(self) -> None:
         workspace = self.make_workspace()
         with (
             mock.patch("docmason.commands.find_uv_binary", return_value=None),
@@ -194,29 +386,19 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 editable_install_probe=self.ready_probe,
                 interactive=False,
             )
-        self.assertEqual(report.exit_code, 2)
-        self.assertEqual(report.payload["status"], DEGRADED)
-        self.assertEqual(report.payload["environment"]["package_manager"], "pip")
-        self.assertTrue(workspace.bootstrap_state_path.exists())
-        state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
-        self.assertTrue(state["environment_ready"])
-        self.assertEqual(state["package_manager"], "pip")
-        self.assertEqual(state["workspace_root"], str(workspace.root.resolve()))
-        self.assertEqual(state["manual_recovery_doc"], "docs/setup/manual-workspace-recovery.md")
-        self.assertIn("pip install --user uv", report.payload["next_steps"][0])
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(report.payload["status"], ACTION_REQUIRED)
+        self.assertEqual(report.payload["environment"]["package_manager"], "uv")
+        self.assertIn("repo-local bootstrap helper", report.payload["next_steps"][0])
 
     def test_prepare_uses_uv_when_available(self) -> None:
         workspace = self.make_workspace()
         seen_commands: list[list[str]] = []
 
         def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
-            del cwd
             command_list = list(command)
             seen_commands.append(command_list)
-            if "venv" in command_list:
-                workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-                workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            return CommandExecution(exit_code=0)
+            return self.fake_prepare_runner(workspace)(command_list, cwd)
 
         with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
             report = prepare_workspace(
@@ -228,37 +410,265 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
         self.assertEqual(report.payload["environment"]["package_manager"], "uv")
-        self.assertIn("--allow-existing", seen_commands[0])
+        self.assertTrue(
+            any(
+                command[:3] == ["/usr/local/bin/uv", "python", "install"]
+                for command in seen_commands
+            )
+        )
         self.assertTrue(workspace.agent_work_dir.exists())
         state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
-        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["schema_version"], 3)
         self.assertTrue(state["environment_ready"])
         self.assertEqual(state["package_manager"], "uv")
         self.assertEqual(state["workspace_root"], str(workspace.root.resolve()))
+        self.assertEqual(state["toolchain_mode"], "repo-local-managed")
+        self.assertEqual(state["isolation_grade"], "self-contained")
+
+    def test_prepare_reuses_repo_local_bootstrap_uv_before_reinstalling(self) -> None:
+        workspace = self.make_workspace()
+        workspace.toolchain_bootstrap_uv.parent.mkdir(parents=True, exist_ok=True)
+        workspace.toolchain_bootstrap_uv.write_text(
+            "#!/bin/sh\nexit 0\n",
+            encoding="utf-8",
+        )
+        workspace.toolchain_bootstrap_uv.chmod(0o755)
+        seen_commands: list[list[str]] = []
+
+        def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
+            command_list = list(command)
+            seen_commands.append(command_list)
+            return self.fake_prepare_runner(workspace)(command_list, cwd)
+
+        with mock.patch("docmason.commands.find_uv_binary", return_value=str(workspace.toolchain_bootstrap_uv)):
+            report = prepare_workspace(
+                workspace,
+                command_runner=runner,
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["status"], READY)
+        self.assertTrue(
+            any(
+                command[:3] == [str(workspace.toolchain_bootstrap_uv), "python", "install"]
+                for command in seen_commands
+            )
+        )
+        self.assertFalse(
+            any(
+                command[:4]
+                == [str(workspace.toolchain_bootstrap_python), "-m", "pip", "install"]
+                for command in seen_commands
+            )
+        )
+        state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["uv_bootstrap_mode"], "bootstrap-venv-reused")
+
+    def test_prepare_reports_managed_python_version_instead_of_bootstrap_version(self) -> None:
+        workspace = self.make_workspace()
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch("docmason.commands.sys.version_info", (3, 11, 9)),
+        ):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["environment"]["python_version"], "3.13.5")
+        self.assertTrue(
+            str(report.payload["environment"]["python_executable"]).endswith("/python3.13")
+        )
+
+    def test_prepare_uses_active_entrypoint_probe_instead_of_status_json(self) -> None:
+        workspace = self.make_workspace()
+        seen_commands: list[list[str]] = []
+
+        def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
+            command_list = list(command)
+            seen_commands.append(command_list)
+            return self.fake_prepare_runner(workspace)(command_list, cwd)
+
+        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+            report = prepare_workspace(
+                workspace,
+                command_runner=runner,
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["status"], READY)
+        self.assertFalse(
+            any(
+                command[:4]
+                == [str(workspace.venv_python), "-m", "docmason", "status"]
+                for command in seen_commands
+            )
+        )
+        self.assertEqual(
+            report.payload["environment"]["toolchain"]["isolation_grade"],
+            "self-contained",
+        )
+
+    def test_inspect_toolchain_detects_baseline_version_drift_without_bootstrap_state(self) -> None:
+        workspace = self.make_workspace()
+        managed_python = self.seed_repo_local_managed_python(workspace, version="3.14.2")
+        self.seed_repo_local_venv(
+            workspace,
+            managed_python=managed_python,
+            version="3.14.2",
+        )
+
+        toolchain = inspect_toolchain(workspace, editable_install=True)
+
+        self.assertEqual(toolchain["managed_python_version"], "3.14.2")
+        self.assertEqual(toolchain["toolchain_mode"], "repo-local-managed")
+        self.assertEqual(toolchain["repair_reason"], "baseline-version-drift")
+        self.assertEqual(toolchain["isolation_grade"], "mixed")
+
+    def test_inspect_toolchain_prefers_install_root_version_over_stale_cached_version(self) -> None:
+        workspace = self.make_workspace()
+        managed_python = self.seed_repo_local_managed_python(workspace, version="3.14.2")
+        self.seed_repo_local_venv(
+            workspace,
+            managed_python=managed_python,
+            version="3.14.2",
+        )
+        cached_state = {
+            "managed_python_executable": str(managed_python),
+            "managed_python_version": "3.13.5",
+        }
+
+        toolchain = inspect_toolchain(
+            workspace,
+            bootstrap_state=cached_state,
+            editable_install=True,
+        )
+
+        self.assertEqual(toolchain["managed_python_version"], "3.14.2")
+        self.assertEqual(toolchain["repair_reason"], "baseline-version-drift")
+
+    def test_inspect_toolchain_marks_missing_entrypoint_as_module_import_failed(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_repo_local_venv(workspace)
+        workspace.venv_docmason.unlink()
+
+        toolchain = inspect_toolchain(workspace, editable_install=True)
+
+        self.assertEqual(toolchain["entrypoint_health"], "module-import-failed")
+        self.assertEqual(toolchain["repair_reason"], "entrypoint-broken")
+
+    def test_inspect_toolchain_marks_invalid_shebang_as_broken(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_repo_local_venv(workspace)
+        workspace.venv_docmason.write_text("print('no shebang')\n", encoding="utf-8")
+        workspace.venv_docmason.chmod(0o755)
+
+        toolchain = inspect_toolchain(workspace, editable_install=True)
+
+        self.assertEqual(toolchain["entrypoint_health"], "broken-shebang")
+        self.assertEqual(toolchain["repair_reason"], "entrypoint-broken")
+
+    def test_inspect_toolchain_marks_silent_entrypoint_as_startup_silent(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_repo_local_venv(workspace)
+        workspace.venv_docmason.write_text(
+            f"#!{sys.executable}\n",
+            encoding="utf-8",
+        )
+        workspace.venv_docmason.chmod(0o755)
+
+        toolchain = inspect_toolchain(workspace, editable_install=True)
+
+        self.assertEqual(toolchain["entrypoint_health"], "startup-silent")
+        self.assertEqual(toolchain["repair_reason"], "entrypoint-broken")
+
+    def test_inspect_toolchain_marks_import_failure_as_module_import_failed(self) -> None:
+        workspace = self.make_workspace()
+        managed_python = self.seed_repo_local_managed_python(workspace)
+        self.seed_repo_local_venv(workspace, managed_python=managed_python)
+        managed_python.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} -S \"$@\"\n",
+            encoding="utf-8",
+        )
+        managed_python.chmod(
+            managed_python.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        )
+
+        toolchain = inspect_toolchain(workspace, editable_install=True)
+
+        self.assertEqual(toolchain["entrypoint_health"], "module-import-failed")
+        self.assertEqual(toolchain["repair_reason"], "entrypoint-broken")
+
+    def test_inspect_toolchain_marks_timeout_entrypoint_as_startup_silent(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_repo_local_venv(workspace)
+        workspace.venv_docmason.write_text(
+            f"#!{sys.executable}\n"
+            "import time\n"
+            "time.sleep(1.0)\n",
+            encoding="utf-8",
+        )
+        workspace.venv_docmason.chmod(0o755)
+
+        with mock.patch("docmason.toolchain.ENTRYPOINT_PROBE_TIMEOUT_SECONDS", 0.5):
+            toolchain = inspect_toolchain(workspace, editable_install=True)
+
+        self.assertEqual(toolchain["entrypoint_health"], "startup-silent")
+        self.assertEqual(toolchain["repair_reason"], "entrypoint-broken")
+
+    def test_inspect_toolchain_distinguishes_shared_host_bootstrap_from_legacy_external(self) -> None:
+        workspace = self.make_workspace()
+
+        shared_host_toolchain = inspect_toolchain(workspace, editable_install=False)
+        self.assertEqual(shared_host_toolchain["toolchain_mode"], "shared-host-bootstrap")
+        self.assertTrue(shared_host_toolchain["shared_host_dependency"])
+
+        external_python = self.seed_external_python(workspace)
+        self.seed_repo_local_managed_python(workspace)
+        self.seed_external_venv(workspace, external_python=external_python)
+
+        external_toolchain = inspect_toolchain(workspace, editable_install=True)
+        self.assertEqual(external_toolchain["toolchain_mode"], "legacy-external")
+        self.assertEqual(external_toolchain["repair_reason"], "external-venv-provenance")
+
+    def test_prepare_records_pdf_renderer_readiness_from_repo_local_venv_probe(self) -> None:
+        workspace = self.make_workspace()
+
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch(
+                "docmason.commands.pdf_renderer_snapshot",
+                return_value={
+                    "ready": False,
+                    "detail": "Current bootstrap interpreter lacks PDF dependencies.",
+                    "missing": ["pymupdf"],
+                },
+            ),
+        ):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 0)
+        state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
+        self.assertTrue(state["pdf_renderer_ready"])
 
     def test_cached_bootstrap_readiness_detects_workspace_root_drift(self) -> None:
         workspace = self.make_workspace()
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "schema_version": 2,
-                "status": "ready",
-                "environment_ready": True,
-                "workspace_root": "/tmp/old-docmason-root",
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": (
-                    "Editable install resolves to the workspace source tree."
-                ),
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-            },
-        )
+        self.seed_self_contained_bootstrap_state(workspace)
+        state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
+        state["workspace_root"] = "/tmp/old-docmason-root"
+        write_json(workspace.bootstrap_state_path, state)
 
         readiness = cached_bootstrap_readiness(workspace)
         self.assertFalse(readiness["ready"])
@@ -282,7 +692,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
         ordinary = cached_bootstrap_readiness(workspace)
         sync_ready = cached_bootstrap_readiness(workspace, require_sync_capability=True)
-        self.assertTrue(ordinary["ready"])
+        self.assertFalse(ordinary["ready"])
         self.assertFalse(sync_ready["ready"])
         self.assertEqual(sync_ready["reason"], "legacy-bootstrap-state-sync-capability-unknown")
 
@@ -294,22 +704,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             del cwd
             command_list = list(command)
             seen_commands.append(command_list)
-            if command_list[:3] == ["/opt/homebrew/bin/brew", "install", "uv"]:
-                return CommandExecution(exit_code=0)
-            if "venv" in command_list:
-                workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-                workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            return CommandExecution(exit_code=0)
+            return self.fake_prepare_runner(workspace)(command_list, workspace.root)
 
         with (
-            mock.patch(
-                "docmason.commands.find_uv_binary",
-                side_effect=[None, "/opt/homebrew/bin/uv"],
-            ),
-            mock.patch(
-                "docmason.commands.find_brew_binary",
-                return_value="/opt/homebrew/bin/brew",
-            ),
+            mock.patch("docmason.commands.find_uv_binary", return_value=None),
             mock.patch("docmason.commands.sys.platform", "darwin"),
         ):
             report = prepare_workspace(
@@ -321,7 +719,13 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             )
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
-        self.assertIn(["/opt/homebrew/bin/brew", "install", "uv"], seen_commands)
+        self.assertTrue(
+            any(
+                command[:4]
+                == [str(workspace.toolchain_bootstrap_python), "-m", "pip", "install"]
+                for command in seen_commands
+            )
+        )
 
     def test_prepare_fails_on_unsupported_environment(self) -> None:
         workspace = self.make_workspace()
@@ -366,7 +770,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             report.payload["control_plane"]["confirmation_kind"],
             "high-intrusion-prepare",
         )
-        self.assertIn("是否现在开始准备环境", report.payload["control_plane"]["confirmation_prompt"])
+        self.assertIn("Prepare the workspace now?", report.payload["control_plane"]["confirmation_prompt"])
         self.assertEqual(
             report.payload["next_steps"][0],
             "Run `docmason prepare --yes` to approve and continue.",
@@ -377,13 +781,9 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         seen_commands: list[list[str]] = []
 
         def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
-            del cwd
             command_list = list(command)
             seen_commands.append(command_list)
-            if "venv" in command_list:
-                workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-                workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            return CommandExecution(exit_code=0)
+            return self.fake_prepare_runner(workspace)(command_list, cwd)
 
         with (
             mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
@@ -491,13 +891,9 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         seen_commands: list[list[str]] = []
 
         def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
-            del cwd
             command_list = list(command)
             seen_commands.append(command_list)
-            if "venv" in command_list:
-                workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-                workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            return CommandExecution(exit_code=0)
+            return self.fake_prepare_runner(workspace)(command_list, cwd)
 
         with (
             mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
@@ -597,6 +993,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             report.payload["next_steps"],
         )
 
+    def test_doctor_reports_repo_local_uv_repair_guidance(self) -> None:
+        workspace = self.make_workspace()
+        with mock.patch("docmason.commands.find_uv_binary", return_value=None):
+            report = doctor_workspace(workspace, editable_install_probe=self.missing_probe)
+        uv_check = next(check for check in report.payload["checks"] if check["name"] == "uv")
+        self.assertIn("repo-local bootstrap helper", uv_check["detail"])
+        self.assertNotIn("fall back to venv + pip", uv_check["detail"])
+
     def test_doctor_offers_official_libreoffice_install_path_without_brew(self) -> None:
         workspace = self.make_workspace()
         with (
@@ -618,40 +1022,96 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(office_check["status"], ACTION_REQUIRED)
         self.assertIn("libreoffice.org/download/download/", office_check["action"])
 
+    def test_status_survives_reconciliation_lease_conflict_with_warning(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+
+        with mock.patch(
+            "docmason.commands._maybe_reconcile_active_thread",
+            side_effect=LeaseConflictError(
+                "Could not acquire workspace lease for `conversation:thread-status` within 10.0s."
+            ),
+        ):
+            report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+
+        self.assertIn("coordination", report.payload)
+        self.assertEqual(report.payload["coordination"]["state"], "warning")
+        self.assertTrue(report.lines)
+
+    def test_doctor_survives_reconciliation_lease_conflict_with_warning(self) -> None:
+        workspace = self.make_workspace()
+
+        with mock.patch(
+            "docmason.commands._maybe_reconcile_active_thread",
+            side_effect=LeaseConflictError(
+                "Could not acquire workspace lease for `conversation:thread-doctor` within 10.0s."
+            ),
+        ):
+            report = doctor_workspace(workspace, editable_install_probe=self.missing_probe)
+
+        self.assertIn("coordination", report.payload)
+        self.assertEqual(report.payload["coordination"]["state"], "warning")
+        self.assertTrue(report.lines)
+
+    def test_prepare_returns_structured_coordination_block_instead_of_traceback(self) -> None:
+        workspace = self.make_workspace()
+
+        with mock.patch(
+            "docmason.commands._maybe_reconcile_active_thread",
+            side_effect=LeaseConflictError(
+                "Could not acquire workspace lease for `conversation:thread-prepare` within 10.0s."
+            ),
+        ):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.payload["status"], ACTION_REQUIRED)
+        self.assertEqual(report.payload["prepare_status"], "coordination-blocked")
+        self.assertEqual(report.payload["coordination"]["state"], "blocked")
+
+    def test_sync_returns_structured_coordination_block_instead_of_traceback(self) -> None:
+        workspace = self.make_workspace()
+
+        with mock.patch(
+            "docmason.commands._maybe_reconcile_active_thread",
+            side_effect=LeaseConflictError(
+                "Could not acquire workspace lease for `conversation:thread-sync` within 10.0s."
+            ),
+        ):
+            report = sync_workspace(workspace)
+
+        self.assertEqual(report.payload["status"], ACTION_REQUIRED)
+        self.assertEqual(report.payload["sync_status"], "coordination-blocked")
+        self.assertEqual(report.payload["coordination"]["state"], "blocked")
+
     def test_status_stage_progression_and_pending_actions(self) -> None:
         workspace = self.make_workspace()
         source_file = workspace.source_dir / "example.pdf"
         source_file.write_text("pdf placeholder\n", encoding="utf-8")
 
         foundation = status_workspace(workspace, editable_install_probe=self.missing_probe)
+        self.assertEqual(foundation.exit_code, 1)
         self.assertEqual(foundation.payload["stage"], "foundation-only")
         self.assertEqual(
             foundation.payload["pending_actions"],
             ["prepare", "sync"],
         )
 
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "prepared_at": "2026-03-15T00:00:00Z",
-                "package_manager": "pip",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-            },
-        )
+        self.seed_self_contained_bootstrap_state(workspace, package_manager="uv")
         bootstrapped = status_workspace(workspace, editable_install_probe=self.ready_probe)
+        self.assertEqual(bootstrapped.exit_code, 0)
         self.assertEqual(bootstrapped.payload["stage"], "workspace-bootstrapped")
-        self.assertEqual(
-            bootstrapped.payload["bootstrap_state"]["reason"], "legacy-compatible-ready"
-        )
+        self.assertEqual(bootstrapped.payload["bootstrap_state"]["reason"], "cached-ready")
         self.assertTrue(bootstrapped.payload["bootstrap_state"]["cached_ready"])
 
         adapter_report = sync_adapters(workspace)
         self.assertEqual(adapter_report.exit_code, 0)
         adapter_ready = status_workspace(workspace, editable_install_probe=self.ready_probe)
+        self.assertEqual(adapter_ready.exit_code, 0)
         self.assertEqual(adapter_ready.payload["stage"], "adapter-ready")
 
         kb_file = workspace.knowledge_base_current_dir / "artifact.md"
@@ -666,34 +1126,33 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             },
         )
         kb_present = status_workspace(workspace, editable_install_probe=self.ready_probe)
+        self.assertEqual(kb_present.exit_code, 0)
         self.assertEqual(kb_present.payload["stage"], "knowledge-base-present")
 
         os.utime(source_file, None)
         kb_stale = status_workspace(workspace, editable_install_probe=self.ready_probe)
+        self.assertEqual(kb_stale.exit_code, 2)
         self.assertEqual(kb_stale.payload["stage"], "knowledge-base-stale")
+
+    def test_status_reports_knowledge_base_invalid_as_action_required(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        staging_artifact = workspace.knowledge_base_staging_dir / "artifact.md"
+        staging_artifact.parent.mkdir(parents=True, exist_ok=True)
+        staging_artifact.write_text("staging knowledge\n", encoding="utf-8")
+        write_json(
+            workspace.staging_validation_report_path,
+            {"status": "blocking-errors"},
+        )
+
+        report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(report.payload["stage"], "knowledge-base-invalid")
 
     def test_sync_reports_material_confirmation_payload(self) -> None:
         workspace = self.make_workspace()
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "schema_version": 2,
-                "status": "ready",
-                "environment_ready": True,
-                "prepared_at": "2026-03-15T00:00:00Z",
-                "workspace_root": str(workspace.root.resolve()),
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-            },
-        )
+        self.seed_self_contained_bootstrap_state(workspace)
         for index in range(12):
             (workspace.source_dir / f"sample-{index:02d}.pdf").write_text(
                 "pdf placeholder\n",
@@ -726,11 +1185,15 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             owner={"kind": "command", "id": "prepare-command"},
             requires_confirmation=True,
             confirmation_kind="high-intrusion-prepare",
-            confirmation_prompt="当前问题需要补齐本地依赖才能继续，是否现在开始准备环境？",
+            confirmation_prompt=(
+                "This question requires additional local dependencies before it can continue "
+                "safely. Prepare the workspace now?"
+            ),
             confirmation_reason="office-rendering",
         )
 
         status_report = status_workspace(workspace, editable_install_probe=self.missing_probe)
+        self.assertEqual(status_report.exit_code, 1)
         self.assertEqual(status_report.payload["stage"], "control-plane-pending-confirmation")
         self.assertIn("prepare --yes", status_report.payload["pending_actions"])
 
@@ -840,18 +1303,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_missing_claude_skill_shims_does_not_block_adapter_ready(self) -> None:
         workspace = self.make_workspace()
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "prepared_at": "2026-03-15T00:00:00Z",
-                "package_manager": "pip",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-            },
-        )
+        self.seed_self_contained_bootstrap_state(workspace)
         report = sync_adapters(workspace)
         self.assertEqual(report.exit_code, 0)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from docmason.commands import (
 from docmason.knowledge import update_source_index
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.semantic_overlays import write_semantic_overlay
+from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,24 +55,56 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         return WorkspacePaths(root=root)
 
     def mark_environment_ready(self, workspace: WorkspacePaths) -> None:
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-16T00:00:00Z",
+        )
+
+    def seed_active_thread_turn(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        front_door_state: str,
+        thread_id: str = "thread-operator",
+    ) -> None:
+        workspace.conversations_dir.mkdir(parents=True, exist_ok=True)
+        answer_path = workspace.answers_dir / thread_id / "turn-001.md"
+        answer_path.parent.mkdir(parents=True, exist_ok=True)
+        answer_path.write_text("Operator answer placeholder.\n", encoding="utf-8")
         write_json(
-            workspace.bootstrap_state_path,
+            workspace.conversations_dir / f"{thread_id}.json",
             {
-                "schema_version": 2,
-                "status": "ready",
-                "prepared_at": "2026-03-16T00:00:00Z",
-                "environment_ready": True,
-                "workspace_root": str(workspace.root.resolve()),
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                "conversation_id": thread_id,
+                "conversation_id_source": "codex_thread_id",
+                "agent_surface": "codex",
+                "opened_at": "2026-03-26T00:00:00Z",
+                "updated_at": "2026-03-26T00:00:00Z",
+                "workspace_snapshot": {},
+                "turns": [
+                    {
+                        "turn_id": "turn-001",
+                        "native_turn_id": "native-turn-001",
+                        "active_run_id": "run-001",
+                        "committed_run_id": None,
+                        "turn_state": "prepared",
+                        "status": "prepared",
+                        "user_question": "Need evidence for the current workspace question.",
+                        "entry_workflow_id": "ask",
+                        "inner_workflow_id": "grounded-answer",
+                        "question_class": "answer",
+                        "question_domain": "workspace-corpus",
+                        "support_strategy": "kb-first",
+                        "analysis_origin": "agent-supplied",
+                        "front_door_state": front_door_state,
+                        "front_door_opened_at": (
+                            "2026-03-26T00:00:00Z" if front_door_state == "canonical-ask" else None
+                        ),
+                        "front_door_run_id": (
+                            "run-001" if front_door_state == "canonical-ask" else None
+                        ),
+                        "answer_file_path": str(answer_path.relative_to(workspace.root)),
+                    }
+                ],
             },
         )
 
@@ -1012,6 +1046,98 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         }
         self.assertIn("no-results", candidate_case_types)
         self.assertIn("degraded-answer-trace", candidate_case_types)
+
+    def test_retrieve_warns_when_active_thread_is_not_canonical_ask(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+        self.seed_active_thread_turn(workspace, front_door_state="native-reconciled-only")
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
+            report = retrieve_knowledge(
+                query="architecture strategy",
+                top=2,
+                graph_hops=1,
+                paths=workspace,
+            )
+
+        self.assertEqual(
+            report.payload["front_door"]["warning"]["code"],
+            "noncanonical-operator-direct",
+        )
+        session_path = workspace.query_sessions_dir / f"{report.payload['session_id']}.json"
+        session_payload = read_json(session_path)
+        self.assertEqual(session_payload["log_origin"], "operator-direct")
+
+    def test_retrieve_uses_interactive_origin_when_active_thread_is_canonical_ask(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+        self.seed_active_thread_turn(workspace, front_door_state="canonical-ask")
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
+            report = retrieve_knowledge(
+                query="architecture strategy",
+                top=2,
+                graph_hops=1,
+                paths=workspace,
+            )
+
+        self.assertIsNone(report.payload["front_door"]["warning"])
+        session_path = workspace.query_sessions_dir / f"{report.payload['session_id']}.json"
+        session_payload = read_json(session_path)
+        self.assertEqual(session_payload["log_origin"], "interactive-ask")
+
+    def test_trace_warns_when_active_thread_is_not_canonical_ask(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        self.seed_active_thread_turn(workspace, front_door_state="native-reconciled-only")
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
+            report = trace_knowledge(source_id=source_ids[0], paths=workspace)
+
+        self.assertEqual(
+            report.payload["front_door"]["warning"]["code"],
+            "noncanonical-operator-direct",
+        )
+        trace_path = workspace.retrieval_traces_dir / f"{report.payload['trace_id']}.json"
+        trace_payload = read_json(trace_path)
+        self.assertEqual(trace_payload["log_origin"], "operator-direct")
+
+    def test_retrieve_and_trace_survive_reconciliation_lease_conflict_with_warning(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        from docmason.coordination import LeaseConflictError
+
+        with mock.patch(
+            "docmason.commands._maybe_reconcile_active_thread",
+            side_effect=LeaseConflictError(
+                "Could not acquire workspace lease for `conversation:thread-operator` within 10.0s."
+            ),
+        ):
+            retrieve_report = retrieve_knowledge(
+                query="architecture strategy",
+                top=2,
+                graph_hops=1,
+                paths=workspace,
+            )
+            trace_report = trace_knowledge(source_id=source_ids[0], paths=workspace)
+
+        self.assertEqual(retrieve_report.payload["coordination"]["state"], "warning")
+        self.assertEqual(trace_report.payload["coordination"]["state"], "warning")
+        self.assertTrue(retrieve_report.payload["results"])
+        self.assertEqual(trace_report.payload["status"], READY)
 
     def test_ambiguous_relocation_is_marked_without_guessing_identity(self) -> None:
         workspace = self.make_workspace()

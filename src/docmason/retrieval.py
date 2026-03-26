@@ -22,7 +22,12 @@ from .affordances import (
     support_channels_from_supports,
 )
 from .contracts import ANSWER_STATES
-from .conversation import LOG_CONTEXT_FIELD_NAMES, semantic_log_context_from_record
+from .conversation import (
+    FRONT_DOOR_STATE_CANONICAL_ASK,
+    LOG_CONTEXT_FIELD_NAMES,
+    normalize_front_door_state,
+    semantic_log_context_from_record,
+)
 from .front_controller import load_support_manifest
 from .hybrid import current_hybrid_work
 from .interaction import load_interaction_overlay
@@ -3013,6 +3018,7 @@ def _merge_log_context(
             "entry_workflow_id",
             "inner_workflow_id",
             "native_turn_id",
+            "front_door_state",
         ):
             value = fallback_record.get(field_name)
             if isinstance(value, str) and value:
@@ -3040,7 +3046,12 @@ def _effective_log_origin(
 ) -> str:
     if isinstance(explicit_log_origin, str) and explicit_log_origin:
         return explicit_log_origin
-    if log_context and log_context.get("entry_workflow_id") == "ask":
+    if (
+        log_context
+        and log_context.get("entry_workflow_id") == "ask"
+        and normalize_front_door_state(log_context.get("front_door_state"))
+        == FRONT_DOOR_STATE_CANONICAL_ASK
+    ):
         return "interactive-ask"
     if log_context:
         return "workflow-linked"

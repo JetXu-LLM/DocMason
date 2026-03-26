@@ -1,7 +1,7 @@
 <div align="center">
   <h1>DocMason</h1>
-  <p><strong>Turn private office documents into a local multimodal knowledge base your AI agent can actually use.</strong></p>
-  <p>Local-first. Provenance-first. Built for serious white-collar work.</p>
+  <p><strong>The repo is the app. Codex is the runtime.</strong></p>
+  <p>Turn private work files into a local, evidence-first knowledge base your AI agent can actually use.</p>
   <p>
     <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black">
     <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue">
@@ -102,9 +102,10 @@ If you want a machine-readable readiness snapshot after bootstrap:
 
 The bootstrap launcher is designed for first-run setup:
 
-- it can prepare `.venv` before the package is importable from the `src/` layout
-- on the native macOS path, it can auto-install supported dependencies such as Python via Homebrew, uv, and LibreOffice when automation is available
-- if `uv` is unavailable, it falls back cleanly to repo-local `venv` plus `pip`
+- it can start from a raw checkout by delegating to `docmason prepare --yes` through a bootstrap Python before the package is installed
+- on the native macOS path, it can auto-install Homebrew and a supported shared bootstrap Python when no usable bootstrap interpreter is already available
+- `prepare` then provisions repo-local managed Python `3.13` under `.docmason/toolchain/python/` and rebuilds `.venv` against that runtime
+- when `uv` is unavailable, `prepare` provisions a repo-local bootstrap helper venv under `.docmason/toolchain/bootstrap/venv` instead of falling back to an externally anchored steady-state `.venv`
 - it refreshes repo-local skill shims under `.agents/skills` and `.claude/skills` instead of touching a global Codex skills directory
 - after bootstrap, ordinary repository commands should prefer the repo-local `.venv`
 
@@ -206,8 +207,9 @@ DocMason should feel most natural in this environment:
 
 - AI agent: Codex
 - platform: macOS
-- language runtime: Python 3.11 or newer
-- package workflow: `uv` first, `pip` fallback
+- prepared-workspace runtime: repo-local managed Python `3.13`
+- bootstrap or repair helper runtime: Python `3.11+`
+- package workflow: repo-local `uv` during prepare, then repo-local `.venv` for ordinary commands
 
 This is the current supported v1 platform target.
 Other platforms may become support targets later, but they should not be treated as equally supported today.

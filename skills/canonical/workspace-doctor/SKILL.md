@@ -21,6 +21,7 @@ If the agent cannot inspect local files or run commands, stop and explain that t
 2. Explain blockers first, then degraded conditions, then optional follow-up.
 3. If the environment is not ready and `.venv` is absent, direct the next action to `./scripts/bootstrap-workspace.sh --yes`.
 4. Otherwise, if the environment is not ready, direct the next action to `docmason prepare --yes`.
+   - treat `mixed` and `degraded` toolchain states as repair-needed, not ordinary ask-time ready
 5. If `doctor` reports a control-plane blocker or pending confirmation, surface that blocker before lower-severity degraded conditions.
    - for pending high-intrusion prepare, direct the next action to `docmason prepare --yes`
    - for pending material sync, direct the next action to `docmason sync --yes`
@@ -47,6 +48,7 @@ If the agent cannot inspect local files or run commands, stop and explain that t
 
 - `doctor` is read-only.
 - Treat unsupported platforms, unsupported Python versions, and missing editable-install availability as blockers.
+- Treat only a `self-contained` prepared toolchain as ready for ordinary workspace asks.
 - Treat missing `uv`, stale adapters, and an empty source corpus as degraded conditions rather than hard blockers.
 - Treat missing LibreOffice as a blocker only when the current corpus contains PPTX, DOCX, or XLSX files.
 - A stale or missing generated adapter matters only when the current flow depends on that adapter surface.

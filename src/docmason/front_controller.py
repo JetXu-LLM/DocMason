@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .hybrid import narrowed_hybrid_sources
 from .project import WorkspacePaths, read_json, write_json
 from .routing import (
     normalize_question_analysis,
@@ -78,6 +77,8 @@ def write_hybrid_refresh_work(
     target: str = "current",
 ) -> str:
     """Persist the narrowed Lane C work packet for the current ask turn."""
+    from .hybrid import narrowed_hybrid_sources
+
     work_path = hybrid_refresh_work_path(
         paths,
         conversation_id=conversation_id,

@@ -12,6 +12,16 @@ They should not need to name internal workflow IDs or repository mechanics first
 
 If the request is clearly an explicit setup, status, sync, adapter-maintenance, or operator-review request, switch to the matching top-level workflow instead of forcing it through `ask`.
 
+## Front-Door Law
+
+- Reading this skill is not legal ask execution.
+- Native-thread reconciliation is not legal ask execution.
+- Only canonical ask runtime ownership counts as ordinary front-door execution.
+- Direct evidence commands such as public `retrieve` or `trace` remain legal operator tools, but they do not complete the ordinary ask contract by themselves.
+
+`ask` owns front-door legality, same-turn governance, workspace gating, and routing.
+The routed inner workflow owns the deeper evidence loop.
+
 ## Required Capabilities
 
 - local file access
@@ -30,9 +40,13 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 2. Use the repository helpers in `docmason.ask`, `docmason.front_controller`, and `docmason.conversation` to:
    - reconcile any active native thread
    - open or reuse the canonical turn
+   - upgrade that live turn into canonical ask ownership when reconciliation created it first
    - obtain the canonical answer-file path or composition bundle path
    - pass an agent-authored `semantic_analysis`
    - preserve flat semantic fields such as `question_class`, `question_domain`, `support_strategy`, and `analysis_origin`
+   - keep one concise `route_reason`
+   - set `needs_latest_workspace_state` when fresh local workspace truth is actually required
+   - include compact `evidence_requirements` when odd or artifact-sensitive questions need channel guidance
    - resolve user-native source references when the user names a document, path, page, slide, sheet, heading, or similar locator
 3. Choose the narrowest honest evidence basis before choosing workflow detail.
    - `workspace-corpus` -> KB-first
@@ -41,8 +55,13 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - `general-stable` -> model knowledge when the boundary is explicit
 4. Check workspace state only when the answer really depends on workspace truth.
    - use `runtime/bootstrap_state.json` as the cached readiness marker
+   - treat workspace-dependent ask as legal only when the prepared environment is `self-contained`
+   - if the environment is `mixed` or `degraded`, let the ask helper repair or surface the governed boundary instead of answering from a partially trusted runtime
    - allow safe silent bootstrap or repair when the workspace-dependent path can continue safely
+   - if the environment is ready but no published knowledge base exists yet, route to `knowledge-base-sync` instead of bluffing a workspace-grounded answer
+   - if the published knowledge base is stale but still usable, answer from the published corpus with one concise freshness notice
    - if fresh workspace state is genuinely needed, let the ask helper govern prepare or sync rather than improvising it in the workflow
+   - when workspace freshness depends on live local files, use repo-side live corpus discovery for `original_doc/` rather than git-tracked repo search
    - if prepare or sync becomes a confirmation-required shared job, pause the same turn in `awaiting-confirmation`
      - accept short same-session `yes` or `no` replies as approve or decline
      - `yes` continues the same task
@@ -54,16 +73,13 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - evidence-only request -> `retrieval-workflow`
    - provenance or citation request -> `provenance-trace`
    - runtime review request -> `runtime-log-review`
-6. Execute the answer path with published-artifact discipline.
+6. Route into the chosen inner workflow and let it own the evidence loop.
    - keep workspace commands sequential inside the live turn
    - use published KB artifacts first when they already expose the needed evidence channels
    - keep approximate or unresolved reference notices explicit
-   - for artifact-sensitive questions, inspect artifact-aware retrieval fields before drafting
-   - if published artifacts are still insufficient because of hard-artifact semantic gaps, the canonical ask path must enter one governed narrowed hybrid refresh before any raw source fallback
-     - use `recommended_hybrid_targets` as the only legal narrowing entrypoint
-     - if the current run becomes the Lane C owner, keep the same turn paused in `waiting-shared-job` until the shared job settles
-     - if the current run is a waiter, reuse the same shared Lane C result rather than opening a second path
-     - if Lane C settles `blocked`, commit the same turn as `abstained + governed-boundary`
+   - let the routed inner workflow own retrieval, trace, render inspection, and answer or composition drafting
+   - if published artifacts are still insufficient because of hard-artifact semantic gaps, let the canonical routed path enter one governed narrowed hybrid refresh instead of improvising raw source fallback
+   - if that governed path becomes a shared wait or blocked boundary, keep the same turn paused or committed through the existing ask control-plane states rather than opening a side path
 7. Complete the turn through the repository helpers.
    - write only the final answer under `runtime/answers/<conversation_id>/<turn_id>.md`
    - keep scratch work under `runtime/agent-work/` when needed
@@ -91,5 +107,8 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 ## Notes
 
 - `ask` is the user-facing top-level workflow surface.
+- A reconciled native turn is not yet a legal canonical ask turn until runtime ownership is opened explicitly.
 - `grounded-answer` and `grounded-composition` remain inner specialist workflows.
-- If the ask path performs a narrowed hybrid refresh, keep it mostly silent unless the wait is no longer brief or the turn must surface a real boundary.
+- Tracked repo search, live corpus discovery, knowledge-base artifact discovery, and runtime
+  artifact discovery are different surfaces; do not substitute one for another silently.
+- If the ask path enters a governed narrowed hybrid refresh, keep the transition concise unless the turn must surface a real wait or boundary.

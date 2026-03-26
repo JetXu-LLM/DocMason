@@ -9,6 +9,9 @@ Use this skill when the task is to prove where a knowledge object or answer came
 
 Use it directly for explicit provenance or citation requests, or let `ask` route here automatically.
 
+Direct public `trace` remains a legal operator provenance surface.
+It does not substitute for canonical ask when the user is really asking for ordinary answer completion.
+
 ## Required Capabilities
 
 - local file access

@@ -10,6 +10,12 @@ Use this skill when the task is to answer a question from the published DocMason
 This is the inner specialist answer workflow behind the user-facing `ask` entry surface.
 Ordinary users should not need to name this workflow explicitly before asking business questions.
 
+## Front-Door Precondition
+
+- `grounded-answer` is not a free-standing ordinary front door.
+- Start only from canonical ask turn metadata and canonical ask runtime ownership.
+- If the current turn is missing explicit canonical ask ownership, stop and route back to `ask`.
+
 ## Required Capabilities
 
 - local file access
@@ -21,7 +27,7 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
 
 ## Procedure
 
-1. Start from the `ask` front-controller metadata instead of assuming every direct answer is purely KB-grounded.
+1. Start from canonical ask turn metadata instead of assuming every direct answer is purely KB-grounded.
    - treat `answer_state` as the top-level four-state answer contract
    - choose an explicit `support_basis` for the overall answer:
      - `kb-grounded`

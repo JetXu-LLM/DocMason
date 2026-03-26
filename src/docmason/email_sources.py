@@ -272,7 +272,8 @@ def parse_email_source(source_path: Path) -> ParsedEmailSource:
     warnings: list[str] = []
     failures: list[str] = []
     try:
-        message = BytesParser(policy=policy.default).parse(source_path.open("rb"))
+        with source_path.open("rb") as handle:
+            message = BytesParser(policy=policy.default).parse(handle)
     except OSError as exc:
         failures.append(f"Could not read email source: {exc.strerror or str(exc)}")
         return ParsedEmailSource(

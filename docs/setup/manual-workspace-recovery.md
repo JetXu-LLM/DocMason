@@ -7,9 +7,10 @@ Use this document only when the normal automation path is unavailable or incompl
 
 The normal product expectation is still:
 
-- repo-local `.venv`
+- repo-local managed Python `3.13` under `.docmason/toolchain/python/`
+- repo-local `.venv` anchored to that managed Python
 - editable `docmason` install from the current workspace root
-- `uv` preferred, `venv` plus `pip` supported
+- `runtime/bootstrap_state.json` recorded with `isolation_grade = self-contained`
 - `doctor --json` as the verification step
 
 This deeper fallback exists for agent environments such as non-native shells, unsupported
@@ -19,11 +20,12 @@ platforms, path-moved workspaces, or tools that cannot run the committed launche
 
 An environment is good enough for ordinary DocMason work when all of these are true:
 
-1. Python 3.11 or newer is available.
-2. The workspace has a repo-local virtual environment.
-3. `docmason` imports from the current workspace `src/` tree, not from another checkout.
-4. `docmason doctor --json` reports the environment checks honestly.
-5. If the current corpus includes Office files, LibreOffice is installed before sync runs.
+1. A bootstrap or repair Python 3.11 or newer is available.
+2. `.docmason/toolchain/python/current/bin/python3.13` exists.
+3. `.venv/bin/python` resolves under `.docmason/toolchain/python/`.
+4. `runtime/bootstrap_state.json` reports `schema_version = 3` and `isolation_grade = self-contained`.
+5. `docmason doctor --json` reports the environment checks honestly.
+6. If the current corpus includes Office files, LibreOffice is installed before sync runs.
 
 ## Lowest-Risk Manual Repair Order
 
@@ -36,56 +38,49 @@ An environment is good enough for ordinary DocMason work when all of these are t
    - On macOS, Homebrew Python is acceptable.
    - On Linux, use the distro package manager or an already-installed supported Python.
 
-3. Create or repair `.venv`.
+3. Run the repo-local prepare flow from source with that bootstrap Python.
 
 Preferred path:
 
 ```bash
-uv venv --allow-existing --python /absolute/path/to/python3.11 .venv
+PYTHONPATH=src /absolute/path/to/python3.11 -m docmason prepare --yes
 ```
 
-Fallback path:
+If you want machine-readable output:
 
 ```bash
-/absolute/path/to/python3.11 -m venv .venv
+PYTHONPATH=src /absolute/path/to/python3.11 -m docmason prepare --yes --json
 ```
 
-4. Install DocMason into that `.venv`.
+4. If `prepare` cannot provision `uv` automatically, repair the repo-local bootstrap helper venv.
 
 Preferred path:
 
 ```bash
-uv pip install --python .venv/bin/python -e ".[dev]"
+/absolute/path/to/python3.11 -m venv .docmason/toolchain/bootstrap/venv
+.docmason/toolchain/bootstrap/venv/bin/python -m ensurepip --upgrade
+.docmason/toolchain/bootstrap/venv/bin/python -m pip install uv
+PYTHONPATH=src .docmason/toolchain/bootstrap/venv/bin/python -m docmason prepare --yes
 ```
 
-Fallback path:
-
-```bash
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e ".[dev]"
-```
-
-5. Finish the repo-local bootstrap.
-
-```bash
-.venv/bin/python -m docmason prepare --yes
-```
-
-6. Verify.
+5. Verify.
 
 ```bash
 .venv/bin/python -m docmason doctor --json
 .venv/bin/python -m docmason status --json
+.venv/bin/python -c "import pathlib; print(pathlib.Path('.venv/bin/python').resolve())"
 ```
+
+The resolved `.venv/bin/python` path should sit under `.docmason/toolchain/python/`.
 
 ## Workspace Move Repair
 
 If the repository was renamed or moved:
 
-1. Do not trust an old editable install path.
-2. Recreate or repair `.venv` from the new workspace root.
-3. Re-run the editable install into that `.venv`.
-4. Re-run `docmason prepare --yes` so `runtime/bootstrap_state.json` reflects the new root.
+1. Do not trust an old `.venv` or cached bootstrap marker from the previous path.
+2. Re-run `docmason prepare --yes` from the new workspace root through a supported bootstrap Python.
+3. Confirm that `runtime/bootstrap_state.json` now records the new `workspace_root`.
+4. Confirm that `.venv/bin/python` resolves under the new `.docmason/toolchain/python/` tree.
 
 ## Office Rendering Requirement
 
@@ -149,17 +144,18 @@ wants that path.
 Use the same invariants:
 
 - keep the environment repo-local
-- create `.venv`
-- install the package in editable mode
+- let `prepare` build repo-local managed Python `3.13`
+- let `prepare` rebuild `.venv` against that managed runtime
 - verify with `doctor`
 
 Typical Windows commands:
 
 ```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.venv\Scripts\python.exe -m docmason prepare --yes
+py -3.11 -m venv .docmason\toolchain\bootstrap\venv
+.docmason\toolchain\bootstrap\venv\Scripts\python.exe -m ensurepip --upgrade
+.docmason\toolchain\bootstrap\venv\Scripts\python.exe -m pip install uv
+$env:PYTHONPATH = "src"
+.docmason\toolchain\bootstrap\venv\Scripts\python.exe -m docmason prepare --yes
 .venv\Scripts\python.exe -m docmason doctor --json
 ```
 

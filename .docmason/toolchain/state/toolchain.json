@@ -1,0 +1,32 @@
+{
+  "package_manager": "uv",
+  "python_baseline": "3.13",
+  "schema_version": 1,
+  "toolchain": {
+    "entrypoint_health": "ready",
+    "entrypoint_healthy": true,
+    "isolation_grade": "self-contained",
+    "managed_python_executable": "/Users/xujiantong/Code/repos/DocMason/.docmason/toolchain/python/installs/cpython-3.13.12-macos-aarch64-none/bin/python3.13",
+    "managed_python_healthy": true,
+    "managed_python_origin": "repo-local-managed",
+    "managed_python_version": "3.13.12",
+    "pip_cache_dir": ".docmason/toolchain/cache/pip",
+    "python_baseline": "3.13",
+    "repair_intrusion_class": null,
+    "repair_reason": null,
+    "repair_recommended": false,
+    "repair_required": false,
+    "schema_version": 1,
+    "shared_host_dependencies": [],
+    "shared_host_dependency": false,
+    "toolchain_current_root": "/Users/xujiantong/Code/repos/DocMason/.docmason/toolchain/python/installs/cpython-3.13.12-macos-aarch64-none",
+    "toolchain_mode": "repo-local-managed",
+    "toolchain_root": ".docmason/toolchain",
+    "uv_cache_dir": ".docmason/toolchain/cache/uv",
+    "venv_base_executable": "/Users/xujiantong/Code/repos/DocMason/.docmason/toolchain/python/installs/cpython-3.13.12-macos-aarch64-none/bin/python3.13",
+    "venv_health": "ready",
+    "venv_healthy": true
+  },
+  "updated_at": "2026-03-26T07:19:18.799639Z",
+  "uv_bootstrap_mode": "shared-uv"
+}

@@ -16,6 +16,11 @@ from docmason.conversation import open_conversation_turn, update_conversation_tu
 from docmason.coordination import workspace_lease
 from docmason.project import WorkspacePaths, read_json, source_inventory_signature, write_json
 from docmason.retrieval import retrieve_corpus, trace_answer_file
+from tests.support_ready_workspace import (
+    seed_degraded_broken_venv_bootstrap_state,
+    seed_mixed_external_venv_bootstrap_state,
+    seed_self_contained_bootstrap_state,
+)
 from docmason.workflows import load_workflow_metadata_file, render_workflow_routing_markdown
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,25 +87,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         return WorkspacePaths(root=root)
 
     def mark_environment_ready(self, workspace: WorkspacePaths) -> None:
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "schema_version": 2,
-                "status": "ready",
-                "prepared_at": "2026-03-16T00:00:00Z",
-                "environment_ready": True,
-                "workspace_root": str(workspace.root.resolve()),
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-            },
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-16T00:00:00Z",
         )
 
     def create_pdf(self, path: Path, *, page_count: int = 1) -> None:
@@ -211,6 +200,19 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
         return source_ids
+
+    def seed_published_kb_stub(self, workspace: WorkspacePaths) -> None:
+        artifact = workspace.knowledge_base_current_dir / "artifact.md"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("compiled knowledge\n", encoding="utf-8")
+        write_json(
+            workspace.sync_state_path,
+            {
+                "published_source_signature": source_inventory_signature(workspace),
+                "last_publish_at": "2026-03-21T00:05:00Z",
+                "last_sync_at": "2026-03-21T00:05:00Z",
+            },
+        )
 
     def test_ask_workflow_metadata_exposes_user_entry_details(self) -> None:
         skill_path = ROOT / "skills" / "canonical" / "ask" / "SKILL.md"
@@ -349,27 +351,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
 
         def fake_prepare(*args: object, **kwargs: object) -> object:
             del args, kwargs
-            workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-            workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            write_json(
-                workspace.bootstrap_state_path,
-                {
-                    "schema_version": 2,
-                    "status": "ready",
-                    "environment_ready": True,
-                    "prepared_at": "2026-03-21T00:00:00Z",
-                    "workspace_root": str(workspace.root.resolve()),
-                    "package_manager": "uv",
-                    "python_executable": "/usr/bin/python3",
-                    "venv_python": ".venv/bin/python",
-                    "editable_install": True,
-                    "editable_install_detail": (
-                        "Editable install resolves to the workspace source tree."
-                    ),
-                    "office_renderer_ready": True,
-                    "pdf_renderer_ready": True,
-                    "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-                },
+            seed_self_contained_bootstrap_state(
+                workspace,
+                prepared_at="2026-03-21T00:00:00Z",
             )
             return type(
                 "PrepareReport",
@@ -440,26 +424,10 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")
         self.create_pdf(workspace.source_dir / "companion.pdf")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "schema_version": 2,
-                "status": "ready",
-                "environment_ready": True,
-                "prepared_at": "2026-03-21T00:00:00Z",
-                "workspace_root": str(workspace.root.resolve()),
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-            },
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-21T00:00:00Z",
         )
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         self.publish_seeded_corpus(workspace)
 
         with (
@@ -497,23 +465,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
 
         def fake_prepare(*args: object, **kwargs: object) -> object:
             del args, kwargs
-            write_json(
-                workspace.bootstrap_state_path,
-                {
-                    "schema_version": 2,
-                    "status": "ready",
-                    "environment_ready": True,
-                    "prepared_at": "2026-03-21T00:00:00Z",
-                    "workspace_root": str(workspace.root.resolve()),
-                    "package_manager": "uv",
-                    "python_executable": "/usr/bin/python3",
-                    "venv_python": ".venv/bin/python",
-                    "editable_install": True,
-                    "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                    "office_renderer_ready": True,
-                    "pdf_renderer_ready": True,
-                    "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-                },
+            seed_self_contained_bootstrap_state(
+                workspace,
+                prepared_at="2026-03-21T00:00:00Z",
             )
             return type(
                 "PrepareReport",
@@ -580,6 +534,90 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.assertTrue(turn["auto_sync_triggered"])
         self.assertFalse(turn["knowledge_base_missing"])
 
+    def test_prepare_ask_turn_blocks_workspace_corpus_on_mixed_environment(self) -> None:
+        workspace = self.make_workspace()
+        self.create_pdf(workspace.source_dir / "example.pdf")
+        self.seed_published_kb_stub(workspace)
+        seed_mixed_external_venv_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-21T00:00:00Z",
+        )
+
+        with (
+            mock.patch(
+                "docmason.ask.prepare_workspace",
+                return_value=CommandReport(
+                    1,
+                    {
+                        "status": "action-required",
+                        "actions_performed": [],
+                        "actions_skipped": [],
+                        "next_steps": ["Repair the workspace toolchain."],
+                        "environment": {
+                            "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                        },
+                    },
+                    [],
+                ),
+            ),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-mixed-env"}, clear=False),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the workspace corpus say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        self.assertEqual(turn["status"], "action-required")
+        self.assertEqual(turn["inner_workflow_id"], "workspace-bootstrap")
+        self.assertTrue(turn["auto_prepare_triggered"])
+        self.assertIn("external interpreter", str(turn["freshness_notice"]))
+
+    def test_prepare_ask_turn_blocks_composition_on_degraded_environment(self) -> None:
+        workspace = self.make_workspace()
+        self.create_pdf(workspace.source_dir / "example.pdf")
+        self.seed_published_kb_stub(workspace)
+        seed_degraded_broken_venv_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-21T00:00:00Z",
+        )
+
+        with (
+            mock.patch(
+                "docmason.ask.prepare_workspace",
+                return_value=CommandReport(
+                    1,
+                    {
+                        "status": "action-required",
+                        "actions_performed": [],
+                        "actions_skipped": [],
+                        "next_steps": ["Repair the workspace toolchain."],
+                        "environment": {
+                            "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                        },
+                    },
+                    [],
+                ),
+            ),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-degraded-env"}, clear=False),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="Draft a composition plan from the workspace corpus.",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="composition",
+                    question_domain="composition",
+                ),
+            )
+
+        self.assertEqual(turn["status"], "action-required")
+        self.assertEqual(turn["inner_workflow_id"], "workspace-bootstrap")
+        self.assertTrue(turn["auto_prepare_triggered"])
+        self.assertIn("broken interpreter path", str(turn["freshness_notice"]))
+
     def test_prepare_ask_turn_refreshes_run_and_turn_version_truth_after_auto_sync(self) -> None:
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")
@@ -587,25 +625,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
 
         def fake_prepare(*args: object, **kwargs: object) -> object:
             del args, kwargs
-            workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-            workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-            write_json(
-                workspace.bootstrap_state_path,
-                {
-                    "schema_version": 2,
-                    "status": "ready",
-                    "environment_ready": True,
-                    "prepared_at": "2026-03-21T00:00:00Z",
-                    "workspace_root": str(workspace.root.resolve()),
-                    "package_manager": "uv",
-                    "python_executable": "/usr/bin/python3",
-                    "venv_python": ".venv/bin/python",
-                    "editable_install": True,
-                    "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                    "office_renderer_ready": True,
-                    "pdf_renderer_ready": True,
-                    "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-                },
+            seed_self_contained_bootstrap_state(
+                workspace,
+                prepared_at="2026-03-21T00:00:00Z",
             )
             return type(
                 "PrepareReport",

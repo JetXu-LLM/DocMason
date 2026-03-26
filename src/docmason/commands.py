@@ -5,22 +5,19 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import site
 import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .interaction import (
-    interaction_ingest_snapshot,
-    maybe_reconcile_active_thread,
-    refresh_generated_connector_manifests,
-)
 from .control_plane import (
     approve_shared_job,
     block_shared_job,
@@ -37,22 +34,14 @@ from .control_plane import (
     sync_input_signature,
     workspace_state_snapshot,
 )
-from .knowledge import (
-    office_renderer_snapshot,
-    pdf_renderer_snapshot,
-    preview_source_changes,
-    validate_workspace,
-)
-from .knowledge import (
-    sync_workspace as run_phase4_sync,
-)
-from .operator_eval import run_operator_eval
+from .coordination import LeaseConflictError
 from .project import (
     BOOTSTRAP_STATE_SCHEMA_VERSION,
     MINIMUM_PYTHON,
     SUPPORTED_INPUTS,
     WorkspacePaths,
     adapter_snapshot,
+    append_jsonl,
     bootstrap_state,
     bootstrap_state_summary,
     cached_bootstrap_readiness,
@@ -67,9 +56,18 @@ from .project import (
     supported_source_documents,
     write_json,
 )
-from .retrieval import retrieve_corpus, trace_answer_file, trace_session, trace_source
 from .review import refresh_log_review_summary
 from .run_control import record_run_event_for_runs
+from .toolchain import (
+    PREPARED_WORKSPACE_PYTHON_BASELINE,
+    inspect_entrypoint,
+    inspect_toolchain,
+)
+from .workspace_probe import (
+    office_renderer_snapshot,
+    pdf_renderer_snapshot,
+    preview_source_changes,
+)
 from .workflows import (
     WorkflowMetadata,
     WorkflowMetadataError,
@@ -81,6 +79,7 @@ READY = "ready"
 DEGRADED = "degraded"
 ACTION_REQUIRED = "action-required"
 UNSUPPORTED_TARGET = "planned but not implemented yet"
+_LEASE_RESOURCE_PATTERN = re.compile(r"for `([^`]+)`")
 
 
 @dataclass(frozen=True)
@@ -121,6 +120,335 @@ def default_runner(command: Sequence[str], cwd: Path) -> CommandExecution:
     )
 
 
+def _interaction_ingest_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
+    """Load interaction-ingest state lazily so command import stays lightweight."""
+    from .interaction import interaction_ingest_snapshot
+
+    return interaction_ingest_snapshot(paths)
+
+
+def _maybe_reconcile_active_thread(paths: WorkspacePaths) -> None:
+    """Run active-thread reconciliation lazily so readiness paths avoid heavy imports."""
+    from .interaction import maybe_reconcile_active_thread
+
+    maybe_reconcile_active_thread(paths)
+
+
+def _coordination_payload(
+    *,
+    state: str,
+    code: str,
+    detail: str,
+    retryable: bool,
+    resource: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "state": state,
+        "code": code,
+        "detail": detail,
+        "retryable": retryable,
+    }
+    if isinstance(resource, str) and resource:
+        payload["resource"] = resource
+    return payload
+
+
+def _coordination_from_lease_conflict(
+    exc: LeaseConflictError,
+    *,
+    state: str,
+) -> dict[str, Any]:
+    detail = str(exc)
+    match = _LEASE_RESOURCE_PATTERN.search(detail)
+    resource = match.group(1) if match else None
+    return _coordination_payload(
+        state=state,
+        code="reconciliation-lease-conflict",
+        detail=detail,
+        retryable=True,
+        resource=resource,
+    )
+
+
+def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
+    """Load active native-thread front-door context when it can be detected honestly."""
+    from .conversation import (
+        build_log_context,
+        detect_agent_surface,
+        latest_conversation_turn,
+        load_conversation_record,
+        native_conversation_id,
+        normalize_front_door_state,
+    )
+
+    agent_surface = detect_agent_surface()
+    native_id, _native_source = native_conversation_id()
+    conversation: dict[str, Any] = {}
+    if isinstance(native_id, str) and native_id:
+        conversation = load_conversation_record(paths, native_id)
+
+    latest_turn = latest_conversation_turn(conversation)
+    front_door_state = (
+        normalize_front_door_state(latest_turn.get("front_door_state"))
+        if isinstance(latest_turn, dict)
+        else None
+    )
+    warning = None
+    if isinstance(native_id, str) and native_id and front_door_state == "native-reconciled-only":
+        warning = {
+            "code": "noncanonical-operator-direct",
+            "detail": (
+                "This result is operator evidence only. The active native thread has not yet "
+                "entered canonical ask ownership for the current turn."
+            ),
+            "recommended_action": (
+                "Route the ordinary question back through canonical ask before treating this "
+                "evidence as ordinary-answer completion."
+            ),
+        }
+
+    log_context = None
+    if isinstance(native_id, str) and native_id and isinstance(latest_turn, dict):
+        log_context = build_log_context(
+            conversation_id=native_id,
+            turn_id=str(latest_turn.get("turn_id") or ""),
+            run_id=(
+                str(latest_turn.get("active_run_id"))
+                if isinstance(latest_turn.get("active_run_id"), str)
+                and latest_turn.get("active_run_id")
+                else None
+            ),
+            entry_workflow_id=str(latest_turn.get("entry_workflow_id") or "ask"),
+            inner_workflow_id=str(latest_turn.get("inner_workflow_id") or "ask"),
+            native_turn_id=(
+                str(latest_turn.get("native_turn_id"))
+                if isinstance(latest_turn.get("native_turn_id"), str)
+                else None
+            ),
+            front_door_state=front_door_state,
+            question_class=(
+                str(latest_turn.get("question_class"))
+                if isinstance(latest_turn.get("question_class"), str)
+                else None
+            ),
+            question_domain=(
+                str(latest_turn.get("question_domain"))
+                if isinstance(latest_turn.get("question_domain"), str)
+                else None
+            ),
+            support_strategy=(
+                str(latest_turn.get("support_strategy"))
+                if isinstance(latest_turn.get("support_strategy"), str)
+                else None
+            ),
+            analysis_origin=(
+                str(latest_turn.get("analysis_origin"))
+                if isinstance(latest_turn.get("analysis_origin"), str)
+                else None
+            ),
+            support_basis=(
+                str(latest_turn.get("support_basis"))
+                if isinstance(latest_turn.get("support_basis"), str)
+                else None
+            ),
+            support_manifest_path=(
+                str(latest_turn.get("support_manifest_path"))
+                if isinstance(latest_turn.get("support_manifest_path"), str)
+                else None
+            ),
+        )
+
+    return {
+        "agent_surface": agent_surface,
+        "conversation_id": native_id if isinstance(native_id, str) and native_id else None,
+        "turn_id": (
+            str(latest_turn.get("turn_id"))
+            if isinstance(latest_turn, dict) and isinstance(latest_turn.get("turn_id"), str)
+            else None
+        ),
+        "turn_front_door_state": front_door_state,
+        "canonical_ask_opened": front_door_state == "canonical-ask",
+        "warning": warning,
+        "log_context": log_context,
+    }
+
+
+def _reconcile_command_context(
+    paths: WorkspacePaths,
+    *,
+    mutating: bool,
+) -> dict[str, Any]:
+    """Reconcile active native state when safe and classify coordination outcomes."""
+    coordination = None
+    reconciliation_state = "ready"
+    reconciliation_result = None
+    try:
+        reconciliation_result = _maybe_reconcile_active_thread(paths)
+    except LeaseConflictError as exc:
+        reconciliation_state = "blocked" if mutating else "warning"
+        coordination = _coordination_from_lease_conflict(
+            exc,
+            state=reconciliation_state,
+        )
+    return {
+        "state": reconciliation_state,
+        "coordination": coordination,
+        "reconciliation_result": reconciliation_result,
+        "front_door": _active_front_door_context(paths),
+    }
+
+
+def _apply_coordination_warning(
+    *,
+    payload: dict[str, Any],
+    lines: list[str],
+    coordination: dict[str, Any] | None,
+) -> None:
+    if not isinstance(coordination, dict):
+        return
+    payload["coordination"] = coordination
+    lines.append(f"Coordination warning: {coordination['detail']}")
+
+
+def _mutating_command_coordination_report(
+    *,
+    command_name: str,
+    status_field: str,
+    coordination: dict[str, Any],
+    environment: dict[str, Any] | None = None,
+) -> CommandReport:
+    payload: dict[str, Any] = {
+        "status": ACTION_REQUIRED,
+        status_field: "coordination-blocked",
+        "detail": coordination["detail"],
+        "coordination": coordination,
+    }
+    if isinstance(environment, dict):
+        payload["environment"] = environment
+    lines = [
+        f"{command_name}: {ACTION_REQUIRED}",
+        coordination["detail"],
+        "Next step: retry after the active native-thread reconciliation lease conflict clears.",
+    ]
+    return make_report(ACTION_REQUIRED, payload, lines)
+
+
+def _refresh_generated_connector_manifests(paths: WorkspacePaths) -> None:
+    """Refresh generated connector manifests lazily."""
+    from .interaction import refresh_generated_connector_manifests
+
+    refresh_generated_connector_manifests(paths)
+
+
+def _validate_workspace(paths: WorkspacePaths, *, target: str) -> dict[str, Any]:
+    """Run knowledge-base validation lazily."""
+    from .knowledge import validate_workspace
+
+    return validate_workspace(paths, target=target)
+
+
+def _run_phase4_sync(paths: WorkspacePaths, *, autonomous: bool) -> dict[str, Any]:
+    """Run the Phase 4 sync body lazily."""
+    from .knowledge import sync_workspace
+
+    return sync_workspace(paths, autonomous=autonomous)
+
+
+def _retrieve_corpus(
+    *,
+    paths: WorkspacePaths,
+    query: str,
+    top: int,
+    graph_hops: int,
+    document_types: list[str] | None,
+    source_ids: list[str] | None,
+    include_renders: bool,
+    log_context: dict[str, str] | None = None,
+    log_origin: str | None = None,
+) -> dict[str, Any]:
+    """Run retrieval lazily so command import avoids hybrid dependencies."""
+    from .retrieval import retrieve_corpus
+
+    return retrieve_corpus(
+        paths,
+        query=query,
+        top=top,
+        graph_hops=graph_hops,
+        document_types=document_types,
+        source_ids=source_ids,
+        include_renders=include_renders,
+        log_context=log_context,
+        log_origin=log_origin,
+    )
+
+
+def _trace_source(
+    *,
+    paths: WorkspacePaths,
+    source_id: str,
+    unit_id: str | None,
+    log_context: dict[str, str] | None = None,
+    log_origin: str | None = None,
+) -> dict[str, Any]:
+    """Trace one source lazily."""
+    from .retrieval import trace_source
+
+    return trace_source(
+        paths,
+        source_id=source_id,
+        unit_id=unit_id,
+        log_context=log_context,
+        log_origin=log_origin,
+    )
+
+
+def _trace_answer_file(
+    *,
+    paths: WorkspacePaths,
+    answer_file: Path,
+    top: int,
+    log_context: dict[str, str] | None = None,
+    log_origin: str | None = None,
+) -> dict[str, Any]:
+    """Trace one answer file lazily."""
+    from .retrieval import trace_answer_file
+
+    return trace_answer_file(
+        paths,
+        answer_file=answer_file,
+        top=top,
+        log_context=log_context,
+        log_origin=log_origin,
+    )
+
+
+def _trace_session(
+    *,
+    paths: WorkspacePaths,
+    session_id: str,
+    top: int,
+    log_context: dict[str, str] | None = None,
+    log_origin: str | None = None,
+) -> dict[str, Any]:
+    """Trace one retrieval session lazily."""
+    from .retrieval import trace_session
+
+    return trace_session(
+        paths,
+        session_id=session_id,
+        top=top,
+        log_context=log_context,
+        log_origin=log_origin,
+    )
+
+
+def _run_operator_eval(paths: WorkspacePaths) -> tuple[dict[str, Any], list[str]]:
+    """Run operator eval lazily."""
+    from .operator_eval import run_operator_eval
+
+    return run_operator_eval(paths)
+
+
 def summarize_command_failure(command: Sequence[str], execution: CommandExecution) -> str:
     """Render a compact failure summary for subprocess-driven steps."""
     details = execution.stderr or execution.stdout or "no output"
@@ -142,9 +470,29 @@ def platform_supported() -> bool:
     return sys.platform in {"darwin", "linux"}
 
 
-def find_uv_binary() -> str | None:
-    """Resolve ``uv`` from the active ``PATH`` when available."""
-    return shutil.which("uv")
+def discover_uv_binary(workspace: WorkspacePaths | None = None) -> tuple[str | None, str | None]:
+    """Resolve uv from repo-local bootstrap tooling first, then from the active PATH."""
+    if workspace is not None and workspace.toolchain_bootstrap_uv.exists():
+        return str(workspace.toolchain_bootstrap_uv), "bootstrap-venv-reused"
+    path_uv = shutil.which("uv")
+    if path_uv is not None:
+        return path_uv, "shared-uv"
+    return None, None
+
+
+def find_uv_binary(workspace: WorkspacePaths | None = None) -> str | None:
+    """Resolve uv from repo-local bootstrap tooling or the active PATH when available."""
+    uv_binary, _source = discover_uv_binary(workspace)
+    return uv_binary
+
+
+def uv_binary_mode(workspace: WorkspacePaths, uv_binary: str | None) -> str | None:
+    """Classify which uv surface the current command is using."""
+    if not isinstance(uv_binary, str) or not uv_binary:
+        return None
+    if uv_binary == str(workspace.toolchain_bootstrap_uv):
+        return "bootstrap-venv-reused"
+    return "shared-uv"
 
 
 def find_brew_binary() -> str | None:
@@ -402,6 +750,228 @@ def make_report(status: str, payload: dict[str, Any], lines: list[str]) -> Comma
     return CommandReport(exit_code=exit_code, payload=payload, lines=lines)
 
 
+@contextmanager
+def _temporary_env(overrides: dict[str, str]) -> Any:
+    """Temporarily apply environment overrides for subprocess-driven bootstrap steps."""
+    previous = {key: os.environ.get(key) for key in overrides}
+    try:
+        os.environ.update(overrides)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _ensure_repo_local_toolchain_dirs(workspace: WorkspacePaths) -> list[str]:
+    """Create the repo-local toolchain directory layout when it is missing."""
+    created: list[str] = []
+    for directory in (
+        workspace.docmason_dir,
+        workspace.toolchain_dir,
+        workspace.toolchain_python_dir,
+        workspace.toolchain_python_installs_dir,
+        workspace.toolchain_cache_dir,
+        workspace.toolchain_uv_cache_dir,
+        workspace.toolchain_pip_cache_dir,
+        workspace.toolchain_bootstrap_dir,
+        workspace.toolchain_state_dir,
+    ):
+        if directory.exists():
+            continue
+        directory.mkdir(parents=True, exist_ok=True)
+        created.append(str(directory.relative_to(workspace.root)))
+    return created
+
+
+def _refresh_symlink(link_path: Path, target_path: Path) -> None:
+    """Replace one symlink atomically enough for repo-local toolchain updates."""
+    if link_path.is_symlink() or link_path.exists():
+        remove_generated_path(link_path)
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    relative_target = os.path.relpath(target_path, link_path.parent)
+    os.symlink(relative_target, link_path)
+
+
+def _install_uv_into_bootstrap_venv(
+    workspace: WorkspacePaths,
+    *,
+    bootstrap_python: str,
+    command_runner: CommandRunner,
+) -> tuple[str | None, list[str], list[str]]:
+    """Create the repo-local bootstrap helper venv and install uv into it."""
+    actions_performed: list[str] = []
+    actions_skipped: list[str] = []
+    creation = command_runner(
+        [bootstrap_python, "-m", "venv", str(workspace.toolchain_bootstrap_venv_dir)],
+        workspace.root,
+    )
+    if creation.exit_code != 0:
+        actions_skipped.append(
+            summarize_command_failure([bootstrap_python, "-m", "venv"], creation)
+        )
+        return None, actions_performed, actions_skipped
+    actions_performed.append(
+        "Created the repo-local bootstrap helper venv under `.docmason/toolchain/bootstrap/venv`."
+    )
+    pip_ready, pip_detail = ensure_python_pip(
+        str(workspace.toolchain_bootstrap_python),
+        cwd=workspace.root,
+        command_runner=command_runner,
+    )
+    if not pip_ready:
+        actions_skipped.append(f"Bootstrap helper pip is unavailable. Details: {pip_detail}")
+        return None, actions_performed, actions_skipped
+    if pip_detail == "Restored pip with ensurepip.":
+        actions_performed.append("Restored bootstrap-helper pip with ensurepip.")
+    with _temporary_env({"PIP_CACHE_DIR": str(workspace.toolchain_pip_cache_dir)}):
+        install = command_runner(
+            [str(workspace.toolchain_bootstrap_python), "-m", "pip", "install", "uv"],
+            workspace.root,
+        )
+    if install.exit_code != 0:
+        actions_skipped.append(
+            summarize_command_failure(
+                [str(workspace.toolchain_bootstrap_python), "-m", "pip", "install", "uv"],
+                install,
+            )
+        )
+        return None, actions_performed, actions_skipped
+    if workspace.toolchain_bootstrap_uv.exists():
+        actions_performed.append("Installed uv into the repo-local bootstrap helper venv.")
+        return str(workspace.toolchain_bootstrap_uv), actions_performed, actions_skipped
+    actions_skipped.append("uv install completed but the bootstrap-helper uv executable is missing.")
+    return None, actions_performed, actions_skipped
+
+
+def _provision_managed_python(
+    workspace: WorkspacePaths,
+    *,
+    uv_binary: str,
+    command_runner: CommandRunner,
+) -> tuple[Path | None, str | None]:
+    """Provision the repo-local managed Python baseline and return its executable."""
+    with _temporary_env({"UV_CACHE_DIR": str(workspace.toolchain_uv_cache_dir)}):
+        install = command_runner(
+            [
+                uv_binary,
+                "python",
+                "install",
+                PREPARED_WORKSPACE_PYTHON_BASELINE,
+                "--install-dir",
+                str(workspace.toolchain_python_installs_dir),
+            ],
+            workspace.root,
+        )
+    if install.exit_code != 0:
+        return None, summarize_command_failure(
+            [uv_binary, "python", "install", PREPARED_WORKSPACE_PYTHON_BASELINE],
+            install,
+        )
+    from .toolchain import latest_managed_python_candidate
+
+    executable = latest_managed_python_candidate(workspace)
+    if executable is None:
+        return None, "uv reported success, but no repo-local managed Python 3.13 executable was found."
+    _refresh_symlink(workspace.toolchain_python_current_dir, executable.parent.parent)
+    return workspace.toolchain_python_current_dir / "bin" / f"python{PREPARED_WORKSPACE_PYTHON_BASELINE}", None
+
+
+def _rebuild_repo_local_venv(
+    workspace: WorkspacePaths,
+    *,
+    uv_binary: str,
+    managed_python: Path,
+    command_runner: CommandRunner,
+) -> str | None:
+    """Rebuild `.venv` against the repo-local managed Python baseline."""
+    with _temporary_env({"UV_CACHE_DIR": str(workspace.toolchain_uv_cache_dir)}):
+        creation = command_runner(
+            [
+                uv_binary,
+                "venv",
+                "--clear",
+                "--python",
+                str(managed_python),
+                str(workspace.venv_dir),
+            ],
+            workspace.root,
+        )
+    if creation.exit_code != 0:
+        return summarize_command_failure([uv_binary, "venv", "--clear"], creation)
+    return None
+
+
+def _install_workspace_into_repo_local_venv(
+    workspace: WorkspacePaths,
+    *,
+    uv_binary: str,
+    command_runner: CommandRunner,
+) -> str | None:
+    """Install DocMason into the rebuilt repo-local `.venv`."""
+    with _temporary_env({"UV_CACHE_DIR": str(workspace.toolchain_uv_cache_dir)}):
+        install = command_runner(
+            [uv_binary, "pip", "install", "--python", str(workspace.venv_python), "-e", ".[dev]"],
+            workspace.root,
+        )
+    if install.exit_code != 0:
+        return summarize_command_failure([uv_binary, "pip", "install"], install)
+    return None
+
+
+def _steady_state_pdf_renderer_snapshot(
+    workspace: WorkspacePaths,
+    *,
+    command_runner: CommandRunner,
+) -> dict[str, Any]:
+    """Probe PDF renderer readiness through the rebuilt repo-local `.venv`."""
+    probe = command_runner(
+        [
+            str(workspace.venv_python),
+            "-c",
+            (
+                "import json; "
+                "from docmason.workspace_probe import pdf_renderer_snapshot; "
+                "print(json.dumps(pdf_renderer_snapshot()))"
+            ),
+        ],
+        workspace.root,
+    )
+    payload_text = probe.stdout or probe.stderr
+    if probe.exit_code != 0 or not payload_text:
+        return {
+            "ready": False,
+            "detail": summarize_command_failure(
+                [str(workspace.venv_python), "-c", "pdf_renderer_snapshot()"],
+                probe,
+            ),
+            "missing": [],
+        }
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return {
+            "ready": False,
+            "detail": (
+                "The repo-local `.venv` PDF renderer probe returned non-JSON output during "
+                "prepare."
+            ),
+            "missing": [],
+        }
+    if not isinstance(payload, dict):
+        return {
+            "ready": False,
+            "detail": (
+                "The repo-local `.venv` PDF renderer probe returned an invalid payload during "
+                "prepare."
+            ),
+            "missing": [],
+        }
+    return payload
+
+
 def validation_command_status(validation_status: str) -> str:
     """Map a validation result to the CLI status contract."""
     if validation_status == "valid":
@@ -466,13 +1036,27 @@ def write_bootstrap_ready_marker(
     editable_detail: str,
     office_snapshot: dict[str, Any],
     pdf_snapshot: dict[str, Any],
+    uv_bootstrap_mode: str | None = None,
+    last_repair_at: str | None = None,
 ) -> None:
     """Persist the lightweight cached ready marker used by ordinary ask flows."""
     requirements = source_runtime_requirements(workspace)
+    toolchain = inspect_toolchain(
+        workspace,
+        editable_install=editable_install,
+    )
+    managed_python_executable = (
+        str(toolchain.get("managed_python_executable"))
+        if isinstance(toolchain.get("managed_python_executable"), str)
+        and toolchain.get("managed_python_executable")
+        else bootstrap_python
+    )
     state = {
         "schema_version": BOOTSTRAP_STATE_SCHEMA_VERSION,
         "status": status,
-        "environment_ready": bool(workspace.venv_python.exists() and editable_install),
+        "environment_ready": bool(
+            editable_install and toolchain.get("isolation_grade") == "self-contained"
+        ),
         "checked_at": bootstrap_checked_at(),
         "prepared_at": (
             isoformat_timestamp(workspace.venv_python.stat().st_mtime)
@@ -481,10 +1065,32 @@ def write_bootstrap_ready_marker(
         ),
         "workspace_root": str(workspace.root.resolve()),
         "package_manager": package_manager,
-        "python_executable": bootstrap_python,
+        "python_executable": managed_python_executable,
         "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
         "editable_install": editable_install,
         "editable_install_detail": editable_detail,
+        "python_baseline": PREPARED_WORKSPACE_PYTHON_BASELINE,
+        "toolchain_root": str(workspace.toolchain_dir.relative_to(workspace.root)),
+        "toolchain_mode": toolchain.get("toolchain_mode"),
+        "managed_python_executable": toolchain.get("managed_python_executable"),
+        "managed_python_version": toolchain.get("managed_python_version"),
+        "managed_python_origin": toolchain.get("managed_python_origin"),
+        "venv_base_executable": toolchain.get("venv_base_executable"),
+        "venv_health": toolchain.get("venv_health"),
+        "entrypoint_health": toolchain.get("entrypoint_health"),
+        "uv_bootstrap_mode": uv_bootstrap_mode,
+        "uv_cache_dir": str(workspace.toolchain_uv_cache_dir.relative_to(workspace.root)),
+        "pip_cache_dir": str(workspace.toolchain_pip_cache_dir.relative_to(workspace.root)),
+        "isolation_grade": toolchain.get("isolation_grade"),
+        "shared_host_dependency": toolchain.get("shared_host_dependency"),
+        "shared_host_dependencies": toolchain.get("shared_host_dependencies"),
+        "repair_recommended": toolchain.get("repair_recommended"),
+        "repair_reason": toolchain.get("repair_reason"),
+        "last_repair_at": last_repair_at,
+        "libreoffice_executable": office_snapshot.get("binary"),
+        "libreoffice_origin": (
+            "system-discovery" if office_snapshot.get("binary") else None
+        ),
         "pdf_renderer_ready": bool(pdf_snapshot.get("ready", False)),
         "office_renderer_ready": bool(office_snapshot.get("ready", False)),
         "office_renderer_required": bool(office_snapshot.get("required", False)),
@@ -504,18 +1110,36 @@ def environment_snapshot(
     editable_install, editable_detail = editable_install_probe(paths)
     state = bootstrap_state(paths)
     cached = cached_bootstrap_readiness(paths)
+    toolchain = inspect_toolchain(
+        paths,
+        bootstrap_state=state,
+        editable_install=editable_install,
+    )
     return {
-        "ready": bool(paths.venv_python.exists() and editable_install),
+        "ready": bool(cached.get("ready")),
         "venv_python": str(paths.venv_python.relative_to(paths.root)),
         "editable_install": editable_install,
         "editable_install_detail": editable_detail,
         "bootstrap_state_present": bool(state),
         "package_manager": state.get("package_manager"),
         "prepared_at": state.get("prepared_at"),
+        "python_baseline": toolchain.get("python_baseline"),
+        "toolchain_mode": toolchain.get("toolchain_mode"),
+        "isolation_grade": toolchain.get("isolation_grade"),
+        "managed_python_healthy": toolchain.get("managed_python_healthy"),
+        "venv_healthy": toolchain.get("venv_healthy"),
+        "entrypoint_health": toolchain.get("entrypoint_health"),
+        "shared_host_dependency": toolchain.get("shared_host_dependency"),
+        "shared_host_dependencies": toolchain.get("shared_host_dependencies"),
+        "repair_required": toolchain.get("repair_required"),
+        "repair_recommended": toolchain.get("repair_recommended"),
+        "repair_reason": toolchain.get("repair_reason"),
+        "repair_intrusion_class": toolchain.get("repair_intrusion_class"),
         "manual_recovery_doc": manual_workspace_recovery_doc(),
         "cached_ready": bool(cached.get("ready")),
         "cached_ready_reason": cached.get("reason"),
         "cached_ready_detail": cached.get("detail"),
+        "toolchain": toolchain,
         "bootstrap_state": bootstrap_state_summary(paths),
     }
 
@@ -544,7 +1168,7 @@ def workspace_stage(
     source_tiers = source_document_tier_counts(source_counts)
     kb = knowledge_base_snapshot(paths)
     adapters = adapter_snapshot(paths)
-    interaction = interaction_ingest_snapshot(paths)
+    interaction = _interaction_ingest_snapshot(paths)
     control_plane = workspace_state_snapshot(paths)
     claude = adapters["claude"]
     active_confirmation_jobs = [
@@ -590,6 +1214,7 @@ def workspace_stage(
     payload = {
         "stage": stage,
         "environment_ready": environment["ready"],
+        "environment": environment,
         "bootstrap_state": dict(environment["bootstrap_state"]),
         "source_documents": {
             "path": str(paths.source_dir.relative_to(paths.root)),
@@ -619,10 +1244,22 @@ def prepare_workspace(
 ) -> CommandReport:
     """Bootstrap repo-local state and install DocMason into the workspace environment."""
     workspace = paths or locate_workspace()
+    command_context = _reconcile_command_context(workspace, mutating=True)
+    if command_context["state"] == "blocked":
+        return _mutating_command_coordination_report(
+            command_name="Prepare status",
+            status_field="prepare_status",
+            coordination=command_context["coordination"],
+            environment=environment_snapshot(workspace, editable_install_probe=editable_install_probe),
+        )
     actions_performed: list[str] = []
     actions_skipped: list[str] = []
     next_steps: list[str] = []
     manual_recovery_next_step = manual_workspace_recovery_step()
+    initial_toolchain = inspect_toolchain(
+        workspace,
+        bootstrap_state=bootstrap_state(workspace),
+    )
 
     if not platform_supported():
         payload = {
@@ -685,266 +1322,189 @@ def prepare_workspace(
             directory.mkdir(parents=True, exist_ok=True)
             actions_performed.append(f"Created {directory.relative_to(workspace.root)}.")
 
+    for created in _ensure_repo_local_toolchain_dirs(workspace):
+        actions_performed.append(f"Created {created}.")
+
     bootstrap_python = str(Path(sys.executable).resolve())
-    package_manager = "pip"
+    package_manager = "uv"
     status = READY
     effective_owner = owner or _unique_command_owner("prepare")
-    uv_binary = find_uv_binary()
-    should_attempt_uv_install = False
+    uv_binary = find_uv_binary(workspace)
+    uv_bootstrap_mode = uv_binary_mode(workspace, uv_binary)
     uv_install_command, uv_install_display = preferred_uv_install_command(bootstrap_python)
     if interactive is None:
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
 
     if uv_binary is None:
-        if assume_yes:
-            should_attempt_uv_install = True
-        elif interactive:
+        should_attempt_uv_install = bool(assume_yes)
+        if not should_attempt_uv_install and interactive:
             answer = prompt(
                 "uv is not installed. Install it with "
                 f"{uv_install_display} before continuing? [y/N]: "
             )
             should_attempt_uv_install = answer.strip().lower() in {"y", "yes"}
-        else:
-            actions_skipped.append(
-                "Skipped uv installation in non-interactive mode; falling back to venv + pip."
-            )
-            next_steps.append(f"Recommended: install uv with {uv_install_display}.")
-
-    if uv_binary is None and should_attempt_uv_install:
-        pip_ready, pip_detail = ensure_python_pip(
-            bootstrap_python,
-            cwd=workspace.root,
+        if not should_attempt_uv_install:
+            payload = {
+                "status": ACTION_REQUIRED,
+                "actions_performed": actions_performed,
+                "actions_skipped": actions_skipped,
+                "environment": {
+                    "package_manager": "uv",
+                    "python_executable": bootstrap_python,
+                    "python_baseline": PREPARED_WORKSPACE_PYTHON_BASELINE,
+                },
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
+                "next_steps": [
+                    "Run `docmason prepare --yes` to let the workspace create a repo-local bootstrap helper and install uv.",
+                    manual_recovery_next_step,
+                ],
+            }
+            lines = [
+                f"Prepare status: {ACTION_REQUIRED}",
+                "uv is required to provision the repo-local managed Python 3.13 toolchain.",
+                "Next step: run `docmason prepare --yes` to let the workspace create a repo-local bootstrap helper and install uv.",
+            ]
+            return make_report(ACTION_REQUIRED, payload, lines)
+        uv_binary, bootstrap_actions, bootstrap_skips = _install_uv_into_bootstrap_venv(
+            workspace,
+            bootstrap_python=bootstrap_python,
             command_runner=command_runner,
         )
-        if not pip_ready:
-            actions_skipped.append(
-                "pip is unavailable for the bootstrap interpreter; falling back to venv + pip. "
-                f"Details: {pip_detail}"
-            )
-            next_steps.append(
-                "Repair the bootstrap interpreter so `python -m pip` works, or continue with the "
-                "repo-local venv + pip fallback."
-            )
-        else:
-            if pip_detail == "Restored pip with ensurepip.":
-                actions_performed.append("Restored bootstrap pip with ensurepip.")
-            execution = command_runner(uv_install_command, workspace.root)
-            if execution.exit_code == 0:
-                uv_binary = find_uv_binary()
-                uv_candidate = user_scoped_uv_path()
-                if uv_binary is not None:
-                    actions_performed.append(f"Installed uv with {uv_install_display}.")
-                elif uv_candidate is not None and uv_candidate.exists():
-                    uv_binary = str(uv_candidate)
-                    actions_performed.append(f"Installed uv with {uv_install_display}.")
-                else:
-                    actions_skipped.append(
-                        "Completed a uv install attempt, but the uv executable was not found "
-                        "on the current PATH; "
-                        "falling back to venv + pip."
-                    )
-            else:
-                actions_skipped.append(
-                    f"uv installation failed; falling back to venv + pip. "
-                    f"Details: {execution.stderr or execution.stdout or 'no output'}"
-                )
-                next_steps.append(f"Retry uv installation with {uv_install_display}.")
-
-    if uv_binary is not None:
-        package_manager = "uv"
-        creation = command_runner(
-            [
-                uv_binary,
-                "venv",
-                "--allow-existing",
-                "--python",
-                bootstrap_python,
-                str(workspace.venv_dir),
+        actions_performed.extend(bootstrap_actions)
+        actions_skipped.extend(bootstrap_skips)
+        uv_bootstrap_mode = "bootstrap-venv-installed" if uv_binary is not None else None
+        if uv_binary is None:
+            payload = {
+                "status": ACTION_REQUIRED,
+                "actions_performed": actions_performed,
+                "actions_skipped": actions_skipped,
+                "environment": {
+                    "package_manager": package_manager,
+                    "python_executable": bootstrap_python,
+                    "python_baseline": PREPARED_WORKSPACE_PYTHON_BASELINE,
+                },
+                "manual_recovery_doc": manual_workspace_recovery_doc(),
+                "next_steps": [
+                    f"Install uv with {uv_install_display} or repair the bootstrap helper venv, then rerun `docmason prepare`.",
+                    manual_recovery_next_step,
+                ],
+            }
+            lines = [
+                f"Prepare status: {ACTION_REQUIRED}",
+                "The workspace could not provision a repo-local uv bootstrap helper.",
+                "Next step: install uv manually or repair the bootstrap helper venv, then rerun `docmason prepare`.",
+            ]
+            return make_report(ACTION_REQUIRED, payload, lines)
+    managed_python, managed_error = _provision_managed_python(
+        workspace,
+        uv_binary=uv_binary,
+        command_runner=command_runner,
+    )
+    if managed_error is not None or managed_python is None:
+        payload = {
+            "status": ACTION_REQUIRED,
+            "actions_performed": actions_performed,
+            "actions_skipped": actions_skipped,
+            "environment": {
+                "package_manager": package_manager,
+                "python_executable": bootstrap_python,
+                "python_baseline": PREPARED_WORKSPACE_PYTHON_BASELINE,
+                "toolchain_mode": "missing",
+            },
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "next_steps": [
+                managed_error or "Provision the repo-local managed Python 3.13 toolchain and retry.",
+                manual_recovery_next_step,
             ],
-            workspace.root,
-        )
-        if creation.exit_code != 0:
-            environment = {
-                "package_manager": package_manager,
-                "python_executable": bootstrap_python,
-            }
-            payload = {
-                "status": ACTION_REQUIRED,
-                "actions_performed": actions_performed,
-                "actions_skipped": actions_skipped,
-                "environment": environment,
-                "manual_recovery_doc": manual_workspace_recovery_doc(),
-                "next_steps": [
-                    summarize_command_failure(["uv", "venv"], creation),
-                    manual_recovery_next_step,
-                ],
-            }
-            lines = [
-                f"Prepare status: {ACTION_REQUIRED}",
-                summarize_command_failure([uv_binary, "venv"], creation),
-                manual_recovery_next_step,
-            ]
-            return make_report(ACTION_REQUIRED, payload, lines)
-        actions_performed.append("Created or repaired .venv with uv.")
+        }
+        lines = [
+            f"Prepare status: {ACTION_REQUIRED}",
+            managed_error or "The repo-local managed Python 3.13 toolchain could not be provisioned.",
+            manual_recovery_next_step,
+        ]
+        return make_report(ACTION_REQUIRED, payload, lines)
+    actions_performed.append("Provisioned repo-local managed Python 3.13 under `.docmason/toolchain/python`.")
 
-        install = command_runner(
-            [uv_binary, "pip", "install", "--python", str(workspace.venv_python), "-e", ".[dev]"],
-            workspace.root,
-        )
-        if install.exit_code != 0:
-            environment = {
+    venv_error = _rebuild_repo_local_venv(
+        workspace,
+        uv_binary=uv_binary,
+        managed_python=managed_python,
+        command_runner=command_runner,
+    )
+    if venv_error is not None:
+        payload = {
+            "status": ACTION_REQUIRED,
+            "actions_performed": actions_performed,
+            "actions_skipped": actions_skipped,
+            "environment": {
                 "package_manager": package_manager,
-                "python_executable": bootstrap_python,
-            }
-            payload = {
-                "status": ACTION_REQUIRED,
-                "actions_performed": actions_performed,
-                "actions_skipped": actions_skipped,
-                "environment": environment,
-                "manual_recovery_doc": manual_workspace_recovery_doc(),
-                "next_steps": [
-                    summarize_command_failure([uv_binary, "pip", "install"], install),
-                    manual_recovery_next_step,
-                ],
-            }
-            lines = [
-                f"Prepare status: {ACTION_REQUIRED}",
-                summarize_command_failure([uv_binary, "pip", "install"], install),
-                manual_recovery_next_step,
-            ]
-            return make_report(ACTION_REQUIRED, payload, lines)
-        actions_performed.append(
-            "Installed DocMason in editable mode with dev dependencies via uv."
-        )
-    else:
-        status = DEGRADED
-        package_manager = "pip"
-        next_steps.append(f"Optional: install uv with {uv_install_display} later.")
+                "python_executable": str(managed_python),
+                "python_baseline": PREPARED_WORKSPACE_PYTHON_BASELINE,
+            },
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "next_steps": [venv_error, manual_recovery_next_step],
+        }
+        lines = [
+            f"Prepare status: {ACTION_REQUIRED}",
+            venv_error,
+            manual_recovery_next_step,
+        ]
+        return make_report(ACTION_REQUIRED, payload, lines)
+    actions_performed.append("Rebuilt `.venv` against the repo-local managed Python 3.13 baseline.")
 
-        creation = command_runner(
-            [bootstrap_python, "-m", "venv", str(workspace.venv_dir)],
-            workspace.root,
-        )
-        if creation.exit_code != 0:
-            environment = {
+    install_error = _install_workspace_into_repo_local_venv(
+        workspace,
+        uv_binary=uv_binary,
+        command_runner=command_runner,
+    )
+    if install_error is not None:
+        payload = {
+            "status": ACTION_REQUIRED,
+            "actions_performed": actions_performed,
+            "actions_skipped": actions_skipped,
+            "environment": {
                 "package_manager": package_manager,
-                "python_executable": bootstrap_python,
-            }
-            payload = {
-                "status": ACTION_REQUIRED,
-                "actions_performed": actions_performed,
-                "actions_skipped": actions_skipped,
-                "environment": environment,
-                "next_steps": [
-                    summarize_command_failure(
-                        [bootstrap_python, "-m", "venv"],
-                        creation,
-                    ),
-                    manual_recovery_next_step,
-                ],
-                "manual_recovery_doc": manual_workspace_recovery_doc(),
-            }
-            lines = [
-                f"Prepare status: {ACTION_REQUIRED}",
-                summarize_command_failure([bootstrap_python, "-m", "venv"], creation),
-                manual_recovery_next_step,
-            ]
-            return make_report(ACTION_REQUIRED, payload, lines)
-        actions_performed.append("Created or repaired .venv with venv.")
+                "python_executable": str(managed_python),
+                "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
+                "python_baseline": PREPARED_WORKSPACE_PYTHON_BASELINE,
+            },
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "next_steps": [install_error, manual_recovery_next_step],
+        }
+        lines = [
+            f"Prepare status: {ACTION_REQUIRED}",
+            install_error,
+            manual_recovery_next_step,
+        ]
+        return make_report(ACTION_REQUIRED, payload, lines)
+    actions_performed.append("Installed DocMason in editable mode with dev dependencies into the repo-local `.venv` via uv.")
 
-        venv_pip_ready, venv_pip_detail = ensure_python_pip(
-            str(workspace.venv_python),
-            cwd=workspace.root,
-            command_runner=command_runner,
+    entrypoint_probe = inspect_entrypoint(workspace)
+    entrypoint_health = str(entrypoint_probe.get("entrypoint_health") or "module-import-failed")
+    if entrypoint_health != "ready":
+        startup_reason = str(
+            entrypoint_probe.get("detail")
+            or "The repo-local DocMason entrypoint is not healthy."
         )
-        if not venv_pip_ready:
-            environment = {
+        payload = {
+            "status": ACTION_REQUIRED,
+            "actions_performed": actions_performed,
+            "actions_skipped": actions_skipped,
+            "environment": {
                 "package_manager": package_manager,
-                "python_executable": bootstrap_python,
-            }
-            payload = {
-                "status": ACTION_REQUIRED,
-                "actions_performed": actions_performed,
-                "actions_skipped": actions_skipped,
-                "environment": environment,
-                "next_steps": [
-                    f"Repair pip inside `.venv`. Details: {venv_pip_detail}",
-                    manual_recovery_next_step,
-                ],
-                "manual_recovery_doc": manual_workspace_recovery_doc(),
-            }
-            lines = [
-                f"Prepare status: {ACTION_REQUIRED}",
-                f"Repair pip inside `.venv`. Details: {venv_pip_detail}",
-                manual_recovery_next_step,
-            ]
-            return make_report(ACTION_REQUIRED, payload, lines)
-        if venv_pip_detail == "Restored pip with ensurepip.":
-            actions_performed.append("Restored `.venv` pip with ensurepip.")
-
-        upgrade = command_runner(
-            [str(workspace.venv_python), "-m", "pip", "install", "--upgrade", "pip"],
-            workspace.root,
-        )
-        if upgrade.exit_code != 0:
-            environment = {
-                "package_manager": package_manager,
-                "python_executable": bootstrap_python,
-            }
-            payload = {
-                "status": ACTION_REQUIRED,
-                "actions_performed": actions_performed,
-                "actions_skipped": actions_skipped,
-                "environment": environment,
-                "next_steps": [
-                    summarize_command_failure(
-                        [str(workspace.venv_python), "-m", "pip"],
-                        upgrade,
-                    ),
-                    manual_recovery_next_step,
-                ],
-                "manual_recovery_doc": manual_workspace_recovery_doc(),
-            }
-            lines = [
-                f"Prepare status: {ACTION_REQUIRED}",
-                summarize_command_failure([str(workspace.venv_python), "-m", "pip"], upgrade),
-                manual_recovery_next_step,
-            ]
-            return make_report(ACTION_REQUIRED, payload, lines)
-        actions_performed.append("Upgraded pip inside .venv.")
-
-        install = command_runner(
-            [str(workspace.venv_python), "-m", "pip", "install", "-e", ".[dev]"],
-            workspace.root,
-        )
-        if install.exit_code != 0:
-            environment = {
-                "package_manager": package_manager,
-                "python_executable": bootstrap_python,
-            }
-            payload = {
-                "status": ACTION_REQUIRED,
-                "actions_performed": actions_performed,
-                "actions_skipped": actions_skipped,
-                "environment": environment,
-                "next_steps": [
-                    summarize_command_failure(
-                        [str(workspace.venv_python), "-m", "pip"],
-                        install,
-                    ),
-                    manual_recovery_next_step,
-                ],
-                "manual_recovery_doc": manual_workspace_recovery_doc(),
-            }
-            lines = [
-                f"Prepare status: {ACTION_REQUIRED}",
-                summarize_command_failure([str(workspace.venv_python), "-m", "pip"], install),
-                manual_recovery_next_step,
-            ]
-            return make_report(ACTION_REQUIRED, payload, lines)
-        actions_performed.append(
-            "Installed DocMason in editable mode with dev dependencies via pip."
-        )
+                "python_executable": str(managed_python),
+                "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
+                "entrypoint_health": entrypoint_health,
+            },
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "next_steps": [startup_reason, manual_recovery_next_step],
+        }
+        lines = [
+            f"Prepare status: {ACTION_REQUIRED}",
+            startup_reason,
+            manual_recovery_next_step,
+        ]
+        return make_report(ACTION_REQUIRED, payload, lines)
 
     editable_install, editable_detail = editable_install_probe(workspace)
     if not editable_install:
@@ -1033,7 +1593,10 @@ def prepare_workspace(
             run_id=run_id,
             requires_confirmation=not assume_yes,
             confirmation_kind="high-intrusion-prepare",
-            confirmation_prompt="当前问题需要补齐本地依赖才能继续，是否现在开始准备环境？",
+            confirmation_prompt=(
+                "This question requires additional local dependencies before it can continue "
+                "safely. Prepare the workspace now?"
+            ),
             confirmation_reason="; ".join(prepare_requirements["reasons"]),
         )
         prepare_shared_job = prepare_job_info["manifest"]
@@ -1152,7 +1715,10 @@ def prepare_workspace(
         status = DEGRADED
         next_steps.append(office_renderer_next_step())
 
-    pdf_snapshot = pdf_renderer_snapshot()
+    pdf_snapshot = _steady_state_pdf_renderer_snapshot(
+        workspace,
+        command_runner=command_runner,
+    )
     write_bootstrap_ready_marker(
         workspace,
         status=status,
@@ -1162,8 +1728,37 @@ def prepare_workspace(
         editable_detail=editable_detail,
         office_snapshot=office_snapshot,
         pdf_snapshot=pdf_snapshot,
+        uv_bootstrap_mode=uv_bootstrap_mode,
+        last_repair_at=bootstrap_checked_at(),
     )
-    refresh_generated_connector_manifests(workspace)
+    final_toolchain = inspect_toolchain(
+        workspace,
+        bootstrap_state=bootstrap_state(workspace),
+        editable_install=editable_install,
+    )
+    write_json(
+        workspace.toolchain_manifest_path,
+        {
+            "schema_version": 1,
+            "updated_at": bootstrap_checked_at(),
+            "python_baseline": PREPARED_WORKSPACE_PYTHON_BASELINE,
+            "toolchain": final_toolchain,
+            "package_manager": package_manager,
+            "uv_bootstrap_mode": uv_bootstrap_mode,
+        },
+    )
+    if initial_toolchain.get("repair_required"):
+        append_jsonl(
+            workspace.toolchain_repair_history_path,
+            {
+                "recorded_at": bootstrap_checked_at(),
+                "previous_repair_reason": initial_toolchain.get("repair_reason"),
+                "previous_isolation_grade": initial_toolchain.get("isolation_grade"),
+                "previous_toolchain_mode": initial_toolchain.get("toolchain_mode"),
+                "current_toolchain": final_toolchain,
+            },
+        )
+    _refresh_generated_connector_manifests(workspace)
     actions_performed.append("Recorded bootstrap state in runtime/bootstrap_state.json.")
     if prepare_shared_job:
         if office_snapshot["required"] and not office_snapshot["ready"]:
@@ -1201,12 +1796,14 @@ def prepare_workspace(
             else {}
         ),
         "environment": {
-            "python_executable": bootstrap_python,
-            "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+            "python_executable": str(managed_python),
+            "python_version": final_toolchain.get("managed_python_version"),
+            "python_baseline": PREPARED_WORKSPACE_PYTHON_BASELINE,
             "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
             "package_manager": package_manager,
             "editable_install": editable_install,
             "editable_install_detail": editable_detail,
+            "toolchain": final_toolchain,
             "bootstrap_state": str(workspace.bootstrap_state_path.relative_to(workspace.root)),
             "manual_recovery_doc": manual_workspace_recovery_doc(),
         },
@@ -1215,6 +1812,7 @@ def prepare_workspace(
     lines = [
         f"Prepare status: {status}",
         f"Package workflow: {package_manager}",
+        f"Python baseline: {PREPARED_WORKSPACE_PYTHON_BASELINE}",
         f"Virtual environment: {workspace.venv_dir.relative_to(workspace.root)}",
         editable_detail,
     ]
@@ -1232,7 +1830,8 @@ def doctor_workspace(
 ) -> CommandReport:
     """Inspect workspace readiness without mutating any repository state."""
     workspace = paths or locate_workspace()
-    maybe_reconcile_active_thread(workspace)
+    command_context = _reconcile_command_context(workspace, mutating=False)
+    environment = environment_snapshot(workspace, editable_install_probe=editable_install_probe)
     checks: list[dict[str, Any]] = []
     next_steps: list[str] = []
 
@@ -1260,6 +1859,46 @@ def doctor_workspace(
             ACTION_REQUIRED,
             f"Python {version_string} is below the supported minimum of 3.11.",
             "Install Python 3.11 or newer and rerun `docmason doctor`.",
+        )
+
+    if environment["isolation_grade"] == "self-contained":
+        add_check(
+            "toolchain",
+            READY,
+            (
+                "Prepared-workspace toolchain is self-contained under "
+                f"`{environment['toolchain_mode']}`."
+            ),
+        )
+    elif environment["isolation_grade"] == "mixed":
+        add_check(
+            "toolchain",
+            DEGRADED,
+            (
+                "Prepared-workspace toolchain is mixed and requires repo-local repair before "
+                "ordinary ask can continue safely."
+            ),
+            "Run `docmason prepare --yes` to rebuild `.venv` against repo-local managed Python 3.13.",
+        )
+    else:
+        add_check(
+            "toolchain",
+            ACTION_REQUIRED,
+            (
+                "Prepared-workspace toolchain is degraded and cannot support ordinary ask until "
+                "it is repaired."
+            ),
+            "Run `docmason prepare --yes` to repair the repo-local toolchain.",
+        )
+
+    if environment["entrypoint_health"] == "ready":
+        add_check("entrypoint", READY, "The repo-local DocMason entrypoint is healthy.")
+    else:
+        add_check(
+            "entrypoint",
+            ACTION_REQUIRED,
+            f"The repo-local DocMason entrypoint is `{environment['entrypoint_health']}`.",
+            "Run `docmason prepare --yes` to repair the repo-local entrypoint chain.",
         )
 
     bootstrap_snapshot = bootstrap_state_summary(workspace)
@@ -1306,7 +1945,7 @@ def doctor_workspace(
             "Run `docmason prepare --yes` to record the current bootstrap marker.",
         )
 
-    uv_binary = find_uv_binary()
+    uv_binary = find_uv_binary(workspace)
     _install_command, uv_install_display = preferred_uv_install_command(str(Path(sys.executable)))
     if uv_binary:
         add_check("uv", READY, f"uv is available at {uv_binary}.")
@@ -1314,7 +1953,7 @@ def doctor_workspace(
         add_check(
             "uv",
             DEGRADED,
-            "uv is not installed; `prepare` will fall back to venv + pip.",
+            "uv is not installed; `prepare` will use the repo-local bootstrap helper to install or repair uv before continuing.",
             f"Recommended: install uv with {uv_install_display}, or run "
             "`docmason prepare --yes` to let the workspace attempt that install path.",
         )
@@ -1497,7 +2136,7 @@ def doctor_workspace(
             ),
         )
 
-    interaction = interaction_ingest_snapshot(workspace)
+    interaction = _interaction_ingest_snapshot(workspace)
     if interaction["load_warnings"]:
         detail = (
             "Interaction-ingest runtime state was only partially readable during this check, "
@@ -1574,6 +2213,7 @@ def doctor_workspace(
 
     payload = {
         "status": overall,
+        "environment": environment,
         "checks": checks,
         "supported_inputs": list(SUPPORTED_INPUTS),
         "supported_input_tiers": supported_input_tiers(),
@@ -1585,6 +2225,11 @@ def doctor_workspace(
         lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
     if next_steps:
         lines.append(f"Next steps: {', '.join(deduplicate(next_steps))}")
+    _apply_coordination_warning(
+        payload=payload,
+        lines=lines,
+        coordination=command_context["coordination"],
+    )
     return make_report(overall, payload, lines)
 
 
@@ -1595,7 +2240,7 @@ def status_workspace(
 ) -> CommandReport:
     """Report the current workspace stage and pending operator actions."""
     workspace = paths or locate_workspace()
-    maybe_reconcile_active_thread(workspace)
+    command_context = _reconcile_command_context(workspace, mutating=False)
     (
         stage,
         environment_ready,
@@ -1607,6 +2252,9 @@ def status_workspace(
     lines = [
         f"Stage: {stage}",
         f"Environment ready: {'yes' if environment_ready else 'no'}",
+        f"Toolchain mode: {payload['environment']['toolchain_mode']}",
+        f"Isolation grade: {payload['environment']['isolation_grade']}",
+        f"Entrypoint health: {payload['environment']['entrypoint_health']}",
         (
             "Bootstrap state: "
             + (
@@ -1670,8 +2318,22 @@ def status_workspace(
     ]
     if pending_actions:
         lines.append(f"Pending actions: {', '.join(pending_actions)}")
+    _apply_coordination_warning(
+        payload=payload,
+        lines=lines,
+        coordination=command_context["coordination"],
+    )
 
-    exit_code = 0 if stage == "knowledge-base-present" else 2
+    exit_code_by_stage = {
+        "foundation-only": 1,
+        "workspace-bootstrapped": 0,
+        "adapter-ready": 0,
+        "control-plane-pending-confirmation": 1,
+        "knowledge-base-invalid": 1,
+        "knowledge-base-present": 0,
+        "knowledge-base-stale": 2,
+    }
+    exit_code = exit_code_by_stage.get(stage, 2)
     return CommandReport(exit_code=exit_code, payload=payload, lines=lines)
 
 
@@ -1685,7 +2347,15 @@ def sync_workspace(
 ) -> CommandReport:
     """Stage, validate, and publish the Phase 4 knowledge base."""
     workspace = paths or locate_workspace()
-    maybe_reconcile_active_thread(workspace)
+    command_context = _reconcile_command_context(workspace, mutating=True)
+    if command_context["state"] == "blocked":
+        return _mutating_command_coordination_report(
+            command_name="Sync status",
+            status_field="sync_status",
+            coordination=command_context["coordination"],
+            environment=environment_snapshot(workspace),
+        )
+    environment = environment_snapshot(workspace)
     effective_owner = owner or _unique_command_owner("sync")
     if autonomous:
         sync_readiness = cached_bootstrap_readiness(workspace, require_sync_capability=True)
@@ -1706,12 +2376,13 @@ def sync_workspace(
                 "status": ACTION_REQUIRED,
                 "sync_status": ACTION_REQUIRED,
                 "detail": detail,
+                "environment": environment,
                 "control_plane": {},
                 "change_set": {},
                 "pending_sources": [],
                 "validation": None,
                 "published": False,
-                "interaction_ingest": interaction_ingest_snapshot(workspace),
+                "interaction_ingest": _interaction_ingest_snapshot(workspace),
                 "rebuilt": False,
                 "build_stats": {},
                 "auto_repairs": {"repair_count": 0},
@@ -1763,7 +2434,8 @@ def sync_workspace(
             if materiality["materiality"] == "material"
             else None,
             confirmation_prompt=(
-                "检测到大量未构建变更，建议先构建知识库后再继续当前问题，是否现在开始？"
+                "A large unpublished workspace change set was detected. Build or refresh the "
+                "knowledge base now before continuing this question?"
                 if materiality["materiality"] == "material"
                 else None
             ),
@@ -1782,6 +2454,7 @@ def sync_workspace(
                 "status": ACTION_REQUIRED,
                 "sync_status": "awaiting-confirmation",
                 "detail": detail,
+                "environment": environment,
                 "control_plane": shared_job_control_plane_payload(
                     shared_job,
                     next_command="docmason sync --yes",
@@ -1790,7 +2463,7 @@ def sync_workspace(
                 "pending_sources": [],
                 "validation": None,
                 "published": False,
-                "interaction_ingest": interaction_ingest_snapshot(workspace),
+                "interaction_ingest": _interaction_ingest_snapshot(workspace),
                 "rebuilt": False,
                 "build_stats": {},
                 "auto_repairs": {"repair_count": 0},
@@ -1828,6 +2501,7 @@ def sync_workspace(
                 "status": DEGRADED,
                 "sync_status": "waiting-shared-job",
                 "detail": detail,
+                "environment": environment,
                 "control_plane": shared_job_control_plane_payload(
                     shared_job,
                     state="waiting-shared-job",
@@ -1836,7 +2510,7 @@ def sync_workspace(
                 "pending_sources": [],
                 "validation": None,
                 "published": False,
-                "interaction_ingest": interaction_ingest_snapshot(workspace),
+                "interaction_ingest": _interaction_ingest_snapshot(workspace),
                 "rebuilt": False,
                 "build_stats": {},
                 "auto_repairs": {"repair_count": 0},
@@ -1855,7 +2529,7 @@ def sync_workspace(
             return make_report(DEGRADED, payload, lines)
     else:
         shared_job = {}
-    result = run_phase4_sync(workspace, autonomous=autonomous)
+    result = _run_phase4_sync(workspace, autonomous=autonomous)
     if autonomous and shared_job:
         if result["status"] in {"valid", "warnings"} and bool(result.get("published")):
             shared_job = complete_shared_job(workspace, str(shared_job["job_id"]), result=result)
@@ -1900,6 +2574,7 @@ def sync_workspace(
         "status": status,
         "sync_status": result["status"],
         "detail": result["detail"],
+        "environment": environment,
         "control_plane": (
             shared_job_control_plane_payload(shared_job) if autonomous and shared_job else {}
         ),
@@ -2011,28 +2686,51 @@ def retrieve_knowledge(
 ) -> CommandReport:
     """Run retrieval over the published knowledge base."""
     workspace = paths or locate_workspace()
-    maybe_reconcile_active_thread(workspace)
+    command_context = _reconcile_command_context(workspace, mutating=False)
+    front_door = dict(command_context["front_door"])
+    front_door_warning = (
+        front_door.get("warning") if isinstance(front_door.get("warning"), dict) else None
+    )
+    retrieve_log_origin = "operator-direct" if front_door_warning else None
     try:
-        result = retrieve_corpus(
-            workspace,
+        result = _retrieve_corpus(
+            paths=workspace,
             query=query,
             top=max(top, 1),
             graph_hops=max(graph_hops, 0),
             document_types=document_types,
             source_ids=source_ids,
             include_renders=include_renders,
+            log_context=(
+                front_door.get("log_context")
+                if isinstance(front_door.get("log_context"), dict)
+                else None
+            ),
+            log_origin=retrieve_log_origin,
         )
     except FileNotFoundError as exc:
         payload = {
             "status": ACTION_REQUIRED,
             "retrieve_status": "artifacts-missing",
             "detail": str(exc),
+            "front_door": {
+                key: value
+                for key, value in front_door.items()
+                if key != "log_context"
+            },
         }
         lines = [
             f"Retrieve status: {ACTION_REQUIRED}",
             str(exc),
             "Next step: run `docmason sync` to rebuild retrieval artifacts.",
         ]
+        if front_door_warning:
+            lines.append(f"Front-door warning: {front_door_warning['detail']}")
+        _apply_coordination_warning(
+            payload=payload,
+            lines=lines,
+            coordination=command_context["coordination"],
+        )
         return make_report(ACTION_REQUIRED, payload, lines)
 
     status = READY if result["results"] else DEGRADED
@@ -2040,6 +2738,11 @@ def retrieve_knowledge(
         "status": status,
         "retrieve_status": result["status"],
         **result,
+        "front_door": {
+            key: value
+            for key, value in front_door.items()
+            if key != "log_context"
+        },
     }
     lines = [
         f"Retrieve status: {status}",
@@ -2074,12 +2777,19 @@ def retrieve_knowledge(
         lines.append(published_evidence_line)
     if result.get("source_escalation_required") and result.get("source_escalation_reason"):
         lines.append(f"Source escalation: {result['source_escalation_reason']}")
+    if front_door_warning:
+        lines.append(f"Front-door warning: {front_door_warning['detail']}")
     for index, item in enumerate(result["results"], start=1):
         lines.append(
             f"{index}. {item.get('title') or item['source_id']} [score={item['score']['total']}]"
         )
     if not result["results"]:
         lines.append("No grounded retrieval results were found for the query.")
+    _apply_coordination_warning(
+        payload=payload,
+        lines=lines,
+        coordination=command_context["coordination"],
+    )
     return make_report(status, payload, lines)
 
 
@@ -2155,12 +2865,35 @@ def trace_knowledge(
 ) -> CommandReport:
     """Trace provenance from a source or an answer back to evidence."""
     workspace = paths or locate_workspace()
-    maybe_reconcile_active_thread(workspace)
+    command_context = _reconcile_command_context(workspace, mutating=False)
+    front_door = dict(command_context["front_door"])
+    front_door_warning = (
+        front_door.get("warning") if isinstance(front_door.get("warning"), dict) else None
+    )
+    trace_log_origin = "operator-direct" if front_door_warning else None
     try:
         if source_id is not None:
-            result = trace_source(workspace, source_id=source_id, unit_id=unit_id)
+            result = _trace_source(
+                paths=workspace,
+                source_id=source_id,
+                unit_id=unit_id,
+                log_context=(
+                    front_door.get("log_context")
+                    if isinstance(front_door.get("log_context"), dict)
+                    else None
+                ),
+                log_origin=trace_log_origin,
+            )
             status = READY
-            payload = {"status": status, **result}
+            payload = {
+                "status": status,
+                **result,
+                "front_door": {
+                    key: value
+                    for key, value in front_door.items()
+                    if key != "log_context"
+                },
+            }
             lines = [
                 f"Trace status: {status}",
                 f"Source ID: {source_id}",
@@ -2172,22 +2905,31 @@ def trace_knowledge(
                     f"Unit: {result['unit'].get('unit_id')} "
                     f"({result['unit'].get('title') or 'untitled'})"
                 )
+            if front_door_warning:
+                lines.append(f"Front-door warning: {front_door_warning['detail']}")
+            _apply_coordination_warning(
+                payload=payload,
+                lines=lines,
+                coordination=command_context["coordination"],
+            )
             return make_report(status, payload, lines)
 
         if answer_file is not None:
             answer_file_path = Path(answer_file)
             if not answer_file_path.is_absolute():
                 answer_file_path = workspace.root / answer_file_path
-            result = trace_answer_file(
-                workspace,
+            result = _trace_answer_file(
+                paths=workspace,
                 answer_file=answer_file_path,
                 top=max(top, 1),
+                log_origin=trace_log_origin,
             )
         elif session_id is not None:
-            result = trace_session(
-                workspace,
+            result = _trace_session(
+                paths=workspace,
                 session_id=session_id,
                 top=max(top, 1),
+                log_origin=trace_log_origin,
             )
         else:  # pragma: no cover - protected by argparse
             raise ValueError("One trace entrypoint must be selected.")
@@ -2196,30 +2938,82 @@ def trace_knowledge(
             "status": ACTION_REQUIRED,
             "trace_status": "artifacts-missing",
             "detail": str(exc),
+            "front_door": {
+                key: value
+                for key, value in front_door.items()
+                if key != "log_context"
+            },
         }
         lines = [
             f"Trace status: {ACTION_REQUIRED}",
             str(exc),
             "Next step: run `docmason sync` to rebuild trace artifacts or logs.",
         ]
+        if front_door_warning:
+            lines.append(f"Front-door warning: {front_door_warning['detail']}")
+        _apply_coordination_warning(
+            payload=payload,
+            lines=lines,
+            coordination=command_context["coordination"],
+        )
         return make_report(ACTION_REQUIRED, payload, lines)
     except KeyError as exc:
-        payload = {"status": ACTION_REQUIRED, "trace_status": "not-found", "detail": str(exc)}
+        payload = {
+            "status": ACTION_REQUIRED,
+            "trace_status": "not-found",
+            "detail": str(exc),
+            "front_door": {
+                key: value
+                for key, value in front_door.items()
+                if key != "log_context"
+            },
+        }
         lines = [
             f"Trace status: {ACTION_REQUIRED}",
             f"Unknown trace target: {exc}",
         ]
+        if front_door_warning:
+            lines.append(f"Front-door warning: {front_door_warning['detail']}")
+        _apply_coordination_warning(
+            payload=payload,
+            lines=lines,
+            coordination=command_context["coordination"],
+        )
         return make_report(ACTION_REQUIRED, payload, lines)
     except ValueError as exc:
-        payload = {"status": ACTION_REQUIRED, "trace_status": "invalid-input", "detail": str(exc)}
+        payload = {
+            "status": ACTION_REQUIRED,
+            "trace_status": "invalid-input",
+            "detail": str(exc),
+            "front_door": {
+                key: value
+                for key, value in front_door.items()
+                if key != "log_context"
+            },
+        }
         lines = [
             f"Trace status: {ACTION_REQUIRED}",
             str(exc),
         ]
+        if front_door_warning:
+            lines.append(f"Front-door warning: {front_door_warning['detail']}")
+        _apply_coordination_warning(
+            payload=payload,
+            lines=lines,
+            coordination=command_context["coordination"],
+        )
         return make_report(ACTION_REQUIRED, payload, lines)
 
     status = READY if result["status"] == "ready" else DEGRADED
-    payload = {"status": status, **result}
+    payload = {
+        "status": status,
+        **result,
+        "front_door": {
+            key: value
+            for key, value in front_door.items()
+            if key != "log_context"
+        },
+    }
     lines = [
         f"Trace status: {status}",
         f"Trace mode: {result['trace_mode']}",
@@ -2271,6 +3065,13 @@ def trace_knowledge(
             lines.append(published_evidence_line)
         if result.get("source_escalation_required") and result.get("source_escalation_reason"):
             lines.append(f"Source escalation: {result['source_escalation_reason']}")
+    if front_door_warning:
+        lines.append(f"Front-door warning: {front_door_warning['detail']}")
+    _apply_coordination_warning(
+        payload=payload,
+        lines=lines,
+        coordination=command_context["coordination"],
+    )
     return make_report(status, payload, lines)
 
 
@@ -2281,7 +3082,7 @@ def validate_knowledge_base(
 ) -> CommandReport:
     """Validate the staged or published knowledge base."""
     workspace = paths or locate_workspace()
-    maybe_reconcile_active_thread(workspace)
+    command_context = _reconcile_command_context(workspace, mutating=False)
     resolved_target = target or (
         "staging" if workspace.knowledge_base_staging_dir.exists() else "current"
     )
@@ -2297,7 +3098,7 @@ def validate_knowledge_base(
         ]
         return make_report(ACTION_REQUIRED, failure_payload, lines)
 
-    validation = validate_workspace(workspace, target=resolved_target)
+    validation = _validate_workspace(workspace, target=resolved_target)
     status = validation_command_status(validation["status"])
     payload: dict[str, Any] = {
         "status": status,
@@ -2314,6 +3115,11 @@ def validate_knowledge_base(
             f"warnings={len(validation['warnings'])})"
         ),
     ]
+    _apply_coordination_warning(
+        payload=payload,
+        lines=lines,
+        coordination=command_context["coordination"],
+    )
     return make_report(status, payload, lines)
 
 
@@ -2346,6 +3152,13 @@ def sync_adapters(
 ) -> CommandReport:
     """Generate the supported local adapter artifacts from canonical sources."""
     workspace = paths or locate_workspace()
+    command_context = _reconcile_command_context(workspace, mutating=True)
+    if command_context["state"] == "blocked":
+        return _mutating_command_coordination_report(
+            command_name="Adapter sync status",
+            status_field="adapter_sync_status",
+            coordination=command_context["coordination"],
+        )
     if target != "claude":
         payload = {
             "status": ACTION_REQUIRED,
@@ -2394,7 +3207,7 @@ def sync_adapters(
         return make_report(ACTION_REQUIRED, payload, lines)
 
     workspace.claude_adapter_dir.mkdir(parents=True, exist_ok=True)
-    refresh_generated_connector_manifests(workspace)
+    _refresh_generated_connector_manifests(workspace)
     workspace.claude_workflow_routing_path.write_text(
         render_workflow_routing_markdown(workflow_metadata),
         encoding="utf-8",
@@ -2437,7 +3250,7 @@ def sync_adapters(
 def review_runtime_logs(paths: WorkspacePaths | None = None) -> CommandReport:
     """Refresh and summarize the current runtime review artifacts."""
     workspace = paths or locate_workspace()
-    maybe_reconcile_active_thread(workspace)
+    command_context = _reconcile_command_context(workspace, mutating=False)
     summary = refresh_log_review_summary(workspace)
     recent_conversations = summary.get("conversations", {}).get("recent", [])
     recent_query_sessions = summary.get("query_sessions", {}).get("recent", [])
@@ -2456,6 +3269,11 @@ def review_runtime_logs(paths: WorkspacePaths | None = None) -> CommandReport:
                 "before expecting a populated review summary."
             ),
         ]
+        _apply_coordination_warning(
+            payload=payload,
+            lines=lines,
+            coordination=command_context["coordination"],
+        )
         return make_report(DEGRADED, payload, lines)
 
     payload = {
@@ -2469,6 +3287,11 @@ def review_runtime_logs(paths: WorkspacePaths | None = None) -> CommandReport:
         f"Recent query sessions: {len(recent_query_sessions)}",
         f"Benchmark candidates: {len(candidates)}",
     ]
+    _apply_coordination_warning(
+        payload=payload,
+        lines=lines,
+        coordination=command_context["coordination"],
+    )
     return make_report(READY, payload, lines)
 
 
@@ -2567,7 +3390,7 @@ def run_workflow(
     elif workflow_id == "runtime-log-review":
         steps.append(("runtime-log-review", review_runtime_logs(workspace)))
     elif workflow_id == "operator-eval":
-        operator_payload, operator_lines = run_operator_eval(workspace)
+        operator_payload, operator_lines = _run_operator_eval(workspace)
         operator_report_payload: dict[str, Any] = {
             **operator_payload,
             "completion_signal": metadata.handoff["completion_signal"],

@@ -16,6 +16,12 @@ Use this workflow when the user is not only asking for a direct answer, but is a
 This is an inner specialist workflow behind `ask`.
 Ordinary users should not need to name it explicitly before asking.
 
+## Front-Door Precondition
+
+- `grounded-composition` is never a free-standing ordinary front door.
+- Start only from canonical ask turn metadata and canonical ask runtime ownership.
+- If the current turn is missing explicit canonical ask ownership, stop and route back to `ask`.
+
 ## Required Capabilities
 
 - local file access
@@ -85,4 +91,5 @@ If the environment cannot inspect the required evidence, stop and explain the bl
 ## Notes
 
 - This is an inner agent-facing workflow behind `ask`. It is not a public `docmason compose` command.
+- Reconciliation-only or operator-direct evidence work does not satisfy this workflow's front-door precondition.
 - `grounded-composition` is for evidence-backed white-collar drafting and research, not freeform unsupported creative writing.

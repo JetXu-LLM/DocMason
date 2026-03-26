@@ -22,6 +22,7 @@ If the agent cannot inspect local runtime logs, stop and explain that log review
 
 1. Start with `runtime/logs/review/summary.json` and `runtime/logs/review/benchmark-candidates.json` when they exist.
    - treat live conversation state under `runtime/state/` as the owner and `runtime/logs/conversations/` as projection-only
+   - require canonical ask ownership before classifying a case as `interactive-ask`; workflow names, conversation linkage, or reconciliation leftovers alone are not enough
 2. Use the summary modes that best match the request:
    - recent activity
    - no-result retrieval sessions

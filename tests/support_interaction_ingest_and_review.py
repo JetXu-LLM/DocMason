@@ -17,6 +17,7 @@ from unittest import mock
 from docmason.ask import prepare_ask_turn
 from docmason.commands import sync_workspace
 from docmason.coordination import workspace_lease
+from docmason.conversation import update_conversation_turn
 from docmason.interaction import (
     _persist_interaction_entry,
     build_promoted_interaction_memories,
@@ -28,6 +29,7 @@ from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import retrieve_corpus, trace_source
 from docmason.review import refresh_log_review_summary
 from docmason.transcript import load_codex_transcript, validate_normalized_transcript
+from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 
 class InteractionIngestAndReviewTests(unittest.TestCase):
@@ -91,25 +93,9 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         return WorkspacePaths(root=root)
 
     def mark_environment_ready(self, workspace: WorkspacePaths) -> None:
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "schema_version": 2,
-                "status": "ready",
-                "prepared_at": "2026-03-17T00:00:00Z",
-                "environment_ready": True,
-                "workspace_root": str(workspace.root.resolve()),
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-            },
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-17T00:00:00Z",
         )
 
     def create_pdf(self, path: Path, *, page_count: int = 1) -> None:
@@ -705,11 +691,17 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertEqual(conversation["turns"][0]["native_turn_id"], "native-turn-1")
         self.assertEqual(conversation["turns"][0]["inner_workflow_id"], "grounded-composition")
         self.assertEqual(conversation["turns"][0]["question_class"], "composition")
+        self.assertEqual(conversation["turns"][0]["front_door_state"], "canonical-ask")
         self.assertEqual(conversation["turns"][1]["continuation_type"], "constraint-update")
         self.assertEqual(conversation["turns"][1]["inner_workflow_id"], "grounded-composition")
         self.assertEqual(conversation["turns"][1]["question_class"], "composition")
         self.assertTrue(conversation["turns"][1]["bundle_paths"])
         self.assertTrue(conversation["turns"][1]["attachments"])
+        self.assertEqual(conversation["turns"][1]["front_door_state"], "canonical-ask")
+        run_state = read_json(
+            workspace.runs_dir / conversation["turns"][0]["active_run_id"] / "state.json"
+        )
+        self.assertEqual(run_state["run_origin"], "ask-front-door")
 
         snapshot = interaction_ingest_snapshot(workspace)
         self.assertEqual(snapshot["pending_capture_count"], 2)
@@ -779,6 +771,85 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         ]
         self.assertEqual(overlay_source_records[0]["question_class"], "answer")
         self.assertEqual(overlay_source_records[0]["support_strategy"], "model-first")
+
+    def test_prepare_ask_turn_upgrades_reconciled_native_turn_to_canonical_front_door(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        thread_id = "thread-front-door-upgrade"
+        state_db, sessions_root = self.write_chatter_codex_storage(
+            workspace,
+            thread_id=thread_id,
+        )
+
+        with (
+            self.patch_codex_storage(state_db, sessions_root),
+            self.patch_interaction_storage(state_db, sessions_root),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": thread_id}, clear=False),
+        ):
+            reconciled = reconcile_codex_thread(workspace, thread_id=thread_id)
+            self.assertEqual(reconciled["status"], "reconciled")
+            conversation = read_json(workspace.conversations_dir / f"{thread_id}.json")
+            self.assertEqual(conversation["turns"][0]["front_door_state"], "native-reconciled-only")
+
+            prepared = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="general-stable",
+                ),
+            )
+
+        self.assertEqual(prepared["turn_id"], "turn-001")
+        self.assertEqual(prepared["front_door_state"], "canonical-ask")
+        self.assertEqual(prepared["front_door_run_id"], prepared["run_id"])
+        upgraded = read_json(workspace.conversations_dir / f"{thread_id}.json")
+        self.assertEqual(len(upgraded["turns"]), 1)
+        self.assertEqual(upgraded["turns"][0]["front_door_state"], "canonical-ask")
+        self.assertEqual(upgraded["turns"][0]["front_door_run_id"], prepared["run_id"])
+        run_state = read_json(workspace.runs_dir / prepared["run_id"] / "state.json")
+        self.assertEqual(run_state["run_origin"], "ask-front-door")
+
+    def test_reconciliation_does_not_demote_canonical_front_door_or_turn_state(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        thread_id = "thread-front-door-preserve"
+        state_db, sessions_root = self.write_chatter_codex_storage(
+            workspace,
+            thread_id=thread_id,
+        )
+
+        with (
+            self.patch_codex_storage(state_db, sessions_root),
+            self.patch_interaction_storage(state_db, sessions_root),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": thread_id}, clear=False),
+        ):
+            prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="general-stable",
+                ),
+            )
+            update_conversation_turn(
+                workspace,
+                conversation_id=thread_id,
+                turn_id="turn-001",
+                updates={
+                    "turn_state": "waiting-shared-job",
+                    "status": "waiting-shared-job",
+                },
+            )
+            reconcile_codex_thread(workspace, thread_id=thread_id)
+
+        conversation = read_json(workspace.conversations_dir / f"{thread_id}.json")
+        self.assertEqual(conversation["turns"][0]["front_door_state"], "canonical-ask")
+        self.assertEqual(conversation["turns"][0]["turn_state"], "waiting-shared-job")
+        run_state = read_json(
+            workspace.runs_dir / conversation["turns"][0]["active_run_id"] / "state.json"
+        )
+        self.assertEqual(run_state["run_origin"], "ask-front-door")
 
     def test_reconcile_repairs_legacy_routing_metadata(self) -> None:
         workspace = self.make_workspace()

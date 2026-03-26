@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 MINIMUM_PYTHON = (3, 11)
-BOOTSTRAP_STATE_SCHEMA_VERSION = 2
+BOOTSTRAP_STATE_SCHEMA_VERSION = 3
 MANUAL_WORKSPACE_RECOVERY_DOC = "docs/setup/manual-workspace-recovery.md"
 
 
@@ -234,12 +234,80 @@ class WorkspacePaths:
         return self.root / "skills" / "optional"
 
     @property
+    def docmason_dir(self) -> Path:
+        return self.root / ".docmason"
+
+    @property
+    def toolchain_dir(self) -> Path:
+        return self.docmason_dir / "toolchain"
+
+    @property
+    def toolchain_python_dir(self) -> Path:
+        return self.toolchain_dir / "python"
+
+    @property
+    def toolchain_python_installs_dir(self) -> Path:
+        return self.toolchain_python_dir / "installs"
+
+    @property
+    def toolchain_python_current_dir(self) -> Path:
+        return self.toolchain_python_dir / "current"
+
+    @property
+    def toolchain_cache_dir(self) -> Path:
+        return self.toolchain_dir / "cache"
+
+    @property
+    def toolchain_uv_cache_dir(self) -> Path:
+        return self.toolchain_cache_dir / "uv"
+
+    @property
+    def toolchain_pip_cache_dir(self) -> Path:
+        return self.toolchain_cache_dir / "pip"
+
+    @property
+    def toolchain_bootstrap_dir(self) -> Path:
+        return self.toolchain_dir / "bootstrap"
+
+    @property
+    def toolchain_bootstrap_venv_dir(self) -> Path:
+        return self.toolchain_bootstrap_dir / "venv"
+
+    @property
+    def toolchain_bootstrap_python(self) -> Path:
+        return self.toolchain_bootstrap_venv_dir / "bin" / "python"
+
+    @property
+    def toolchain_bootstrap_uv(self) -> Path:
+        return self.toolchain_bootstrap_venv_dir / "bin" / "uv"
+
+    @property
+    def toolchain_state_dir(self) -> Path:
+        return self.toolchain_dir / "state"
+
+    @property
+    def toolchain_manifest_path(self) -> Path:
+        return self.toolchain_state_dir / "toolchain.json"
+
+    @property
+    def toolchain_repair_history_path(self) -> Path:
+        return self.toolchain_state_dir / "repair-history.jsonl"
+
+    @property
     def venv_dir(self) -> Path:
         return self.root / ".venv"
 
     @property
     def venv_python(self) -> Path:
         return self.venv_dir / "bin" / "python"
+
+    @property
+    def venv_docmason(self) -> Path:
+        return self.venv_dir / "bin" / "docmason"
+
+    @property
+    def venv_pyvenv_cfg(self) -> Path:
+        return self.venv_dir / "pyvenv.cfg"
 
     @property
     def bootstrap_state_path(self) -> Path:
@@ -781,6 +849,11 @@ def list_visible_files(directory: Path) -> list[Path]:
     return sorted(path for path in directory.rglob("*") if is_visible_file(path))
 
 
+def enumerate_live_corpus_paths(paths: WorkspacePaths) -> list[Path]:
+    """Enumerate live private corpus files under `original_doc/` without relying on VCS state."""
+    return list_visible_files(paths.source_dir)
+
+
 def source_type_definition(extension: str | None) -> SourceTypeDefinition | None:
     """Return the source-type definition for one file extension."""
     if extension is None:
@@ -807,7 +880,7 @@ def supported_source_documents(paths: WorkspacePaths) -> list[Path]:
     """Return source documents that match the current supported input set."""
     return [
         path
-        for path in list_visible_files(paths.source_dir)
+        for path in enumerate_live_corpus_paths(paths)
         if source_type_definition_for_path(path) is not None
     ]
 
@@ -956,6 +1029,8 @@ def cached_bootstrap_readiness(
     require_sync_capability: bool = False,
 ) -> dict[str, Any]:
     """Evaluate the lightweight cached bootstrap marker without running deep diagnostics."""
+    from .toolchain import inspect_toolchain, toolchain_repair_detail
+
     state = bootstrap_state(paths)
     manual_doc = manual_workspace_recovery_doc()
     if not state:
@@ -969,32 +1044,17 @@ def cached_bootstrap_readiness(
 
     schema_version = int(state.get("schema_version", 0) or 0)
     if schema_version < BOOTSTRAP_STATE_SCHEMA_VERSION:
-        if require_sync_capability:
-            return {
-                "ready": False,
-                "reason": "legacy-bootstrap-state-sync-capability-unknown",
-                "detail": (
-                    "The cached bootstrap marker predates the current sync-capability contract "
-                    "and must be refreshed before sync can run safely."
-                ),
-                "manual_recovery_doc": manual_doc,
-                "state": state,
-            }
-        if bool(state.get("editable_install")) and paths.venv_python.exists():
-            return {
-                "ready": True,
-                "reason": "legacy-compatible-ready",
-                "detail": (
-                    "The cached bootstrap marker predates the current contract but still proves "
-                    "a usable repo-local editable install."
-                ),
-                "manual_recovery_doc": manual_doc,
-                "state": state,
-            }
         return {
             "ready": False,
-            "reason": "legacy-bootstrap-state",
-            "detail": "The cached bootstrap marker predates the current readiness contract.",
+            "reason": (
+                "legacy-bootstrap-state-sync-capability-unknown"
+                if require_sync_capability
+                else "legacy-bootstrap-state"
+            ),
+            "detail": (
+                "The cached bootstrap marker predates the current toolchain and readiness "
+                "contract. Rebuild or repair the repo-local toolchain before continuing."
+            ),
             "manual_recovery_doc": manual_doc,
             "state": state,
         }
@@ -1013,25 +1073,43 @@ def cached_bootstrap_readiness(
             "state": state,
         }
 
-    if not paths.venv_python.exists():
+    toolchain = inspect_toolchain(
+        paths,
+        bootstrap_state=state,
+        editable_install=(
+            bool(state.get("editable_install"))
+            if isinstance(state.get("editable_install"), bool)
+            else None
+        ),
+    )
+    venv_health = str(toolchain.get("venv_health") or "")
+    if venv_health == "missing":
         return {
             "ready": False,
             "reason": "missing-venv",
             "detail": "The repo-local virtual environment interpreter is missing.",
             "manual_recovery_doc": manual_doc,
             "state": state,
+            "toolchain": toolchain,
         }
-
-    if not bool(state.get("environment_ready")) or not bool(state.get("editable_install")):
+    if venv_health == "broken-symlink":
         return {
             "ready": False,
-            "reason": "environment-not-ready",
-            "detail": str(
-                state.get("editable_install_detail")
-                or "The cached bootstrap marker does not describe a ready editable install."
-            ),
+            "reason": "broken-venv-symlink",
+            "detail": toolchain_repair_detail(toolchain),
             "manual_recovery_doc": manual_doc,
             "state": state,
+            "toolchain": toolchain,
+        }
+
+    if toolchain.get("isolation_grade") != "self-contained":
+        return {
+            "ready": False,
+            "reason": str(toolchain.get("repair_reason") or "environment-not-ready"),
+            "detail": toolchain_repair_detail(toolchain),
+            "manual_recovery_doc": manual_doc,
+            "state": state,
+            "toolchain": toolchain,
         }
 
     if require_sync_capability:
@@ -1048,6 +1126,7 @@ def cached_bootstrap_readiness(
                 ),
                 "manual_recovery_doc": manual_doc,
                 "state": state,
+                "toolchain": toolchain,
             }
         if requirements["requires_pdf_renderer"] and not bool(state.get("pdf_renderer_ready")):
             return {
@@ -1059,6 +1138,7 @@ def cached_bootstrap_readiness(
                 ),
                 "manual_recovery_doc": manual_doc,
                 "state": state,
+                "toolchain": toolchain,
             }
 
     return {
@@ -1067,6 +1147,7 @@ def cached_bootstrap_readiness(
         "detail": "The cached bootstrap marker is valid for the current workspace root.",
         "manual_recovery_doc": manual_doc,
         "state": state,
+        "toolchain": toolchain,
     }
 
 
@@ -1087,6 +1168,11 @@ def bootstrap_state_summary(
         "cached_ready": bool(readiness.get("ready")),
         "reason": readiness.get("reason"),
         "detail": readiness.get("detail"),
+        "toolchain": (
+            dict(readiness.get("toolchain"))
+            if isinstance(readiness.get("toolchain"), dict)
+            else {}
+        ),
         "manual_recovery_doc": readiness.get("manual_recovery_doc")
         or manual_workspace_recovery_doc(),
     }

@@ -33,6 +33,7 @@ from docmason.front_controller import write_hybrid_refresh_work
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import retrieve_corpus, trace_answer_file, trace_session
 from docmason.run_control import load_run_state, run_journal_path, update_run_state
+from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -94,25 +95,9 @@ class AskHardeningTests(unittest.TestCase):
         return WorkspacePaths(root=root)
 
     def mark_environment_ready(self, workspace: WorkspacePaths) -> None:
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "schema_version": 2,
-                "status": "ready",
-                "prepared_at": "2026-03-17T00:00:00Z",
-                "environment_ready": True,
-                "workspace_root": str(workspace.root.resolve()),
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
-                "office_renderer_ready": True,
-                "pdf_renderer_ready": True,
-                "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-            },
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-17T00:00:00Z",
         )
 
     def create_pdf(self, path: Path, *, page_count: int = 1) -> None:
@@ -1206,7 +1191,10 @@ class AskHardeningTests(unittest.TestCase):
                             "shared_job_key": "sync:test",
                             "job_family": "sync",
                             "confirmation_kind": "material-sync",
-                            "confirmation_prompt": "检测到大量未构建变更，建议先构建知识库后再继续当前问题，是否现在开始？",
+                            "confirmation_prompt": (
+                                "A large unpublished workspace change set was detected. "
+                                "Build or refresh the knowledge base now before continuing this question?"
+                            ),
                             "confirmation_reason": "changed_total=12 >= 12",
                             "attached_run_count": 1,
                             "next_command": "docmason sync --yes",
@@ -1268,7 +1256,10 @@ class AskHardeningTests(unittest.TestCase):
                 run_id=turn["run_id"],
                 requires_confirmation=True,
                 confirmation_kind="high-intrusion-prepare",
-                confirmation_prompt="当前问题需要补齐本地依赖才能继续，是否现在开始准备环境？",
+                confirmation_prompt=(
+                    "This question requires additional local dependencies before it can continue "
+                    "safely. Prepare the workspace now?"
+                ),
                 confirmation_reason="office-rendering",
             )["manifest"]
             updated = update_conversation_turn(
@@ -1328,7 +1319,10 @@ class AskHardeningTests(unittest.TestCase):
                 run_id=turn["run_id"],
                 requires_confirmation=True,
                 confirmation_kind="high-intrusion-prepare",
-                confirmation_prompt="当前问题需要补齐本地依赖才能继续，是否现在开始准备环境？",
+                confirmation_prompt=(
+                    "This question requires additional local dependencies before it can continue "
+                    "safely. Prepare the workspace now?"
+                ),
                 confirmation_reason="office-rendering",
             )["manifest"]
             update_conversation_turn(

@@ -46,7 +46,22 @@ resolve_candidate() {
   fi
 }
 
-find_supported_python() {
+find_repo_local_bootstrap_python() {
+  local candidates=(
+    "$ROOT/.docmason/toolchain/python/current/bin/python3.13"
+    "$ROOT/.docmason/toolchain/bootstrap/venv/bin/python"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate" ]] && python_is_supported "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_supported_shared_python() {
   local candidates=()
   local candidate resolved
 
@@ -60,16 +75,16 @@ find_supported_python() {
     python3.11
     python3
     python
-    /opt/homebrew/bin/python3
     /opt/homebrew/bin/python3.14
     /opt/homebrew/bin/python3.13
     /opt/homebrew/bin/python3.12
     /opt/homebrew/bin/python3.11
-    /usr/local/bin/python3
+    /opt/homebrew/bin/python3
     /usr/local/bin/python3.14
     /usr/local/bin/python3.13
     /usr/local/bin/python3.12
     /usr/local/bin/python3.11
+    /usr/local/bin/python3
   )
 
   for candidate in "${candidates[@]}"; do
@@ -123,31 +138,6 @@ homebrew_auto_install_feasible() {
   fi
 }
 
-find_uv() {
-  if command -v uv >/dev/null 2>&1; then
-    command -v uv
-  fi
-}
-
-update_user_bin_path() {
-  local python_bin="$1"
-  local user_base
-  user_base="$("$python_bin" -m site --user-base 2>/dev/null || true)"
-  if [[ -n "$user_base" ]]; then
-    export PATH="$user_base/bin:$PATH"
-  fi
-}
-
-ensure_pip() {
-  local python_bin="$1"
-  if "$python_bin" -m pip --version >/dev/null 2>&1; then
-    return 0
-  fi
-  log "Restoring pip with ensurepip..."
-  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || return 1
-  "$python_bin" -m pip --version >/dev/null 2>&1
-}
-
 install_homebrew() {
   log "Installing Homebrew with the official unattended installer..."
   NONINTERACTIVE=1 /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -155,54 +145,34 @@ install_homebrew() {
 
 install_supported_python() {
   local brew_bin="$1"
-  log "Installing supported Python with Homebrew..."
+  log "Installing a shared bootstrap Python with Homebrew..."
   "$brew_bin" install python
 }
 
-install_uv() {
+launch_prepare() {
   local python_bin="$1"
-  local brew_bin="$2"
-  if [[ -n "$brew_bin" ]]; then
-    log "Installing uv with Homebrew..."
-    "$brew_bin" install uv
-    return 0
+  shift
+  cd "$ROOT"
+  export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+  exec "$python_bin" -m docmason prepare --yes "$@"
+}
+
+BOOTSTRAP_PYTHON="$(find_repo_local_bootstrap_python || true)"
+if [[ -n "$BOOTSTRAP_PYTHON" ]]; then
+  if [[ "$BOOTSTRAP_PYTHON" == "$ROOT/.docmason/toolchain/python/current/bin/python3.13" ]]; then
+    log "Using the repo-local managed Python repair path."
+  else
+    log "Using the repo-local bootstrap helper venv."
   fi
-  ensure_pip "$python_bin" || return 1
-  log "Installing uv with user-scoped pip..."
-  "$python_bin" -m pip install --user uv
-}
-
-create_with_uv() {
-  local uv_bin="$1"
-  local python_bin="$2"
-  log "Creating or repairing .venv with uv..."
-  "$uv_bin" venv --allow-existing --python "$python_bin" "$ROOT/.venv"
-}
-
-install_with_uv() {
-  local uv_bin="$1"
-  log "Installing DocMason into .venv with uv..."
-  "$uv_bin" pip install --python "$ROOT/.venv/bin/python" -e ".[dev]"
-}
-
-create_with_venv() {
-  local python_bin="$1"
-  log "Creating or repairing .venv with venv..."
-  "$python_bin" -m venv "$ROOT/.venv"
-}
-
-install_with_pip() {
-  log "Installing DocMason into .venv with pip..."
-  "$ROOT/.venv/bin/python" -m pip install --upgrade pip
-  "$ROOT/.venv/bin/python" -m pip install -e ".[dev]"
-}
+  launch_prepare "$BOOTSTRAP_PYTHON" ${JSON_FLAG:+$JSON_FLAG}
+fi
 
 BREW_BIN="$(find_brew || true)"
 refresh_brew_path
 BREW_BIN="$(find_brew || true)"
-PYTHON_BIN="$(find_supported_python || true)"
+BOOTSTRAP_PYTHON="$(find_supported_shared_python || true)"
 
-if [[ -z "$PYTHON_BIN" && -z "$BREW_BIN" && "$ASSUME_YES" -eq 1 ]]; then
+if [[ -z "$BOOTSTRAP_PYTHON" && -z "$BREW_BIN" && "$ASSUME_YES" -eq 1 ]]; then
   if homebrew_auto_install_feasible; then
     install_homebrew || fail "Could not install Homebrew through the official unattended path."
     hash -r
@@ -211,57 +181,19 @@ if [[ -z "$PYTHON_BIN" && -z "$BREW_BIN" && "$ASSUME_YES" -eq 1 ]]; then
   fi
 fi
 
-if [[ -z "$PYTHON_BIN" && -n "$BREW_BIN" ]]; then
+if [[ -z "$BOOTSTRAP_PYTHON" && -n "$BREW_BIN" ]]; then
   if [[ "$ASSUME_YES" -eq 1 ]]; then
-    install_supported_python "$BREW_BIN"
+    install_supported_python "$BREW_BIN" || fail "Could not install a supported bootstrap Python with Homebrew."
     hash -r
-    PYTHON_BIN="$(find_supported_python || true)"
+    BOOTSTRAP_PYTHON="$(find_supported_shared_python || true)"
   else
-    fail "No supported Python 3.11+ interpreter was found. Rerun with --yes to allow automated installation through Homebrew."
+    fail "No supported Python 3.11+ bootstrap interpreter was found. Rerun with --yes to allow automated installation through Homebrew."
   fi
 fi
 
-if [[ -z "$PYTHON_BIN" ]]; then
-  fail "Could not find a supported Python 3.11+ interpreter. On macOS, install Homebrew and rerun this launcher, or provide one via DOCMASON_BOOTSTRAP_PYTHON."
+if [[ -z "$BOOTSTRAP_PYTHON" ]]; then
+  fail "Could not find a supported Python 3.11+ bootstrap interpreter. Install one or provide it via DOCMASON_BOOTSTRAP_PYTHON."
 fi
 
-update_user_bin_path "$PYTHON_BIN"
-
-UV_BIN="$(find_uv || true)"
-if [[ -z "$UV_BIN" ]]; then
-  if [[ "$ASSUME_YES" -eq 1 ]]; then
-    if install_uv "$PYTHON_BIN" "$BREW_BIN"; then
-      hash -r
-      update_user_bin_path "$PYTHON_BIN"
-      UV_BIN="$(find_uv || true)"
-    else
-      log "The automated uv install attempt failed; the launcher will fall back to repo-local venv + pip."
-    fi
-  else
-    fail "uv is missing. Rerun with --yes to allow the automated install attempt."
-  fi
-fi
-
-cd "$ROOT"
-USE_UV=1
-if [[ -z "$UV_BIN" ]]; then
-  USE_UV=0
-  log "uv is unavailable after the automated install attempt; falling back to repo-local venv + pip."
-fi
-
-if [[ "$USE_UV" -eq 1 ]]; then
-  if ! create_with_uv "$UV_BIN" "$PYTHON_BIN"; then
-    log "uv failed while creating .venv; falling back to repo-local venv + pip."
-    USE_UV=0
-  elif ! install_with_uv "$UV_BIN"; then
-    log "uv failed while installing DocMason; falling back to repo-local venv + pip."
-    USE_UV=0
-  fi
-fi
-
-if [[ "$USE_UV" -eq 0 ]]; then
-  create_with_venv "$PYTHON_BIN" || fail "Could not create the repo-local virtual environment."
-  install_with_pip || fail "Could not install DocMason into the repo-local virtual environment."
-fi
-
-exec "$ROOT/.venv/bin/python" -m docmason prepare --yes ${JSON_FLAG:+$JSON_FLAG}
+log "Using shared bootstrap Python to provision the repo-local managed Python 3.13 workspace."
+launch_prepare "$BOOTSTRAP_PYTHON" ${JSON_FLAG:+$JSON_FLAG}

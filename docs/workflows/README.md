@@ -154,9 +154,9 @@ artifact-level retrieval or cross-source comparison.
 ## Environment Preparation Notes
 
 - `./scripts/bootstrap-workspace.sh --yes` is the preferred zero-to-working launcher from a raw checkout.
-- `uv` is the preferred workflow manager.
-- On macOS, when Homebrew is already installed, prefer `brew install uv`.
-- If Homebrew is unavailable, a user-scoped `pip` installation for `uv` is an acceptable fallback.
+- The launcher should only choose a usable bootstrap Python and delegate to `docmason prepare --yes`.
+- Prepared steady-state work should run from repo-local managed Python `3.13` under `.docmason/toolchain/python/`.
+- If `uv` is missing, `prepare` should provision it inside `.docmason/toolchain/bootstrap/venv` rather than keeping an externally anchored steady-state runtime.
 - The project runtime itself remains isolated inside repo-local `.venv`.
 - Once `.venv` exists, prefer `./.venv/bin/python -m docmason ...` or the CLI inside `.venv` for ordinary workspace operations.
 - For Office rendering, install LibreOffice before syncing PowerPoint, Word, or Excel sources, including legacy `.ppt`, `.doc`, and `.xls` files.

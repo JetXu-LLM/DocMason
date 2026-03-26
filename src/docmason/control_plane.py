@@ -18,8 +18,14 @@ PROJECTION_STATE_SCHEMA_VERSION = 1
 SHARED_JOB_ACTIVE_STATUSES = frozenset({"running", "awaiting-confirmation"})
 SHARED_JOB_SETTLED_STATUSES = frozenset({"completed", "blocked", "declined"})
 CONFIRMATION_KIND_PROMPTS = {
-    "material-sync": "检测到大量未构建变更，建议先构建知识库后再继续当前问题，是否现在开始？",
-    "high-intrusion-prepare": "当前问题需要补齐本地依赖才能继续，是否现在开始准备环境？",
+    "material-sync": (
+        "A large unpublished workspace change set was detected. "
+        "Build or refresh the knowledge base now before continuing this question?"
+    ),
+    "high-intrusion-prepare": (
+        "This question requires additional local dependencies before it can continue safely. "
+        "Prepare the workspace now?"
+    ),
 }
 AFFIRMATIVE_CONFIRMATIONS = frozenset(
     {"y", "yes", "ok", "okay", "start", "continue", "是", "好", "开始", "继续", "确认"}
@@ -287,7 +293,7 @@ def required_prepare_capabilities(
     office_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from .commands import inspect_editable_install
-    from .knowledge import office_renderer_snapshot
+    from .workspace_probe import office_renderer_snapshot
 
     if editable_install is None or editable_detail is None:
         editable_install, editable_detail = inspect_editable_install(paths)
@@ -668,8 +674,8 @@ def find_conversation_confirmation_job(paths: WorkspacePaths, conversation_id: s
 
 def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     from .interaction import interaction_ingest_snapshot
-    from .knowledge import preview_source_changes
     from .project import cached_bootstrap_readiness, knowledge_base_snapshot
+    from .workspace_probe import preview_source_changes
 
     environment_state = cached_bootstrap_readiness(paths, require_sync_capability=False)
     sync_environment_state = cached_bootstrap_readiness(paths, require_sync_capability=True)

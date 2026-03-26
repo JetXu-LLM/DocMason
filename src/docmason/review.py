@@ -6,7 +6,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .conversation import semantic_log_context_from_record
+from .conversation import normalize_front_door_state, semantic_log_context_from_record
 from .control_plane import load_shared_jobs_index, load_shared_job
 from .project import WorkspacePaths, read_json
 
@@ -26,12 +26,25 @@ def _recorded_at(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _effective_log_origin(payload: dict[str, Any]) -> str | None:
+def _record_has_canonical_ask_ownership(record: dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return (
+        record.get("entry_workflow_id") == "ask"
+        and normalize_front_door_state(record.get("front_door_state")) == "canonical-ask"
+    )
+
+
+def _effective_log_origin(
+    payload: dict[str, Any],
+    *,
+    linked_turn: dict[str, Any] | None = None,
+) -> str | None:
     explicit = payload.get("log_origin")
     if isinstance(explicit, str) and explicit:
         return explicit
-    if payload.get("entry_workflow_id") == "ask" and isinstance(
-        payload.get("conversation_id"), str
+    if _record_has_canonical_ask_ownership(payload) or _record_has_canonical_ask_ownership(
+        linked_turn
     ):
         return "interactive-ask"
     if isinstance(payload.get("conversation_id"), str):
@@ -244,10 +257,10 @@ def _feedback_records(paths: WorkspacePaths) -> list[dict[str, Any]]:
 def _candidate_priority(
     *,
     conversation_id: str | None,
-    entry_workflow_id: str | None,
+    log_origin: str | None,
     feedback_match_count: int,
 ) -> str:
-    if conversation_id and entry_workflow_id == "ask":
+    if conversation_id and log_origin == "interactive-ask":
         base = "high"
     elif conversation_id:
         base = "medium"
@@ -389,7 +402,12 @@ def build_benchmark_candidates(
                 "routed_workflow": payload.get("entry_workflow_id") or payload.get("command"),
                 "inner_workflow_id": payload.get("inner_workflow_id"),
                 "requires_render_inspection": False,
-                "log_origin": _effective_log_origin(payload),
+                "log_origin": _effective_log_origin(
+                    payload,
+                    linked_turn=(
+                        conversation_record["turn"] if isinstance(conversation_record, dict) else None
+                    ),
+                ),
                 "candidate_source": candidate_source,
                 "support_basis": payload.get("support_basis"),
                 "question_context": _merged_semantic_context(
@@ -459,7 +477,7 @@ def build_benchmark_candidates(
         trace_ids = list(dict.fromkeys(item for item in group["trace_ids"] if isinstance(item, str)))
         candidate_priority = _candidate_priority(
             conversation_id=group["conversation_id"] if isinstance(group["conversation_id"], str) else None,
-            entry_workflow_id=group["routed_workflow"] if isinstance(group["routed_workflow"], str) else None,
+            log_origin=group["log_origin"] if isinstance(group["log_origin"], str) else None,
             feedback_match_count=int(group["feedback_match_count"]),
         )
         candidate: dict[str, Any] = {

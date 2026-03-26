@@ -7,11 +7,13 @@ from typing import Any
 from .commands import ACTION_REQUIRED, prepare_workspace, sync_workspace as run_sync_command
 from .admissibility import evaluate_commit_admissibility
 from .conversation import (
+    FRONT_DOOR_STATE_CANONICAL_ASK,
     build_log_context,
     load_turn_record,
     open_conversation_turn,
     semantic_log_context_fields,
     semantic_log_context_from_record,
+    utc_now,
     update_conversation_turn,
 )
 from .control_plane import (
@@ -36,7 +38,6 @@ from .interaction import (
     interaction_overlay_relevance,
     maybe_reconcile_active_thread,
 )
-from .knowledge import preview_source_changes
 from .project import (
     WorkspacePaths,
     cached_bootstrap_readiness,
@@ -48,6 +49,7 @@ from .project import (
 from .projections import refresh_runtime_projections
 from .routing import tokenize_text
 from .run_control import (
+    RUN_ORIGIN_ASK_FRONT_DOOR,
     attach_shared_job_to_run,
     commit_run,
     ensure_run_for_turn,
@@ -55,6 +57,7 @@ from .run_control import (
     record_run_event_if_present,
     record_run_event_for_runs,
     refresh_turn_run_version_truth,
+    update_run_state,
 )
 from .source_references import (
     build_reference_resolution_summary,
@@ -131,6 +134,13 @@ def _resolved_string_list(value: list[Any] | None) -> list[str]:
     return list(
         dict.fromkeys(item for item in value if isinstance(item, str) and item)
     )
+
+
+def _preview_source_changes(paths: WorkspacePaths) -> tuple[dict[str, Any], list[dict[str, Any]], bool, dict[str, Any]]:
+    """Load source-change preview lazily so ask imports stay light."""
+    from .workspace_probe import preview_source_changes
+
+    return preview_source_changes(paths)
 
 
 def _sync_turn_log_artifacts(
@@ -538,7 +548,7 @@ def _maybe_handle_confirmation_reply(
         )
         reason = (
             str(manifest.get("confirmation_prompt") or "The confirmation-required step was declined.")
-            + " 未继续执行当前任务。"
+            + " The current task was not continued."
         )
         return "declined", _commit_governed_boundary_turn(
             paths,
@@ -1121,12 +1131,54 @@ def _prepared_turn_response(
             run_id=run_id,
             entry_workflow_id="ask",
             inner_workflow_id=inner_workflow_id,
+            native_turn_id=opened["native_turn_id"]
+            if isinstance(opened.get("native_turn_id"), str)
+            else None,
+            front_door_state=opened.get("front_door_state")
+            if isinstance(opened.get("front_door_state"), str)
+            else None,
             question_class=question_class,
             question_domain=question_domain,
             support_strategy=support_strategy,
             analysis_origin=analysis_origin,
         ),
     }
+
+
+def _upgrade_turn_to_canonical_ask(
+    paths: WorkspacePaths,
+    *,
+    opened: dict[str, Any],
+    run_id: str,
+) -> dict[str, Any]:
+    """Upgrade one live turn and run from reconciliation-only to canonical ask ownership."""
+    front_door_opened_at = (
+        str(opened.get("front_door_opened_at"))
+        if isinstance(opened.get("front_door_opened_at"), str)
+        and opened.get("front_door_opened_at")
+        else utc_now()
+    )
+    update_run_state(
+        paths,
+        run_id=run_id,
+        updates={"run_origin": RUN_ORIGIN_ASK_FRONT_DOOR},
+    )
+    updated_turn = update_conversation_turn(
+        paths,
+        conversation_id=opened["conversation_id"],
+        turn_id=opened["turn_id"],
+        updates={
+            "active_run_id": run_id,
+            "front_door_state": FRONT_DOOR_STATE_CANONICAL_ASK,
+            "front_door_opened_at": front_door_opened_at,
+            "front_door_run_id": run_id,
+        },
+    )
+    opened["front_door_state"] = updated_turn.get("front_door_state")
+    opened["front_door_opened_at"] = updated_turn.get("front_door_opened_at")
+    opened["front_door_run_id"] = updated_turn.get("front_door_run_id")
+    opened["native_turn_id"] = updated_turn.get("native_turn_id")
+    return updated_turn
 
 
 def prepare_ask_turn(
@@ -1155,8 +1207,14 @@ def prepare_ask_turn(
         turn_id=opened["turn_id"],
         user_question=question,
         entry_workflow_id="ask",
+        run_origin=RUN_ORIGIN_ASK_FRONT_DOOR,
     )
     run_id = str(run_payload["run_id"])
+    _upgrade_turn_to_canonical_ask(
+        paths,
+        opened=opened,
+        run_id=run_id,
+    )
     knowledge_base = opened["workspace_snapshot"]["knowledge_base"]
     interaction_snapshot = interaction_ingest_snapshot(paths)
     profile = question_execution_profile(
@@ -1265,7 +1323,23 @@ def prepare_ask_turn(
             confirmation_reason=confirmation_reason,
         )
 
-    if not knowledge_base["present"] and workspace_notices_enabled and not environment_ready:
+    if workspace_notices_enabled and not environment_ready:
+        action_required = True
+        inner_workflow_id = "workspace-bootstrap"
+        route_reason = (
+            "The ask path could not complete the automatic workspace repair required before "
+            "workspace evidence can be used safely."
+            if auto_prepare_triggered
+            else (
+                "The workspace environment is not ready for ordinary workspace evidence work."
+            )
+        )
+        freshness_notice = str(
+            environment_state.get("detail")
+            or "The workspace environment is not ready for ordinary workspace evidence work."
+        )
+
+    if not action_required and not knowledge_base["present"] and workspace_notices_enabled and not environment_ready:
         action_required = True
         inner_workflow_id = "workspace-bootstrap"
         route_reason = (
@@ -1288,7 +1362,7 @@ def prepare_ask_turn(
             )
         elif knowledge_base["stale"]:
             _index_preview, _active_preview, _ambiguous_preview, preview_change_set = (
-                preview_source_changes(paths)
+                _preview_source_changes(paths)
             )
             should_auto_sync, candidate_reason = _changed_source_relevance(
                 question=question,
@@ -1306,6 +1380,7 @@ def prepare_ask_turn(
     if (
         workspace_notices_enabled
         and question_domain == "workspace-corpus"
+        and not action_required
         and interaction_snapshot["pending_promotion_count"]
     ):
         if interaction_snapshot.get("load_warnings"):
@@ -1467,7 +1542,7 @@ def prepare_ask_turn(
                 freshness_notice = str(
                     sync_payload.get("detail") or "Automatic sync did not complete."
                 )
-    elif not knowledge_base["present"] and workspace_notices_enabled:
+    elif not action_required and not knowledge_base["present"] and workspace_notices_enabled:
         action_required = True
         inner_workflow_id = "knowledge-base-sync" if environment_ready else "workspace-bootstrap"
         route_reason = (
@@ -1475,13 +1550,15 @@ def prepare_ask_turn(
             "safely from current state."
         )
         freshness_notice = "No published knowledge base is available yet."
-    elif knowledge_base["stale"] and workspace_notices_enabled:
+    elif not action_required and knowledge_base["stale"] and workspace_notices_enabled:
         sync_suggested = True
         freshness_notice = "The published knowledge base appears stale relative to `original_doc/`."
         if needs_latest_workspace_state:
             prefer_sync_before_answer = True
 
     interaction_sync_suggested = bool(
+        not action_required
+        and
         workspace_notices_enabled
         and question_domain == "workspace-corpus"
         and interaction_snapshot["pending_promotion_count"]
@@ -1533,6 +1610,9 @@ def prepare_ask_turn(
             "confirmation_kind": confirmation_kind,
             "confirmation_prompt": confirmation_prompt,
             "confirmation_reason": confirmation_reason,
+            "front_door_state": FRONT_DOOR_STATE_CANONICAL_ASK,
+            "front_door_opened_at": opened.get("front_door_opened_at"),
+            "front_door_run_id": run_id,
             "turn_state": status if status in {"awaiting-confirmation", "waiting-shared-job"} else "prepared",
             "status": status,
             "route_reason": route_reason,

@@ -29,6 +29,7 @@ LOG_CONTEXT_CORE_FIELD_NAMES = (
     "entry_workflow_id",
     "inner_workflow_id",
     "native_turn_id",
+    "front_door_state",
 )
 SEMANTIC_LOG_CONTEXT_FIELD_NAMES = (
     "question_class",
@@ -39,6 +40,13 @@ SEMANTIC_LOG_CONTEXT_FIELD_NAMES = (
     "support_manifest_path",
 )
 LOG_CONTEXT_FIELD_NAMES = LOG_CONTEXT_CORE_FIELD_NAMES + SEMANTIC_LOG_CONTEXT_FIELD_NAMES
+FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY = "native-reconciled-only"
+FRONT_DOOR_STATE_CANONICAL_ASK = "canonical-ask"
+_FRONT_DOOR_STATE_PRIORITY = {
+    None: 0,
+    FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY: 1,
+    FRONT_DOOR_STATE_CANONICAL_ASK: 2,
+}
 
 
 def utc_now() -> str:
@@ -65,6 +73,33 @@ def _nonempty_string(value: Any) -> str | None:
         if stripped:
             return stripped
     return None
+
+
+def normalize_front_door_state(value: Any) -> str | None:
+    """Normalize one persisted front-door state into a supported value."""
+    normalized = _nonempty_string(value)
+    if normalized in {
+        FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY,
+        FRONT_DOOR_STATE_CANONICAL_ASK,
+    }:
+        return normalized
+    return None
+
+
+def stronger_front_door_state(current: Any, candidate: Any) -> str | None:
+    """Return the stronger of two front-door states without demotion."""
+    current_state = normalize_front_door_state(current)
+    candidate_state = normalize_front_door_state(candidate)
+    if _FRONT_DOOR_STATE_PRIORITY[candidate_state] > _FRONT_DOOR_STATE_PRIORITY[current_state]:
+        return candidate_state
+    return current_state
+
+
+def turn_has_canonical_ask_ownership(turn: dict[str, Any] | None) -> bool:
+    """Return whether one turn is explicitly owned by canonical ask."""
+    if not isinstance(turn, dict):
+        return False
+    return normalize_front_door_state(turn.get("front_door_state")) == FRONT_DOOR_STATE_CANONICAL_ASK
 
 
 def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
@@ -98,6 +133,14 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["hybrid_refresh_completion_status"] = None
     if "hybrid_refresh_summary" not in turn:
         turn["hybrid_refresh_summary"] = None
+    if "front_door_state" not in turn:
+        turn["front_door_state"] = None
+    else:
+        turn["front_door_state"] = normalize_front_door_state(turn.get("front_door_state"))
+    if "front_door_opened_at" not in turn:
+        turn["front_door_opened_at"] = None
+    if "front_door_run_id" not in turn:
+        turn["front_door_run_id"] = None
     return turn
 
 
@@ -237,6 +280,15 @@ def _load_active_conversation(paths: WorkspacePaths) -> dict[str, Any]:
     if active:
         return active
     return read_json(paths.legacy_active_conversation_path)
+
+
+def load_active_conversation_record(paths: WorkspacePaths) -> dict[str, Any]:
+    """Load the current active conversation record when it still exists."""
+    active = _load_active_conversation(paths)
+    conversation_id = active.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return {}
+    return load_conversation_record(paths, conversation_id)
 
 
 def _conversation_record_exists(paths: WorkspacePaths, conversation_id: str) -> bool:
@@ -456,6 +508,11 @@ def find_reusable_open_turn_index(
         return None
     if latest_turn.get("turn_state") in {"awaiting-confirmation", "waiting-shared-job"}:
         return len(turns) - 1
+    if (
+        normalize_front_door_state(latest_turn.get("front_door_state"))
+        == FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY
+    ):
+        return len(turns) - 1
     if latest_turn.get("response_excerpt"):
         return None
     if latest_turn.get("session_ids") or latest_turn.get("trace_ids"):
@@ -539,6 +596,10 @@ def open_conversation_turn(
         "conversation_id_source": conversation_id_source,
         "agent_surface": agent_surface,
         "workspace_snapshot": conversation["workspace_snapshot"],
+        "native_turn_id": turn.get("native_turn_id"),
+        "front_door_state": turn.get("front_door_state"),
+        "front_door_opened_at": turn.get("front_door_opened_at"),
+        "front_door_run_id": turn.get("front_door_run_id"),
     }
 
 
@@ -668,6 +729,17 @@ def update_conversation_turn(
         return updated_turn
 
 
+def latest_conversation_turn(conversation: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the latest turn from one loaded conversation record."""
+    turns = conversation.get("turns", [])
+    if not isinstance(turns, list) or not turns:
+        return None
+    latest = turns[-1]
+    if not isinstance(latest, dict):
+        return None
+    return _backfill_turn_runtime_fields(latest)
+
+
 def build_log_context(
     *,
     conversation_id: str,
@@ -676,6 +748,7 @@ def build_log_context(
     entry_workflow_id: str,
     inner_workflow_id: str,
     native_turn_id: str | None = None,
+    front_door_state: str | None = None,
     question_class: str | None = None,
     question_domain: str | None = None,
     support_strategy: str | None = None,
@@ -693,6 +766,7 @@ def build_log_context(
     optional_fields = {
         "run_id": run_id,
         "native_turn_id": native_turn_id,
+        "front_door_state": normalize_front_door_state(front_door_state),
     }
     for field_name, value in optional_fields.items():
         if isinstance(value, str) and value:

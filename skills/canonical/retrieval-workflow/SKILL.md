@@ -10,6 +10,9 @@ Use this skill when the task is to retrieve the strongest published evidence bun
 This is an evidence-focused workflow.
 Use it directly for explicit evidence requests, or let `ask` route here automatically.
 
+Direct public `retrieve` remains a legal operator evidence surface.
+It does not substitute for canonical ask when the user is really asking for ordinary answer completion.
+
 ## Required Capabilities
 
 - local file access
@@ -75,3 +78,4 @@ If the agent cannot run local commands or inspect the published file-only knowle
 - `--json` output always includes a structured `reference_resolution` block, and normal CLI output echoes the resolution status plus any best-effort notice.
 - If the strongest evidence depends on renders or low-confidence text extraction, inspect the render assets before finalizing the answer.
 - Ordinary natural questions should usually begin at `ask`, not by requiring the user to name this workflow ID.
+- When direct operator retrieval runs inside an active native thread without canonical ask ownership, treat the result as operator evidence only rather than as proof that ordinary ask already executed legally.
