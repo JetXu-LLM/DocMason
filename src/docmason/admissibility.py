@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,79 @@ def _latest_trace_payload(paths: WorkspacePaths, trace_ids: list[str]) -> dict[s
         if payload:
             return payload
     return {}
+
+
+def _latest_session_payload(paths: WorkspacePaths, session_ids: list[str]) -> dict[str, Any]:
+    for session_id in reversed(session_ids):
+        payload = read_json(paths.query_sessions_dir / f"{session_id}.json")
+        if payload:
+            return payload
+    return {}
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def _latest_settled_job_timestamp(paths: WorkspacePaths, job_ids: list[str]) -> datetime | None:
+    latest: datetime | None = None
+    for job_id in job_ids:
+        if not isinstance(job_id, str) or not job_id:
+            continue
+        result_payload = read_json(paths.shared_jobs_dir / job_id / "result.json")
+        manifest_payload = load_shared_job(paths, job_id)
+        candidate = _parse_timestamp(result_payload.get("recorded_at")) or _parse_timestamp(
+            manifest_payload.get("updated_at") if isinstance(manifest_payload, dict) else None
+        )
+        if candidate is None:
+            continue
+        if latest is None or candidate > latest:
+            latest = candidate
+    return latest
+
+
+def _payload_has_unresolved_gap(payload: dict[str, Any]) -> bool:
+    return bool(
+        payload
+        and (
+            payload.get("published_artifacts_sufficient") is False
+            or payload.get("source_escalation_required") is True
+        )
+    )
+
+
+def _payload_recorded_at(payload: dict[str, Any]) -> datetime | None:
+    return _parse_timestamp(payload.get("recorded_at"))
+
+
+def _payload_identity_issue(
+    payload: dict[str, Any],
+    *,
+    label: str,
+    conversation_id: str,
+    turn_id: str,
+    run_id: str | None,
+) -> str | None:
+    payload_conversation_id = payload.get("conversation_id")
+    if (
+        isinstance(payload_conversation_id, str)
+        and payload_conversation_id
+        and payload_conversation_id != conversation_id
+    ):
+        return f"Linked {label} belongs to a different conversation."
+    payload_turn_id = payload.get("turn_id")
+    if isinstance(payload_turn_id, str) and payload_turn_id and payload_turn_id != turn_id:
+        return f"Linked {label} belongs to a different turn."
+    if isinstance(run_id, str) and run_id:
+        payload_run_id = payload.get("run_id")
+        if isinstance(payload_run_id, str) and payload_run_id and payload_run_id != run_id:
+            return f"Linked {label} belongs to a different run."
+    return None
 
 
 def evaluate_commit_admissibility(
@@ -77,11 +151,53 @@ def evaluate_commit_admissibility(
         if isinstance(value, str) and value
     ]
     trace_payload = _latest_trace_payload(paths, effective_trace_ids)
+    session_payload = _latest_session_payload(paths, effective_session_ids)
     trace_version_context = trace_payload.get("version_context")
-    if support_basis in {"kb-grounded", "mixed"} and trace_payload and not isinstance(
-        trace_version_context, dict
-    ):
-        issues.append("KB-grounded commits require trace version truth.")
+    session_identity_issue = _payload_identity_issue(
+        session_payload,
+        label="query session",
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        run_id=effective_run_id or None,
+    )
+    if session_identity_issue:
+        issues.append(session_identity_issue)
+    trace_identity_issue = _payload_identity_issue(
+        trace_payload,
+        label="trace",
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        run_id=effective_run_id or None,
+    )
+    if trace_identity_issue:
+        issues.append(trace_identity_issue)
+    trace_has_unresolved_gap = _payload_has_unresolved_gap(trace_payload)
+    session_has_unresolved_gap = _payload_has_unresolved_gap(session_payload)
+    trace_recorded_at = _payload_recorded_at(trace_payload)
+    session_recorded_at = _payload_recorded_at(session_payload)
+    latest_gap_source: str | None = None
+    if session_has_unresolved_gap:
+        latest_gap_source = "query session"
+    if trace_payload:
+        if (
+            session_recorded_at is None
+            or trace_recorded_at is None
+            or trace_recorded_at >= session_recorded_at
+        ):
+            latest_gap_source = "trace" if trace_has_unresolved_gap else None
+    if latest_gap_source and turn.get("published_artifacts_sufficient") is True:
+        issues.append(
+            f"Final turn claims published artifacts are sufficient even though the latest ask-owned {latest_gap_source} still records an unresolved hard-artifact or governed multimodal gap."
+        )
+    if latest_gap_source and turn.get("source_escalation_required") is False:
+        issues.append(
+            f"Final turn clears source escalation even though the latest ask-owned {latest_gap_source} still requires escalation."
+        )
+    if support_basis in {"kb-grounded", "mixed"}:
+        if not effective_trace_ids or not trace_payload:
+            issues.append("Canonical grounded ask commits require an ask-owned trace.")
+        elif not isinstance(trace_version_context, dict):
+            issues.append("KB-grounded commits require trace version truth.")
     if (
         trace_payload
         and isinstance(run_version_context, dict)
@@ -152,6 +268,22 @@ def evaluate_commit_admissibility(
         if not matched_expected_job:
             issues.append(
                 "The settled governed multimodal refresh jobs do not match the selected snapshot/source scope."
+            )
+    settled_refresh_at = (
+        _latest_settled_job_timestamp(paths, hybrid_refresh_job_ids)
+        if hybrid_refresh_completion_status == "covered"
+        else None
+    )
+    if hybrid_refresh_completion_status == "covered" and settled_refresh_at is not None:
+        latest_session_at = _parse_timestamp(session_payload.get("recorded_at"))
+        latest_trace_at = _parse_timestamp(trace_payload.get("recorded_at"))
+        if latest_session_at is None or latest_session_at <= settled_refresh_at:
+            issues.append(
+                "Covered governed multimodal refresh turns require a post-refresh retrieve session recorded after the shared job settled."
+            )
+        if latest_trace_at is None or latest_trace_at <= settled_refresh_at:
+            issues.append(
+                "Covered governed multimodal refresh turns require a post-refresh trace recorded after the shared job settled."
             )
     if hybrid_refresh_completion_status == "blocked" and support_basis != "governed-boundary":
         issues.append("Blocked governed multimodal refresh turns must commit as governed-boundary.")

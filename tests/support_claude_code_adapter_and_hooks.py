@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -90,6 +91,22 @@ class HookEventHandlerTests(unittest.TestCase):
         self.assertEqual(records[0]["record_type"], "session-end")
         self.assertEqual(records[0]["reason"], "user_exit")
 
+    def test_session_end_preserves_optional_diagnostics(self) -> None:
+        payload = {
+            "hook_event_name": "SessionEnd",
+            "session_id": "test-session-001",
+            "reason": "other",
+            "host_error_text": "Context budget exceeded",
+            "hook_activity_state": "teardown-running",
+        }
+        with mock.patch("docmason.hooks._resolve_workspace_root", return_value=self.workspace_root):
+            handle_hook_event("session", json.dumps(payload))
+
+        mirror_file = _mirror_path(self.workspace_root, "test-session-001")
+        records = [json.loads(line) for line in mirror_file.read_text().splitlines()]
+        self.assertEqual(records[0]["host_error_text"], "Context budget exceeded")
+        self.assertEqual(records[0]["hook_activity_state"], "teardown-running")
+
     def test_prompt_submit_writes_mirror_record(self) -> None:
         payload = {
             "hook_event_name": "UserPromptSubmit",
@@ -139,6 +156,27 @@ class HookEventHandlerTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["record_type"], "stop")
         self.assertEqual(records[0]["last_assistant_message"], "Here is the answer.")
+
+    def test_stop_preserves_optional_diagnostics(self) -> None:
+        payload = {
+            "hook_event_name": "Stop",
+            "session_id": "test-session-001",
+            "last_assistant_message": "Execution failed cleanly.",
+            "stop_reason": "sdk-error",
+            "host_error_text": "Cannot read properties of undefined.",
+            "hook_activity_state": "stop-hook",
+        }
+        with mock.patch("docmason.hooks._resolve_workspace_root", return_value=self.workspace_root):
+            handle_hook_event("stop", json.dumps(payload))
+
+        mirror_file = _mirror_path(self.workspace_root, "test-session-001")
+        records = [json.loads(line) for line in mirror_file.read_text().splitlines()]
+        self.assertEqual(records[0]["stop_reason"], "sdk-error")
+        self.assertEqual(
+            records[0]["host_error_text"],
+            "Cannot read properties of undefined.",
+        )
+        self.assertEqual(records[0]["hook_activity_state"], "stop-hook")
 
     def test_missing_session_id_silently_skipped(self) -> None:
         payload = {
@@ -293,6 +331,13 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
                 f.write(json.dumps(record) + "\n")
         return path
 
+    def _write_native_transcript(self, filename: str, records: list[dict]) -> Path:
+        path = self.workspace_root / filename
+        with path.open("w", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+        return path
+
     def test_locate_existing_session(self) -> None:
         self._write_mirror_session(
             "abc-123", [{"record_type": "session-start", "session_id": "abc-123"}]
@@ -424,6 +469,395 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
         turn = transcript["turns"][0]
         self.assertEqual(len(turn["function_calls"]), 1)
         self.assertEqual(turn["function_calls"][0]["tool_name"], "Bash")
+
+    def test_native_transcript_enrichment_merges_assistant_and_tool_context(self) -> None:
+        native_path = self._write_native_transcript(
+            "native-claude.jsonl",
+            [
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-20T10:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Run the ask workflow"},
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-20T10:00:05Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Opening canonical ask turn."},
+                            {
+                                "type": "tool_use",
+                                "name": "Skill",
+                                "id": "skill-001",
+                                "input": {"skill": "ask"},
+                            },
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-20T10:00:06Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "skill-001",
+                                "content": "Launching skill: ask",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-20T10:00:10Z",
+                    "message": {
+                        "stop_reason": "end_turn",
+                        "content": [
+                            {"type": "text", "text": "Final grounded answer."},
+                        ]
+                    },
+                },
+            ],
+        )
+        records = [
+            {
+                "record_type": "session-start",
+                "session_id": "sess-004",
+                "cwd": str(self.workspace_root),
+                "transcript_path": str(native_path),
+                "model": "claude-sonnet-4.6",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-004",
+                "recorded_at": "2026-03-20T10:00:00Z",
+                "prompt": "Run the ask workflow",
+            },
+            {
+                "record_type": "tool-use",
+                "session_id": "sess-004",
+                "recorded_at": "2026-03-20T10:00:07Z",
+                "tool_name": "Bash",
+                "tool_use_id": "bash-001",
+                "tool_input": {"command": "docmason status --json"},
+                "tool_response": "ready",
+            },
+            {
+                "record_type": "stop",
+                "session_id": "sess-004",
+                "recorded_at": "2026-03-20T10:00:12Z",
+                "last_assistant_message": "Final grounded answer.",
+            },
+        ]
+        self._write_mirror_session("sess-004", records)
+
+        transcript = load_claude_code_transcript("sess-004", self.workspace_root)
+
+        turn = transcript["turns"][0]
+        self.assertEqual(transcript["fidelity"]["capture_method"], "hook-mirror-plus-native")
+        self.assertTrue(transcript["fidelity"]["has_mid_turn_messages"])
+        self.assertEqual(turn["assistant_message_count"], 2)
+        self.assertIn("Opening canonical ask turn.", turn["assistant_text"])
+        tool_names = {call["tool_name"] for call in turn["function_calls"]}
+        self.assertIn("Bash", tool_names)
+        self.assertIn("Skill", tool_names)
+        self.assertTrue(
+            any(
+                output.get("call_id") == "skill-001"
+                for output in turn["function_call_outputs"]
+            )
+        )
+
+    def test_native_transcript_meta_skill_text_and_nested_image_keep_one_turn(self) -> None:
+        image_payload = base64.b64encode(b"fake-png-bytes").decode("ascii")
+        native_path = self._write_native_transcript(
+            "native-claude-realistic.jsonl",
+            [
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-20T10:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Please inspect the rendered page."},
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-20T10:00:02Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Opening canonical ask turn."},
+                            {
+                                "type": "tool_use",
+                                "name": "Skill",
+                                "id": "skill-001",
+                                "input": {"skill": "ask"},
+                            },
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-20T10:00:03Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "skill-001",
+                                "content": "Launching skill: ask",
+                            }
+                        ]
+                    },
+                    "toolUseResult": {"success": True, "commandName": "ask"},
+                },
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-20T10:00:03Z",
+                    "isMeta": True,
+                    "sourceToolUseID": "skill-001",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Base directory for this skill: /tmp/skills/ask",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-20T10:00:05Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Reading the rendered evidence now."},
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "id": "read-001",
+                                "input": {"file_path": "renders/page-001.png"},
+                            },
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-20T10:00:06Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "read-001",
+                                "content": [
+                                    {"type": "text", "text": "Loaded page render."},
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "image/png",
+                                            "data": image_payload,
+                                        },
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                    "toolUseResult": {"success": True, "commandName": "Read"},
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-20T10:00:10Z",
+                    "message": {
+                        "stop_reason": "end_turn",
+                        "content": [
+                            {"type": "text", "text": "Final grounded answer."},
+                        ],
+                    },
+                },
+            ],
+        )
+        records = [
+            {
+                "record_type": "session-start",
+                "session_id": "sess-004b",
+                "cwd": str(self.workspace_root),
+                "transcript_path": str(native_path),
+                "model": "claude-sonnet-4.6",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-004b",
+                "recorded_at": "2026-03-20T10:00:00Z",
+                "prompt": "Please inspect the rendered page.",
+            },
+            {
+                "record_type": "tool-use",
+                "session_id": "sess-004b",
+                "recorded_at": "2026-03-20T10:00:07Z",
+                "tool_name": "Bash",
+                "tool_use_id": "bash-001",
+                "tool_input": {"command": "docmason status --json"},
+                "tool_response": "ready",
+            },
+            {
+                "record_type": "stop",
+                "session_id": "sess-004b",
+                "recorded_at": "2026-03-20T10:00:12Z",
+                "last_assistant_message": "Final grounded answer.",
+            },
+        ]
+        self._write_mirror_session("sess-004b", records)
+
+        transcript = load_claude_code_transcript("sess-004b", self.workspace_root)
+
+        self.assertEqual(len(transcript["turns"]), 1)
+        self.assertTrue(transcript["fidelity"]["has_mid_turn_messages"])
+        self.assertTrue(transcript["fidelity"]["attachments_captured"])
+        turn = transcript["turns"][0]
+        self.assertEqual(turn["assistant_message_count"], 3)
+        self.assertIn("Reading the rendered evidence now.", turn["assistant_text"])
+        self.assertEqual(len(turn["attachments"]), 1)
+        self.assertTrue(turn["attachments"][0]["image_url"].startswith("data:image/png;base64,"))
+        tool_names = {call["tool_name"] for call in turn["function_calls"]}
+        self.assertIn("Read", tool_names)
+        self.assertIn("Skill", tool_names)
+        self.assertTrue(
+            any(
+                output.get("call_id") == "read-001"
+                for output in turn["function_call_outputs"]
+            )
+        )
+
+    def test_session_end_without_stop_marks_incomplete_operator_evidence(self) -> None:
+        records = [
+            {
+                "record_type": "session-start",
+                "session_id": "sess-005",
+                "cwd": str(self.workspace_root),
+                "transcript_path": "",
+                "model": "claude-sonnet-4.6",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-005",
+                "recorded_at": "2026-03-20T10:00:00Z",
+                "prompt": "Please continue the ask workflow.",
+            },
+            {
+                "record_type": "session-end",
+                "session_id": "sess-005",
+                "recorded_at": "2026-03-20T10:00:40Z",
+                "reason": "other",
+                "host_error_text": "Context budget exceeded before completion.",
+            },
+        ]
+        self._write_mirror_session("sess-005", records)
+
+        transcript = load_claude_code_transcript("sess-005", self.workspace_root)
+
+        turn = transcript["turns"][0]
+        self.assertEqual(turn["closure"]["status"], "incomplete")
+        self.assertEqual(
+            turn["operator_evidence"]["classification"],
+            "host-runtime-overload",
+        )
+
+    def test_stop_text_about_sdk_docs_does_not_trigger_host_failure(self) -> None:
+        records = [
+            {
+                "record_type": "session-start",
+                "session_id": "sess-006",
+                "cwd": str(self.workspace_root),
+                "transcript_path": "",
+                "model": "claude-sonnet-4.6",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-006",
+                "recorded_at": "2026-03-20T10:00:00Z",
+                "prompt": "Explain the Claude workflow.",
+            },
+            {
+                "record_type": "stop",
+                "session_id": "sess-006",
+                "recorded_at": "2026-03-20T10:00:40Z",
+                "last_assistant_message": "The SDK documentation recommends sequential image reads.",
+                "stop_reason": "end_turn",
+            },
+        ]
+        self._write_mirror_session("sess-006", records)
+
+        transcript = load_claude_code_transcript("sess-006", self.workspace_root)
+
+        turn = transcript["turns"][0]
+        self.assertIsNone(turn["operator_evidence"]["classification"])
+
+    def test_stop_text_about_context_budget_does_not_trigger_overload_without_host_signal(self) -> None:
+        records = [
+            {
+                "record_type": "session-start",
+                "session_id": "sess-007",
+                "cwd": str(self.workspace_root),
+                "transcript_path": "",
+                "model": "claude-sonnet-4.6",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-007",
+                "recorded_at": "2026-03-20T10:00:00Z",
+                "prompt": "Explain the workflow guardrails.",
+            },
+            {
+                "record_type": "stop",
+                "session_id": "sess-007",
+                "recorded_at": "2026-03-20T10:00:40Z",
+                "last_assistant_message": "In general, keep the context budget small for future prompts.",
+                "stop_reason": "end_turn",
+            },
+        ]
+        self._write_mirror_session("sess-007", records)
+
+        transcript = load_claude_code_transcript("sess-007", self.workspace_root)
+
+        turn = transcript["turns"][0]
+        self.assertIsNone(turn["operator_evidence"]["classification"])
+
+    def test_explicit_assistant_error_phrase_can_still_trigger_host_failure_fallback(self) -> None:
+        records = [
+            {
+                "record_type": "session-start",
+                "session_id": "sess-008",
+                "cwd": str(self.workspace_root),
+                "transcript_path": "",
+                "model": "claude-sonnet-4.6",
+            },
+            {
+                "record_type": "prompt-submit",
+                "session_id": "sess-008",
+                "recorded_at": "2026-03-20T10:00:00Z",
+                "prompt": "Explain the earlier failure.",
+            },
+            {
+                "record_type": "stop",
+                "session_id": "sess-008",
+                "recorded_at": "2026-03-20T10:00:40Z",
+                "last_assistant_message": "Error during execution while loading the image payload.",
+                "stop_reason": "end_turn",
+            },
+        ]
+        self._write_mirror_session("sess-008", records)
+
+        transcript = load_claude_code_transcript("sess-008", self.workspace_root)
+
+        turn = transcript["turns"][0]
+        self.assertEqual(
+            turn["operator_evidence"]["classification"],
+            "host-runtime-failure",
+        )
 
 
 class TranscriptValidationTests(unittest.TestCase):
@@ -726,7 +1160,8 @@ class ConnectorManifestTests(unittest.TestCase):
         self.assertEqual(data["provider"], "claude-code")
         self.assertEqual(data["connector_kind"], "hook-mirror")
         self.assertEqual(data["capability_scope"], "connector-capture")
-        self.assertFalse(data["captures_attachments"])
+        self.assertTrue(data["captures_attachments"])
+        self.assertTrue(data["captures_multimodal_content"])
 
 
 class ToolUseAuditClaudeCodeTests(unittest.TestCase):

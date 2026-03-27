@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from .commands import ACTION_REQUIRED, prepare_workspace, sync_workspace as run_sync_command
@@ -12,6 +13,7 @@ from .conversation import (
     current_host_identity,
     load_turn_record,
     load_bound_conversation_record_for_host,
+    normalize_front_door_state,
     open_conversation_turn,
     semantic_log_context_fields,
     semantic_log_context_from_record,
@@ -138,6 +140,119 @@ def _resolved_string_list(value: list[Any] | None) -> list[str]:
     )
 
 
+def _normalized_artifact_path(paths: WorkspacePaths, value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = paths.root / path
+    try:
+        return str(path.relative_to(paths.root))
+    except ValueError:
+        return str(path)
+
+
+def _log_payload_matches_turn(
+    paths: WorkspacePaths,
+    payload: dict[str, Any],
+    *,
+    conversation_id: str,
+    turn_id: str,
+    run_id: str | None,
+    inner_workflow_id: str,
+    answer_file_path: str | None = None,
+) -> bool:
+    if payload.get("conversation_id") != conversation_id or payload.get("turn_id") != turn_id:
+        return False
+    if isinstance(run_id, str) and run_id:
+        payload_run_id = payload.get("run_id")
+        if isinstance(payload_run_id, str) and payload_run_id and payload_run_id != run_id:
+            return False
+    if payload.get("entry_workflow_id") != "ask":
+        return False
+    payload_inner_workflow = payload.get("inner_workflow_id")
+    if (
+        isinstance(payload_inner_workflow, str)
+        and payload_inner_workflow
+        and payload_inner_workflow != inner_workflow_id
+    ):
+        return False
+    payload_front_door_state = normalize_front_door_state(payload.get("front_door_state"))
+    if payload_front_door_state and payload_front_door_state != FRONT_DOOR_STATE_CANONICAL_ASK:
+        return False
+    expected_answer_file = _normalized_artifact_path(paths, answer_file_path)
+    payload_answer_file = _normalized_artifact_path(paths, payload.get("answer_file_path"))
+    if expected_answer_file and payload_answer_file and payload_answer_file != expected_answer_file:
+        return False
+    return True
+
+
+def _discover_unique_turn_log_artifacts(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    run_id: str | None,
+    inner_workflow_id: str,
+    answer_file_path: str | None,
+) -> tuple[list[str], list[str]]:
+    session_candidates: list[tuple[str, str]] = []
+    trace_candidates: list[tuple[str, str]] = []
+    for path in sorted(paths.query_sessions_dir.glob("*.json")):
+        payload = read_json(path)
+        if not payload or not _log_payload_matches_turn(
+            paths,
+            payload,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            run_id=run_id,
+            inner_workflow_id=inner_workflow_id,
+            answer_file_path=answer_file_path,
+        ):
+            continue
+        session_id = payload.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            session_candidates.append((str(payload.get("recorded_at") or ""), session_id))
+    for path in sorted(paths.retrieval_traces_dir.glob("*.json")):
+        payload = read_json(path)
+        if not payload or not _log_payload_matches_turn(
+            paths,
+            payload,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            run_id=run_id,
+            inner_workflow_id=inner_workflow_id,
+            answer_file_path=answer_file_path,
+        ):
+            continue
+        trace_id = payload.get("trace_id")
+        if isinstance(trace_id, str) and trace_id:
+            trace_candidates.append((str(payload.get("recorded_at") or ""), trace_id))
+    ordered_sessions = [
+        session_id for _recorded_at, session_id in sorted(session_candidates)
+    ]
+    ordered_traces = [
+        trace_id for _recorded_at, trace_id in sorted(trace_candidates)
+    ]
+    return ordered_sessions, ordered_traces
+
+
+def _resolved_log_artifact_ids(
+    *,
+    explicit_ids: list[str] | None,
+    current_ids: Any,
+    discovered_ids: list[str],
+) -> list[str]:
+    if explicit_ids is not None:
+        return _resolved_string_list(explicit_ids)
+    existing_ids = _resolved_string_list(current_ids if isinstance(current_ids, list) else None)
+    if existing_ids:
+        return existing_ids
+    if len(discovered_ids) == 1:
+        return discovered_ids
+    return []
+
+
 def _preview_source_changes(paths: WorkspacePaths) -> tuple[dict[str, Any], list[dict[str, Any]], bool, dict[str, Any]]:
     """Load source-change preview lazily so ask imports stay light."""
     from .workspace_probe import preview_source_changes
@@ -155,6 +270,7 @@ def _sync_turn_log_artifacts(
     trace_ids: list[str],
     inner_workflow_id: str,
     native_turn_id: str | None,
+    front_door_state: str | None = None,
     semantic_log_context: dict[str, str] | None = None,
     answer_file_path: str | None = None,
     answer_state: str | None = None,
@@ -182,6 +298,7 @@ def _sync_turn_log_artifacts(
         "entry_workflow_id": "ask",
         "inner_workflow_id": inner_workflow_id,
         "native_turn_id": native_turn_id,
+        "front_door_state": normalize_front_door_state(front_door_state),
         "answer_file_path": answer_file_path,
         "answer_state": answer_state,
         "render_inspection_required": render_inspection_required,
@@ -1002,6 +1119,9 @@ def _maybe_begin_lane_c_before_commit(
         native_turn_id=updated_turn.get("native_turn_id")
         if isinstance(updated_turn.get("native_turn_id"), str)
         else None,
+        front_door_state=updated_turn.get("front_door_state")
+        if isinstance(updated_turn.get("front_door_state"), str)
+        else None,
         semantic_log_context={
             **semantic_log_context_from_record(updated_turn),
             **semantic_log_context_fields(
@@ -1197,7 +1317,11 @@ def prepare_ask_turn(
     question: str,
     semantic_analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Prepare one `ask` turn with routing, freshness guidance, and conversation linkage."""
+    """Open or reuse one canonical ask turn.
+
+    This is an internal ask-lifecycle primitive used by canonical workflow code.
+    It is not a preferred host integration entrypoint.
+    """
     confirmation_resolution = _maybe_handle_confirmation_reply(
         paths,
         question=question,
@@ -1724,7 +1848,11 @@ def complete_ask_turn(
     hybrid_refresh_job_ids: list[str] | None = None,
     status: str = "completed",
 ) -> dict[str, Any]:
-    """Complete one `ask` turn after the routed workflow finishes."""
+    """Commit one canonical ask turn through the shared barrier.
+
+    This is an internal ask-lifecycle primitive used by canonical workflow code.
+    It is not a preferred host integration entrypoint.
+    """
     current_turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
     current_turn = {
         "conversation_id": conversation_id,
@@ -1736,15 +1864,29 @@ def complete_ask_turn(
         if isinstance(current_turn.get("active_run_id"), str) and current_turn.get("active_run_id")
         else None
     )
-    resolved_session_ids = (
-        _resolved_string_list(session_ids)
-        if session_ids is not None
-        else _resolved_string_list(current_turn.get("session_ids"))
+    resolved_front_door_state = normalize_front_door_state(current_turn.get("front_door_state"))
+    provisional_answer_file_path = answer_file_path or current_turn.get("answer_file_path")
+    discovered_session_ids, discovered_trace_ids = _discover_unique_turn_log_artifacts(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        run_id=run_id,
+        inner_workflow_id=inner_workflow_id,
+        answer_file_path=(
+            provisional_answer_file_path
+            if isinstance(provisional_answer_file_path, str)
+            else None
+        ),
     )
-    effective_trace_ids = (
-        _resolved_string_list(trace_ids)
-        if trace_ids is not None
-        else _resolved_string_list(current_turn.get("trace_ids"))
+    resolved_session_ids = _resolved_log_artifact_ids(
+        explicit_ids=session_ids,
+        current_ids=current_turn.get("session_ids"),
+        discovered_ids=discovered_session_ids,
+    )
+    effective_trace_ids = _resolved_log_artifact_ids(
+        explicit_ids=trace_ids,
+        current_ids=current_turn.get("trace_ids"),
+        discovered_ids=discovered_trace_ids,
     )
     latest_trace_payload = _latest_trace_record(paths, effective_trace_ids)
     resolved_question_domain = _resolve_scalar(
@@ -2075,6 +2217,11 @@ def complete_ask_turn(
         native_turn_id=updated.get("native_turn_id")
         if isinstance(updated.get("native_turn_id"), str)
         else None,
+        front_door_state=(
+            updated.get("front_door_state")
+            if isinstance(updated.get("front_door_state"), str)
+            else resolved_front_door_state
+        ),
         semantic_log_context={
             **semantic_log_context_from_record(updated),
             **semantic_log_context_fields(

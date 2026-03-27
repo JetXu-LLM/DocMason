@@ -81,6 +81,21 @@ def _append_record(workspace_root: Path, session_id: str, record: dict[str, Any]
         f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
+def _optional_record_fields(
+    payload: dict[str, Any],
+    field_names: tuple[str, ...],
+) -> dict[str, Any]:
+    record: dict[str, Any] = {}
+    for field_name in field_names:
+        if field_name not in payload:
+            continue
+        value = payload.get(field_name)
+        if value in ("", None) or value == [] or value == {}:
+            continue
+        record[field_name] = value
+    return record
+
+
 def _maybe_refresh_session_start_skill_shims(workspace_root: Path) -> None:
     """Refresh thin repo-local skill shims for prepared Claude workspaces.
 
@@ -147,6 +162,17 @@ def _handle_session_end(payload: dict[str, Any], workspace_root: Path) -> None:
         "session_id": session_id,
         "recorded_at": _utc_now(),
         "reason": payload.get("reason", "other"),
+        **_optional_record_fields(
+            payload,
+            (
+                "session_end_reason",
+                "stop_condition",
+                "host_error_text",
+                "error_text",
+                "error",
+                "hook_activity_state",
+            ),
+        ),
     }
     _append_record(workspace_root, session_id, record)
 
@@ -194,6 +220,18 @@ def _handle_stop(payload: dict[str, Any], workspace_root: Path) -> None:
         "recorded_at": _utc_now(),
         "last_assistant_message": payload.get("last_assistant_message", ""),
         "stop_hook_active": payload.get("stop_hook_active", False),
+        **_optional_record_fields(
+            payload,
+            (
+                "stop_reason",
+                "stop_condition",
+                "reason",
+                "host_error_text",
+                "error_text",
+                "error",
+                "hook_activity_state",
+            ),
+        ),
     }
     _append_record(workspace_root, session_id, record)
 

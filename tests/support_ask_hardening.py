@@ -280,11 +280,19 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text("Draft summary.\n", encoding="utf-8")
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
         complete_ask_turn(
             workspace,
             conversation_id=turn["conversation_id"],
             turn_id=turn["turn_id"],
             inner_workflow_id="grounded-composition",
+            session_ids=[trace["session_id"]],
+            trace_ids=[trace["trace_id"]],
             answer_file_path=turn["answer_file_path"],
             response_excerpt="Draft summary.",
             source_escalation_used=False,
@@ -612,12 +620,20 @@ class AskHardeningTests(unittest.TestCase):
             str(lane_c_job["job_id"]),
             result={"status": "covered"},
         )
+        refreshed_trace = trace_answer_file(
+            workspace,
+            answer_file=workspace.root / turn["answer_file_path"],
+            top=2,
+            log_context=turn["log_context"],
+        )
 
         completed = complete_ask_turn(
             workspace,
             conversation_id=turn["conversation_id"],
             turn_id=turn["turn_id"],
             inner_workflow_id="grounded-answer",
+            session_ids=[refreshed_trace["session_id"]],
+            trace_ids=[refreshed_trace["trace_id"]],
             response_excerpt="Hybrid refresh completed for the selected source.",
             status="answered",
             hybrid_refresh_triggered=True,
@@ -637,8 +653,97 @@ class AskHardeningTests(unittest.TestCase):
             completed["hybrid_refresh_summary"]["covered_source_count"],
             1,
         )
-        self.assertEqual(completed["session_ids"], [trace["session_id"]])
+        self.assertEqual(completed["session_ids"][-1], refreshed_trace["session_id"])
+        self.assertEqual(completed["trace_ids"][-1], refreshed_trace["trace_id"])
         self.assertIsNone(completed["freshness_notice"])
+
+    def test_complete_ask_turn_rejects_pre_refresh_trace_for_covered_hybrid_refresh(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-hybrid-pre-refresh"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the campaign planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+        (workspace.root / turn["answer_file_path"]).write_text(
+            "The planning brief connects strategy to implementation.",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=workspace.root / turn["answer_file_path"],
+            top=2,
+            log_context=turn["log_context"],
+        )
+        update_conversation_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            updates={
+                "session_ids": [trace["session_id"]],
+                "trace_ids": [trace["trace_id"]],
+            },
+        )
+        live_turn = self.load_conversation(
+            workspace,
+            conversation_id=turn["conversation_id"],
+        )["turns"][0]
+        snapshot_id = live_turn["version_context"]["published_snapshot_id"]
+        lane_c_source_id = source_ids[0]
+        lane_c_job = ensure_shared_job(
+            workspace,
+            job_key=lane_c_job_key(
+                published_snapshot_id=snapshot_id,
+                source_id=lane_c_source_id,
+            ),
+            job_family="lane-c",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "published_snapshot_id": snapshot_id,
+                "source_id": lane_c_source_id,
+            },
+            input_signature=lane_c_job_key(
+                published_snapshot_id=snapshot_id,
+                source_id=lane_c_source_id,
+            ),
+            owner={"kind": "run", "id": turn["run_id"]},
+            run_id=turn["run_id"],
+        )["manifest"]
+        complete_control_plane_job(
+            workspace,
+            str(lane_c_job["job_id"]),
+            result={"status": "covered"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "post-refresh retrieve session recorded after the shared job settled"):
+            complete_ask_turn(
+                workspace,
+                conversation_id=turn["conversation_id"],
+                turn_id=turn["turn_id"],
+                inner_workflow_id="grounded-answer",
+                session_ids=[trace["session_id"]],
+                trace_ids=[trace["trace_id"]],
+                response_excerpt="Old pre-refresh evidence should not satisfy covered refresh.",
+                status="answered",
+                hybrid_refresh_triggered=True,
+                hybrid_refresh_sources=[lane_c_source_id],
+                hybrid_refresh_completion_status="covered",
+                hybrid_refresh_summary={
+                    "mode": "ask-hybrid",
+                    "covered_source_count": 1,
+                },
+                hybrid_refresh_snapshot_id=snapshot_id,
+                hybrid_refresh_job_ids=[str(lane_c_job["job_id"])],
+            )
 
     def test_trace_answer_file_persists_version_context(self) -> None:
         workspace = self.make_workspace()
@@ -731,6 +836,322 @@ class AskHardeningTests(unittest.TestCase):
                 response_excerpt="The planning brief connects strategy to implementation.",
                 status="answered",
             )
+
+    def test_complete_ask_turn_rejects_flattening_unresolved_trace_gap(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+        self.create_pdf(workspace.source_dir / "control.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/scan.pdf"],
+            title="Scanned Workflow Page",
+            summary="A scanned workflow page with limited extracted text.",
+            key_point="The published baseline preserves the rendered page but not enough semantic detail.",
+            claim="This page requires multimodal follow-up before confident semantic use.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/control.pdf"],
+            title="Control Page",
+            summary="A control page with no scan-specific signals.",
+            key_point="The control page is intentionally generic.",
+            claim="The control page should rank lower for scanned-page queries.",
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-flat-gap"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What is shown on the scanned workflow page image?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    evidence_requirements={
+                        "preferred_channels": ["render", "structure"],
+                        "inspection_scope": "unit",
+                        "prefer_published_artifacts": True,
+                    },
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The current published artifacts are not sufficient for a reliable semantic answer.",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+
+        with self.assertRaisesRegex(ValueError, "latest ask-owned trace still records"):
+            complete_ask_turn(
+                workspace,
+                conversation_id=turn["conversation_id"],
+                turn_id=turn["turn_id"],
+                inner_workflow_id="grounded-answer",
+                session_ids=[trace["session_id"]],
+                trace_ids=[trace["trace_id"]],
+                answer_file_path=turn["answer_file_path"],
+                response_excerpt="Incorrectly flattened answer state.",
+                published_artifacts_sufficient=True,
+                source_escalation_required=False,
+                status="answered",
+            )
+
+    def test_complete_ask_turn_requires_trace_for_kb_grounded_commit(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-trace-required"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the campaign planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        retrieve_corpus(
+            workspace,
+            query="campaign planning brief",
+            top=2,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=False,
+            log_context=turn["log_context"],
+            question_domain=turn["question_domain"],
+            evidence_requirements=turn["evidence_requirements"],
+        )
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The planning brief connects strategy to implementation.",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "ask-owned trace"):
+            complete_ask_turn(
+                workspace,
+                conversation_id=turn["conversation_id"],
+                turn_id=turn["turn_id"],
+                inner_workflow_id="grounded-answer",
+                answer_file_path=turn["answer_file_path"],
+                response_excerpt="The planning brief connects strategy to implementation.",
+                status="answered",
+            )
+
+    def test_complete_ask_turn_rejects_flattening_retrieve_only_gap_without_trace(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+        self.create_pdf(workspace.source_dir / "control.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/scan.pdf"],
+            title="Scanned Workflow Page",
+            summary="A scanned workflow page with limited extracted text.",
+            key_point="The published baseline preserves the rendered page but not enough semantic detail.",
+            claim="This page requires multimodal follow-up before confident semantic use.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/control.pdf"],
+            title="Control Page",
+            summary="A control page with no scan-specific signals.",
+            key_point="The control page is intentionally generic.",
+            claim="The control page should rank lower for scanned-page queries.",
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-retrieve-gap"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What is shown on the scanned workflow page image?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    evidence_requirements={
+                        "preferred_channels": ["render", "structure"],
+                        "inspection_scope": "unit",
+                        "prefer_published_artifacts": True,
+                    },
+                ),
+            )
+
+        retrieval = retrieve_corpus(
+            workspace,
+            query="scanned workflow page image",
+            top=2,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=True,
+            log_context=turn["log_context"],
+            question_domain=turn["question_domain"],
+            evidence_requirements=turn["evidence_requirements"],
+        )
+        self.assertFalse(retrieval["published_artifacts_sufficient"])
+        self.assertTrue(retrieval["source_escalation_required"])
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The page definitely shows an approved workflow without needing more inspection.",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "latest ask-owned query session"):
+            complete_ask_turn(
+                workspace,
+                conversation_id=turn["conversation_id"],
+                turn_id=turn["turn_id"],
+                inner_workflow_id="grounded-answer",
+                answer_file_path=turn["answer_file_path"],
+                response_excerpt="Incorrectly flattened retrieve-only state.",
+                published_artifacts_sufficient=True,
+                source_escalation_required=False,
+                status="answered",
+            )
+
+    def test_complete_ask_turn_autolinks_unique_runtime_artifacts_before_commit(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-autolink"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the campaign planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The planning brief connects strategy to implementation.",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="The planning brief connects strategy to implementation.",
+            status="answered",
+        )
+
+        self.assertEqual(completed["session_ids"], [trace["session_id"]])
+        self.assertEqual(completed["trace_ids"], [trace["trace_id"]])
+        query_session = read_json(workspace.query_sessions_dir / f"{trace['session_id']}.json")
+        trace_payload = read_json(workspace.retrieval_traces_dir / f"{trace['trace_id']}.json")
+        self.assertEqual(query_session["run_id"], turn["run_id"])
+        self.assertEqual(trace_payload["run_id"], turn["run_id"])
+        self.assertEqual(query_session["conversation_id"], turn["conversation_id"])
+        self.assertEqual(trace_payload["conversation_id"], turn["conversation_id"])
+        self.assertEqual(query_session["turn_id"], turn["turn_id"])
+        self.assertEqual(trace_payload["turn_id"], turn["turn_id"])
+        self.assertEqual(query_session["front_door_state"], "canonical-ask")
+        self.assertEqual(trace_payload["front_door_state"], "canonical-ask")
+        self.assertEqual(query_session["support_basis"], completed["support_basis"])
+        self.assertEqual(trace_payload["support_basis"], completed["support_basis"])
+        journal_events = [
+            json.loads(line)["event_type"]
+            for line in run_journal_path(workspace, turn["run_id"]).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(journal_events.count("turn-committed"), 1)
+
+    def test_complete_ask_turn_does_not_guess_ambiguous_runtime_artifacts(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-ambiguous-link"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="external-factual",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text("Yes. Aliyun SMS supports HTTPS API access.", encoding="utf-8")
+        for _ in range(2):
+            retrieve_corpus(
+                workspace,
+                query="Aliyun SMS HTTPS API",
+                top=2,
+                graph_hops=0,
+                document_types=None,
+                source_ids=None,
+                include_renders=False,
+                log_context=turn["log_context"],
+                question_domain=turn["question_domain"],
+                evidence_requirements=turn["evidence_requirements"],
+            )
+            trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=turn["log_context"],
+            )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="Aliyun SMS supports HTTPS API access.",
+            question_domain=turn["question_domain"],
+            support_basis="external-source-verified",
+            support_manifest_sources=[
+                {
+                    "url": "https://example.com/aliyun-sms-https",
+                    "title": "Aliyun SMS HTTPS API",
+                    "source_type": "official-doc",
+                    "support_snippet": "HTTPS access is documented explicitly.",
+                }
+            ],
+            support_manifest_key_assertions=["Aliyun SMS supports HTTPS API access."],
+            support_manifest_notes="Explicit external verification for ambiguity test.",
+            status="answered",
+        )
+
+        self.assertEqual(completed["session_ids"], [])
+        self.assertEqual(completed["trace_ids"], [])
 
     def test_commit_run_prefers_refreshed_run_version_truth(self) -> None:
         workspace = self.make_workspace()

@@ -199,16 +199,17 @@ def refresh_generated_connector_manifests(paths: WorkspacePaths) -> dict[str, An
         "connector_kind": "hook-mirror",
         "supports_native_reconciliation": True,
         "capability_scope": "connector-capture",
-        "captures_attachments": False,
-        "captures_multimodal_content": False,
+        "captures_attachments": True,
+        "captures_multimodal_content": True,
         "host_product_capability_status": "not-evaluated",
         "fidelity_notes": (
             "Current DocMason Claude Code capture uses repo-local hooks plus "
-            "optional native transcript enrichment. This connector records user "
-            "prompts, tool calls (Bash+Agent), final responses, and session "
-            "lifecycle. It does not currently ingest attachments or multimodal "
-            "payloads through the hook-mirror path. These fields describe "
-            "connector capture fidelity only, not Claude Code's native product "
+            "optional native transcript enrichment. It can preserve prompts, "
+            "tool calls, stop/session diagnostics, and attachment or "
+            "multimodal payloads when those payloads are explicitly present in "
+            "the mirrored or native transcript evidence. Missing native "
+            "evidence remains a fidelity gap. These fields describe connector "
+            "capture fidelity only, not Claude Code's native product "
             "capabilities."
         ),
     }
@@ -425,7 +426,16 @@ def _store_attachment(
             "sha256": None,
             "mime_type": None,
         }
-    mime_type, raw_bytes = decode_data_url(image_url)
+    try:
+        mime_type, raw_bytes = decode_data_url(image_url)
+    except ValueError:
+        return {
+            "attachment_id": attachment_id,
+            "attachment_type": attachment.get("attachment_type", "image"),
+            "stored_path": None,
+            "sha256": None,
+            "mime_type": None,
+        }
     digest = _sha256_bytes(raw_bytes)
     extension = _attachment_extension(mime_type)
     stored_path = paths.interaction_attachments_dir / f"{digest}{extension}"
@@ -1045,10 +1055,14 @@ def _persist_interaction_entry(
     support_basis: str | None = None,
     support_manifest_path: str | None = None,
     semantic_analysis: dict[str, Any] | None = None,
+    operator_evidence: dict[str, Any] | None = None,
+    promotable: bool = True,
 ) -> dict[str, Any]:
     interaction_id = f"interaction-{conversation_id}-{native_turn_id}"
     existing_entry = read_json(_interaction_entry_path(paths, interaction_id))
     preserve_promotion = (
+        promotable
+        and
         isinstance(existing_entry, dict)
         and existing_entry.get("pending_promotion") is False
         and existing_entry.get("status") == "promoted"
@@ -1075,7 +1089,7 @@ def _persist_interaction_entry(
         "native_turn_id": native_turn_id,
         "source_family": "interaction-pending",
         "trust_tier": "interaction",
-        "pending_promotion": not preserve_promotion,
+        "pending_promotion": promotable and not preserve_promotion,
         "title": title,
         "user_text": user_text,
         "assistant_excerpt": assistant_excerpt[:500],
@@ -1102,7 +1116,11 @@ def _persist_interaction_entry(
         ],
         "tool_use_audit": tool_use_audit,
         "entry_path": str(_interaction_entry_path(paths, interaction_id).relative_to(paths.root)),
-        "status": "promoted" if preserve_promotion else "pending",
+        "status": (
+            "promoted"
+            if preserve_promotion
+            else ("pending" if promotable else "operator-evidence-only")
+        ),
     }
     if preserve_promotion:
         entry["promoted_memory_id"] = existing_entry.get("promoted_memory_id")
@@ -1119,6 +1137,8 @@ def _persist_interaction_entry(
     )
     if isinstance(semantic_analysis, dict) and semantic_analysis:
         entry["semantic_analysis"] = dict(semantic_analysis)
+    if isinstance(operator_evidence, dict) and operator_evidence:
+        entry["operator_evidence"] = dict(operator_evidence)
     entry["searchable_text"] = _entry_searchable_text(entry)
     entry["entry_fingerprint"] = _sha256_text(json.dumps(entry, sort_keys=True))
     write_json(_interaction_entry_path(paths, interaction_id), entry)
@@ -1229,6 +1249,9 @@ def _upsert_native_ledger_turn(
     reused_previous_evidence: bool,
     profile: dict[str, Any],
     attachment_refs: list[dict[str, Any]],
+    captured_interaction_id: str | None,
+    closure: dict[str, Any] | None,
+    operator_evidence: dict[str, Any] | None,
     reconciliation: dict[str, Any],
 ) -> dict[str, Any]:
     ledger_id = _native_ledger_id(host_identity)
@@ -1252,6 +1275,11 @@ def _upsert_native_ledger_turn(
             "continuation_type": continuation_type,
             "reused_previous_evidence": reused_previous_evidence,
             "attachments": attachment_refs,
+            "captured_interaction_id": captured_interaction_id,
+            "closure": dict(closure) if isinstance(closure, dict) else None,
+            "operator_evidence": (
+                dict(operator_evidence) if isinstance(operator_evidence, dict) else None
+            ),
             "promotion": None,
         }
         turns.append(turn)
@@ -1270,6 +1298,7 @@ def _upsert_native_ledger_turn(
             "continuation_type": continuation_type,
             "reused_previous_evidence": reused_previous_evidence,
             "attachments": attachment_refs,
+            "captured_interaction_id": captured_interaction_id,
             "question_class": profile["question_class"],
             "question_domain": profile["question_domain"],
             "inner_workflow_id": profile["inner_workflow_id"],
@@ -1280,6 +1309,10 @@ def _upsert_native_ledger_turn(
             "inspection_scope": profile["inspection_scope"],
             "preferred_channels": list(profile["preferred_channels"]),
             "anomaly_flags": list(host_identity.get("anomaly_flags", [])),
+            "closure": dict(closure) if isinstance(closure, dict) else None,
+            "operator_evidence": (
+                dict(operator_evidence) if isinstance(operator_evidence, dict) else None
+            ),
             "reconciliation": reconciliation,
         }
     )
@@ -1397,6 +1430,7 @@ def _reconcile_native_transcript(
     )
     captured_interaction_ids: list[str] = []
     previous_consulted_source_ids: list[str] = []
+    operator_evidence_turn_count = 0
 
     with workspace_lease(paths, f"native-ledger:{native_ledger_id}"):
         for turn_index, native_turn in enumerate(transcript.get("turns", []), start=1):
@@ -1440,6 +1474,24 @@ def _reconcile_native_transcript(
             final_assistant_text = str(
                 native_turn.get("assistant_final_text") or native_turn.get("assistant_text", "")
             )
+            closure_payload = native_turn.get("closure")
+            closure = (
+                dict(closure_payload)
+                if isinstance(closure_payload, dict)
+                else None
+            )
+            operator_evidence_payload = native_turn.get("operator_evidence")
+            operator_evidence = (
+                dict(operator_evidence_payload)
+                if isinstance(operator_evidence_payload, dict)
+                else None
+            )
+            promotable = not (
+                isinstance(operator_evidence, dict)
+                and operator_evidence.get("status") == "degraded"
+            )
+            if not promotable:
+                operator_evidence_turn_count += 1
             profile = _native_profile(user_text)
             interaction_entry = _persist_interaction_entry(
                 paths,
@@ -1462,6 +1514,8 @@ def _reconcile_native_transcript(
                 support_strategy=profile["support_strategy"],
                 analysis_origin=profile["analysis_origin"],
                 semantic_analysis=profile["semantic_analysis"],
+                operator_evidence=operator_evidence,
+                promotable=promotable,
             )
             captured_interaction_ids.append(str(interaction_entry["interaction_id"]))
             _upsert_native_ledger_turn(
@@ -1482,11 +1536,35 @@ def _reconcile_native_transcript(
                 reused_previous_evidence=reused_previous_evidence,
                 profile=profile,
                 attachment_refs=stored_attachments,
+                captured_interaction_id=(
+                    str(interaction_entry["interaction_id"])
+                    if isinstance(interaction_entry.get("interaction_id"), str)
+                    else None
+                ),
+                closure=closure,
+                operator_evidence=operator_evidence,
                 reconciliation={
                     **reconciliation_metadata,
                     "provider": provider,
                     "status": "reconciled",
                     "reconciled_at": utc_now(),
+                    "closure_status": (
+                        closure.get("status") if isinstance(closure, dict) else None
+                    ),
+                    "closure_source": (
+                        closure.get("source") if isinstance(closure, dict) else None
+                    ),
+                    "operator_evidence_status": (
+                        operator_evidence.get("status")
+                        if isinstance(operator_evidence, dict)
+                        else None
+                    ),
+                    "operator_evidence_classification": (
+                        operator_evidence.get("classification")
+                        if isinstance(operator_evidence, dict)
+                        else None
+                    ),
+                    "captured_interaction_id": interaction_entry.get("interaction_id"),
                 },
             )
 
@@ -1499,6 +1577,7 @@ def _reconcile_native_transcript(
                 "last_ledger_id": native_ledger_id,
                 "captured_interaction_ids": captured_interaction_ids,
                 "turn_count": len(transcript.get("turns", [])),
+                "operator_evidence_turn_count": operator_evidence_turn_count,
             },
         )
         overlay_manifest = refresh_interaction_overlay(paths)
@@ -1510,6 +1589,7 @@ def _reconcile_native_transcript(
         "canonical_conversation_id": canonical_conversation_id,
         "captured_interaction_ids": captured_interaction_ids,
         "turn_count": len(transcript.get("turns", [])),
+        "operator_evidence_turn_count": operator_evidence_turn_count,
         "pending_overlay": overlay_manifest,
         "host_identity": host_identity,
     }

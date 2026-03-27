@@ -16,6 +16,9 @@ Bootstrap, repair, or `docmason sync-adapters` may generate repo-local Claude he
 
 Treat those as generated local helpers, not authored instructions.
 Do not hand-edit them, create global skill links, or maintain parallel skill copies.
+Do not treat low-level Python helpers such as `docmason.ask.prepare_ask_turn()` or
+`docmason.ask.complete_ask_turn()` as preferred host entrypoints.
+They are internal lifecycle primitives behind the canonical `ask` workflow contract.
 
 The import below is optional enrichment.
 If the file exists, Claude gets the richer routing layer.

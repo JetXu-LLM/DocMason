@@ -378,6 +378,13 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text("compiled knowledge\n", encoding="utf-8")
             write_json(
+                workspace.current_publish_manifest_path,
+                {
+                    "snapshot_id": "snapshot-auto-prepare",
+                    "published_at": "2026-03-21T00:05:00Z",
+                },
+            )
+            write_json(
                 workspace.sync_state_path,
                 {
                     "published_source_signature": source_inventory_signature(workspace),
@@ -695,7 +702,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 ),
             )
 
-        conversation = read_json(workspace.conversations_dir / "thread-auto-sync-version.json")
+        conversation = read_json(
+            workspace.conversations_dir / f"{turn['conversation_id']}.json"
+        )
         live_turn = conversation["turns"][0]
         run_state = read_json(workspace.runs_dir / turn["run_id"] / "state.json")
         self.assertEqual(
@@ -807,18 +816,18 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 status="answered",
             )
 
-        conversation = read_json(workspace.conversations_dir / "thread-conv.json")
+        conversation = read_json(workspace.conversations_dir / f"{turn['conversation_id']}.json")
         self.assertEqual(len(conversation["turns"]), 1)
         self.assertEqual(completed["answer_state"], "grounded")
         query_session = read_json(workspace.query_sessions_dir / f"{retrieval['session_id']}.json")
         trace_record = read_json(workspace.retrieval_traces_dir / f"{trace['trace_id']}.json")
-        self.assertEqual(query_session["conversation_id"], "thread-conv")
+        self.assertEqual(query_session["conversation_id"], turn["conversation_id"])
         self.assertEqual(query_session["turn_id"], turn["turn_id"])
         self.assertEqual(query_session["entry_workflow_id"], "ask")
         self.assertEqual(query_session["question_class"], "answer")
         self.assertEqual(query_session["support_strategy"], "kb-first")
         self.assertEqual(query_session["analysis_origin"], "agent-supplied")
-        self.assertEqual(trace_record["conversation_id"], "thread-conv")
+        self.assertEqual(trace_record["conversation_id"], turn["conversation_id"])
         self.assertEqual(trace_record["answer_file_path"], turn["answer_file_path"])
         self.assertEqual(trace_record["question_class"], "answer")
         self.assertEqual(trace_record["support_strategy"], "kb-first")
@@ -875,7 +884,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         candidates = read_json(workspace.benchmark_candidates_path)
         self.assertTrue(candidates["candidates"])
         first = candidates["candidates"][0]
-        self.assertEqual(first["conversation_id"], "thread-candidate")
+        self.assertEqual(first["conversation_id"], turn["conversation_id"])
         self.assertEqual(first["turn_id"], turn["turn_id"])
         self.assertTrue(first["requires_render_inspection"])
         self.assertEqual(first["candidate_priority"], "high")

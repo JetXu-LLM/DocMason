@@ -185,6 +185,10 @@ def _compact_native_ledger(payload: dict[str, Any]) -> dict[str, Any]:
     turns = payload.get("turns", [])
     latest_turn = turns[-1] if isinstance(turns, list) and turns else {}
     host_identity = payload.get("host_identity")
+    closure = latest_turn.get("closure") if isinstance(latest_turn, dict) else {}
+    operator_evidence = (
+        latest_turn.get("operator_evidence") if isinstance(latest_turn, dict) else {}
+    )
     return {
         "ledger_id": payload.get("ledger_id"),
         "host_provider": host_identity.get("host_provider")
@@ -219,7 +223,113 @@ def _compact_native_ledger(payload: dict[str, Any]) -> dict[str, Any]:
         "latest_route_reason": latest_turn.get("route_reason")
         if isinstance(latest_turn, dict)
         else None,
+        "latest_closure_status": closure.get("status")
+        if isinstance(closure, dict)
+        else None,
+        "latest_closure_source": closure.get("source")
+        if isinstance(closure, dict)
+        else None,
+        "latest_operator_evidence_status": operator_evidence.get("status")
+        if isinstance(operator_evidence, dict)
+        else None,
+        "latest_operator_evidence_classification": operator_evidence.get("classification")
+        if isinstance(operator_evidence, dict)
+        else None,
+        "latest_operator_evidence_detail": operator_evidence.get("detail")
+        if isinstance(operator_evidence, dict)
+        else None,
     }
+
+
+def _native_turn_recorded_at(payload: dict[str, Any], turn: dict[str, Any]) -> str:
+    for field_name in ("completed_at", "opened_at", "updated_at"):
+        value = turn.get(field_name)
+        if isinstance(value, str) and value:
+            return value
+    updated_at = payload.get("updated_at")
+    return updated_at if isinstance(updated_at, str) else ""
+
+
+def _compact_native_ledger_turn(payload: dict[str, Any], turn: dict[str, Any]) -> dict[str, Any]:
+    host_identity = payload.get("host_identity")
+    closure = turn.get("closure") if isinstance(turn.get("closure"), dict) else {}
+    operator_evidence = (
+        turn.get("operator_evidence") if isinstance(turn.get("operator_evidence"), dict) else {}
+    )
+    return {
+        "ledger_id": payload.get("ledger_id"),
+        "host_provider": host_identity.get("host_provider")
+        if isinstance(host_identity, dict)
+        else None,
+        "host_thread_ref": host_identity.get("host_thread_ref")
+        if isinstance(host_identity, dict)
+        else None,
+        "host_identity_trust": host_identity.get("host_identity_trust")
+        if isinstance(host_identity, dict)
+        else None,
+        "anomaly_flags": (
+            [
+                value
+                for value in host_identity.get("anomaly_flags", [])
+                if isinstance(value, str) and value
+            ]
+            if isinstance(host_identity, dict)
+            else []
+        ),
+        "recorded_at": _native_turn_recorded_at(payload, turn),
+        "native_turn_id": (
+            turn.get("native_turn_id") if isinstance(turn.get("native_turn_id"), str) else None
+        ),
+        "question_class": (
+            turn.get("question_class") if isinstance(turn.get("question_class"), str) else None
+        ),
+        "question_domain": (
+            turn.get("question_domain") if isinstance(turn.get("question_domain"), str) else None
+        ),
+        "route_reason": (
+            turn.get("route_reason") if isinstance(turn.get("route_reason"), str) else None
+        ),
+        "closure_status": closure.get("status") if isinstance(closure, dict) else None,
+        "closure_source": closure.get("source") if isinstance(closure, dict) else None,
+        "operator_evidence_status": (
+            operator_evidence.get("status") if isinstance(operator_evidence, dict) else None
+        ),
+        "operator_evidence_classification": (
+            operator_evidence.get("classification")
+            if isinstance(operator_evidence, dict)
+            else None
+        ),
+        "operator_evidence_detail": (
+            operator_evidence.get("detail") if isinstance(operator_evidence, dict) else None
+        ),
+        "captured_interaction_id": (
+            turn.get("captured_interaction_id")
+            if isinstance(turn.get("captured_interaction_id"), str)
+            else None
+        ),
+    }
+
+
+def _native_ledger_turn_bucket(
+    payload: dict[str, Any],
+    *,
+    classifications: set[str],
+) -> list[dict[str, Any]]:
+    turns = payload.get("turns", [])
+    if not isinstance(turns, list):
+        return []
+    matched_turns = [
+        _compact_native_ledger_turn(payload, turn)
+        for turn in turns
+        if isinstance(turn, dict)
+        and isinstance(turn.get("operator_evidence"), dict)
+        and turn["operator_evidence"].get("classification") in classifications
+    ]
+    return sorted(
+        matched_turns,
+        key=lambda item: str(item.get("recorded_at") or ""),
+        reverse=True,
+    )
 
 
 def _run_commit_payload(paths: WorkspacePaths, run_id: str | None) -> dict[str, Any]:
@@ -941,6 +1051,30 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
                     for value in payload["host_identity"].get("anomaly_flags", [])
                 )
             ][:RECENT_LIMIT],
+            "host_runtime_failures_recent": sorted(
+                [
+                    bucket_item
+                    for payload in native_ledgers
+                    for bucket_item in _native_ledger_turn_bucket(
+                        payload,
+                        classifications={"host-runtime-failure", "host-runtime-overload"},
+                    )
+                ],
+                key=lambda item: str(item.get("recorded_at") or ""),
+                reverse=True,
+            )[:RECENT_LIMIT],
+            "incomplete_recent": sorted(
+                [
+                    bucket_item
+                    for payload in native_ledgers
+                    for bucket_item in _native_ledger_turn_bucket(
+                        payload,
+                        classifications={"incomplete-session"},
+                    )
+                ],
+                key=lambda item: str(item.get("recorded_at") or ""),
+                reverse=True,
+            )[:RECENT_LIMIT],
         },
     }
     return summary

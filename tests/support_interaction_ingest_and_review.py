@@ -116,6 +116,33 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
     ) -> dict[str, object]:
         return read_json(workspace.native_ledger_dir / f"{ledger_id}.json")
 
+    def write_claude_mirror_session(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        session_id: str,
+        records: list[dict[str, object]],
+    ) -> Path:
+        mirror_path = workspace.claude_code_mirror_root / f"{session_id}.jsonl"
+        mirror_path.parent.mkdir(parents=True, exist_ok=True)
+        with mirror_path.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+        return mirror_path
+
+    def write_claude_native_transcript(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        filename: str,
+        records: list[dict[str, object]],
+    ) -> Path:
+        path = workspace.root / filename
+        with path.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+        return path
+
     def create_pdf(self, path: Path, *, page_count: int = 1) -> None:
         from pypdf import PdfWriter
 
@@ -1273,6 +1300,333 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertEqual(set(claude_identity.keys()), expected_keys)
         self.assertEqual(codex_identity["host_provider"], "codex")
         self.assertEqual(claude_identity["host_provider"], "claude-code")
+
+    def test_reconcile_claude_host_runtime_failure_stays_in_audit_surfaces(self) -> None:
+        workspace = self.make_workspace()
+        transcript = {
+            "cwd": str(workspace.root),
+            "fidelity": {"capture_method": "hook-mirror-plus-native"},
+            "turns": [
+                {
+                    "native_turn_id": "native-turn-1",
+                    "opened_at": "2026-03-17T00:00:00Z",
+                    "completed_at": "2026-03-17T00:01:00Z",
+                    "user_text": "Summarize the proposal.",
+                    "assistant_final_text": "The Claude host SDK failed before canonical completion.",
+                    "attachments": [],
+                    "function_calls": [],
+                    "closure": {
+                        "status": "completed",
+                        "source": "hook-stop",
+                        "stop_reason": "sdk-error",
+                        "diagnostics": {
+                            "host_error_text": "Cannot read properties of undefined (reading 'input_tokens')."
+                        },
+                    },
+                    "operator_evidence": {
+                        "status": "degraded",
+                        "classification": "host-runtime-failure",
+                        "detail": "Claude session captured an explicit host/runtime failure signal.",
+                    },
+                }
+            ],
+        }
+
+        with (
+            mock.patch(
+                "docmason.interaction.refresh_generated_connector_manifests",
+                return_value=None,
+            ),
+            mock.patch(
+                "docmason.interaction.load_claude_code_transcript",
+                return_value=transcript,
+            ),
+            mock.patch("docmason.interaction.refresh_runtime_projections", return_value={}),
+        ):
+            reconciled = reconcile_claude_code_thread(workspace, session_id="claude-failed-session")
+
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
+        )
+        latest_turn = native_ledger["turns"][-1]
+        self.assertEqual(
+            latest_turn["operator_evidence"]["classification"],
+            "host-runtime-failure",
+        )
+        self.assertEqual(latest_turn["closure"]["source"], "hook-stop")
+        self.assertIsInstance(latest_turn["captured_interaction_id"], str)
+        entry_path = (
+            workspace.interaction_entries_dir / f"{latest_turn['captured_interaction_id']}.json"
+        )
+        entry = read_json(entry_path)
+        self.assertFalse(entry["pending_promotion"])
+        self.assertEqual(entry["status"], "operator-evidence-only")
+        summary = refresh_log_review_summary(workspace)
+        self.assertEqual(summary["conversations"]["total"], 0)
+        self.assertEqual(read_json(workspace.answer_history_index_path)["record_count"], 0)
+        self.assertEqual(len(summary["native_reconciliation"]["host_runtime_failures_recent"]), 1)
+
+    def test_reconcile_claude_parser_e2e_preserves_early_failure_and_nested_image_evidence(self) -> None:
+        workspace = self.make_workspace()
+        session_id = "claude-e2e-session"
+        image_payload = base64.b64encode(b"fake-png-bytes").decode("ascii")
+        native_path = self.write_claude_native_transcript(
+            workspace,
+            filename="claude-native-e2e.jsonl",
+            records=[
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-17T00:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Inspect the rendered page."},
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-17T00:00:02Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Opening canonical ask turn."},
+                            {
+                                "type": "tool_use",
+                                "name": "Skill",
+                                "id": "skill-001",
+                                "input": {"skill": "ask"},
+                            },
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-17T00:00:03Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "skill-001",
+                                "content": "Launching skill: ask",
+                            }
+                        ]
+                    },
+                    "toolUseResult": {"success": True, "commandName": "ask"},
+                },
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-17T00:00:03Z",
+                    "isMeta": True,
+                    "sourceToolUseID": "skill-001",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Base directory for this skill: /tmp/skills/ask",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-17T00:00:05Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Reading the rendered evidence now."},
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "id": "read-001",
+                                "input": {"file_path": "renders/page-001.png"},
+                            },
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-17T00:00:06Z",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "read-001",
+                                "content": [
+                                    {"type": "text", "text": "Loaded page render."},
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "image/png",
+                                            "data": image_payload,
+                                        },
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-17T00:00:12Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "The first attempt hit a host issue."},
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "timestamp": "2026-03-17T00:01:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Continue with the text-only follow-up."},
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-17T00:01:05Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Continuing with the follow-up."},
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-03-17T00:01:10Z",
+                    "message": {
+                        "stop_reason": "end_turn",
+                        "content": [
+                            {"type": "text", "text": "The follow-up answer completed normally."},
+                        ],
+                    },
+                },
+            ],
+        )
+        self.write_claude_mirror_session(
+            workspace,
+            session_id=session_id,
+            records=[
+                {
+                    "record_type": "session-start",
+                    "session_id": session_id,
+                    "recorded_at": "2026-03-17T00:00:00Z",
+                    "cwd": str(workspace.root),
+                    "transcript_path": str(native_path),
+                    "model": "claude-sonnet-4.6",
+                },
+                {
+                    "record_type": "prompt-submit",
+                    "session_id": session_id,
+                    "recorded_at": "2026-03-17T00:00:00Z",
+                    "prompt": "Inspect the rendered page.",
+                },
+                {
+                    "record_type": "stop",
+                    "session_id": session_id,
+                    "recorded_at": "2026-03-17T00:00:15Z",
+                    "last_assistant_message": "The host SDK failed during the first attempt.",
+                    "stop_reason": "sdk-error",
+                    "host_error_text": "Cannot read properties of undefined (reading 'input_tokens').",
+                },
+                {
+                    "record_type": "prompt-submit",
+                    "session_id": session_id,
+                    "recorded_at": "2026-03-17T00:01:00Z",
+                    "prompt": "Continue with the text-only follow-up.",
+                },
+                {
+                    "record_type": "stop",
+                    "session_id": session_id,
+                    "recorded_at": "2026-03-17T00:01:15Z",
+                    "last_assistant_message": "The follow-up answer completed normally.",
+                    "stop_reason": "end_turn",
+                },
+            ],
+        )
+
+        reconciled = reconcile_claude_code_thread(workspace, session_id=session_id)
+
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
+        )
+        self.assertEqual(len(native_ledger["turns"]), 2)
+        first_turn = native_ledger["turns"][0]
+        second_turn = native_ledger["turns"][1]
+        self.assertEqual(
+            first_turn["operator_evidence"]["classification"],
+            "host-runtime-failure",
+        )
+        self.assertEqual(
+            second_turn["operator_evidence"]["classification"],
+            None,
+        )
+        self.assertTrue(first_turn["attachments"])
+        stored_path = first_turn["attachments"][0]["stored_path"]
+        self.assertTrue(isinstance(stored_path, str) and (workspace.root / stored_path).exists())
+        summary = refresh_log_review_summary(workspace)
+        self.assertEqual(summary["conversations"]["total"], 0)
+        self.assertEqual(read_json(workspace.answer_history_index_path)["record_count"], 0)
+        self.assertEqual(len(summary["native_reconciliation"]["host_runtime_failures_recent"]), 1)
+        failure_bucket = summary["native_reconciliation"]["host_runtime_failures_recent"][0]
+        self.assertEqual(failure_bucket["native_turn_id"], first_turn["native_turn_id"])
+        self.assertEqual(
+            failure_bucket["operator_evidence_classification"],
+            "host-runtime-failure",
+        )
+
+    def test_reconcile_claude_sdk_explanation_text_remains_promotable(self) -> None:
+        workspace = self.make_workspace()
+        session_id = "claude-sdk-explanation"
+        self.write_claude_mirror_session(
+            workspace,
+            session_id=session_id,
+            records=[
+                {
+                    "record_type": "session-start",
+                    "session_id": session_id,
+                    "recorded_at": "2026-03-17T00:00:00Z",
+                    "cwd": str(workspace.root),
+                    "transcript_path": "",
+                    "model": "claude-sonnet-4.6",
+                },
+                {
+                    "record_type": "prompt-submit",
+                    "session_id": session_id,
+                    "recorded_at": "2026-03-17T00:00:00Z",
+                    "prompt": "Explain the Claude workflow.",
+                },
+                {
+                    "record_type": "stop",
+                    "session_id": session_id,
+                    "recorded_at": "2026-03-17T00:00:20Z",
+                    "last_assistant_message": "The SDK documentation recommends sequential image reads to reduce context pressure.",
+                    "stop_reason": "end_turn",
+                },
+            ],
+        )
+
+        reconciled = reconcile_claude_code_thread(workspace, session_id=session_id)
+
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
+        )
+        latest_turn = native_ledger["turns"][-1]
+        self.assertIsNone(latest_turn["operator_evidence"]["classification"])
+        entry_path = (
+            workspace.interaction_entries_dir / f"{latest_turn['captured_interaction_id']}.json"
+        )
+        entry = read_json(entry_path)
+        self.assertTrue(entry["pending_promotion"])
+        self.assertEqual(entry["status"], "pending")
+        summary = refresh_log_review_summary(workspace)
+        self.assertEqual(
+            summary["native_reconciliation"]["host_runtime_failures_recent"],
+            [],
+        )
 
     def test_reconcile_flags_manual_alias_anomaly_without_polluting_canonical_views(self) -> None:
         workspace = self.make_workspace()
