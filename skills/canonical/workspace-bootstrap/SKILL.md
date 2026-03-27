@@ -28,7 +28,8 @@ If the agent cannot perform these capabilities, stop and explain that the enviro
 2. If `.venv` is absent or `docmason` is not yet runnable from the repo-local environment, start with:
    - `./scripts/bootstrap-workspace.sh --yes`
    - add `--json` when machine-readable output helps
-   - the launcher should only choose a bootstrap Python and delegate to `docmason prepare --yes`
+   - the launcher should only choose a healthy bootstrap Python and delegate to `docmason prepare --yes`
+   - the launcher should reject broken recursive stubs and timed-out bootstrap candidates rather than hanging on them
 3. Once the launcher succeeds, prefer the repo-local environment for subsequent commands:
    - `./.venv/bin/python -m docmason doctor --json`
    - `./.venv/bin/python -m docmason prepare --json --yes`
@@ -63,6 +64,7 @@ If the agent cannot perform these capabilities, stop and explain that the enviro
 
 - `prepare` bootstraps repo-local state only.
 - `./scripts/bootstrap-workspace.sh --yes` is the preferred zero-to-working launcher from a raw checkout because it can prepare `.venv` before the package is importable from the `src/` layout.
+- The launcher now probes bootstrap-Python liveness in bounded time and prefers repo-local candidates before shared ones.
 - `runtime/bootstrap_state.json` is the cached ready marker that ordinary ask-time work should reuse.
 - The steady-state runtime is repo-local managed Python `3.13` under `.docmason/toolchain/python/`.
 - On the native Codex path, bootstrap should refresh repo-local skill shims under `.agents/skills/` rather than writing into `~/.codex/skills`.

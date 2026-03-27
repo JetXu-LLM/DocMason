@@ -17,7 +17,7 @@ Key architectural commitments:
 
 - file-only persistent knowledge
 - multimodal evidence preservation
-- Codex on macOS as the native reference workflow
+- Codex on macOS as the current native reference workflow for repository implementation
 - strong provenance
 - strong validation gates
 - elegant adaptation for other agents and environments

@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -35,6 +36,7 @@ from docmason.transcript import (
     locate_claude_code_session,
     validate_normalized_transcript,
 )
+from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,6 +48,12 @@ class HookEventHandlerTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.workspace_root = Path(self.tempdir.name)
+
+    def _seed_skill_workspace(self) -> WorkspacePaths:
+        workspace = WorkspacePaths(root=self.workspace_root)
+        shutil.copytree(ROOT / "skills" / "canonical", workspace.root / "skills" / "canonical")
+        (workspace.root / "skills" / "operator").mkdir(parents=True, exist_ok=True)
+        return workspace
 
     def test_session_start_writes_mirror_record(self) -> None:
         payload = {
@@ -198,6 +206,53 @@ class HookEventHandlerTests(unittest.TestCase):
         self.assertEqual(records[1]["record_type"], "prompt-submit")
         self.assertEqual(records[2]["record_type"], "stop")
 
+    def test_session_start_refreshes_skill_shims_for_self_contained_workspace(self) -> None:
+        workspace = self._seed_skill_workspace()
+        seed_self_contained_bootstrap_state(workspace)
+
+        payload = {
+            "hook_event_name": "SessionStart",
+            "session_id": "shim-refresh-session",
+            "cwd": str(self.workspace_root),
+        }
+        with mock.patch("docmason.hooks._resolve_workspace_root", return_value=self.workspace_root):
+            handle_hook_event("session", json.dumps(payload))
+
+        claude_shim = workspace.claude_skill_shim_dir / "workspace-bootstrap"
+        codex_shim = workspace.repo_skill_shim_dir / "workspace-bootstrap"
+        self.assertTrue(claude_shim.is_symlink())
+        self.assertTrue(codex_shim.is_symlink())
+        expected = (workspace.canonical_skills_dir / "workspace-bootstrap").resolve()
+        self.assertEqual(claude_shim.resolve(), expected)
+        self.assertEqual(codex_shim.resolve(), expected)
+
+    def test_session_start_skips_skill_shims_when_workspace_not_self_contained(self) -> None:
+        workspace = self._seed_skill_workspace()
+        workspace.bootstrap_state_path.parent.mkdir(parents=True, exist_ok=True)
+        workspace.bootstrap_state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "status": "action-required",
+                    "environment_ready": False,
+                    "workspace_root": str(workspace.root.resolve()),
+                    "isolation_grade": "degraded",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        payload = {
+            "hook_event_name": "SessionStart",
+            "session_id": "shim-skip-session",
+            "cwd": str(self.workspace_root),
+        }
+        with mock.patch("docmason.hooks._resolve_workspace_root", return_value=self.workspace_root):
+            handle_hook_event("session", json.dumps(payload))
+
+        self.assertFalse(workspace.claude_skill_shim_dir.exists())
+        self.assertFalse(workspace.repo_skill_shim_dir.exists())
+
 
 class SupportedEventsTests(unittest.TestCase):
     """Test SUPPORTED_EVENTS constant."""
@@ -281,7 +336,8 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
         self.assertEqual(turn["user_text"], "What is this project?")
         self.assertEqual(turn["assistant_final_text"], "This is DocMason.")
         self.assertEqual(turn["native_turn_id"], "turn-001")
-        self.assertFalse(transcript["fidelity"]["has_attachments"])
+        self.assertEqual(transcript["fidelity"]["capability_scope"], "captured-transcript")
+        self.assertFalse(transcript["fidelity"]["attachments_captured"])
         self.assertEqual(transcript["fidelity"]["capture_method"], "hook-mirror")
 
     def test_load_multi_turn_transcript(self) -> None:
@@ -505,8 +561,6 @@ class CommittedBootstrapperFilesTests(unittest.TestCase):
         self.assertTrue(hooks_dir.exists())
         scripts = list(hooks_dir.glob("on-*.sh"))
         self.assertGreaterEqual(len(scripts), 3, "At least 3 hook scripts expected")
-        import os
-
         for script in scripts:
             self.assertTrue(
                 os.access(script, os.X_OK),
@@ -671,6 +725,8 @@ class ConnectorManifestTests(unittest.TestCase):
         data = read_json(manifest_path)
         self.assertEqual(data["provider"], "claude-code")
         self.assertEqual(data["connector_kind"], "hook-mirror")
+        self.assertEqual(data["capability_scope"], "connector-capture")
+        self.assertFalse(data["captures_attachments"])
 
 
 class ToolUseAuditClaudeCodeTests(unittest.TestCase):

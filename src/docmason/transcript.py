@@ -281,8 +281,14 @@ def load_codex_transcript(thread_id: str) -> dict[str, Any]:
         "fidelity": {
             "has_full_tool_calls": True,
             "has_mid_turn_messages": True,
-            "has_attachments": True,
+            "capability_scope": "captured-transcript",
+            "attachments_captured": True,
             "capture_method": "codex-rollout",
+            "fidelity_notes": (
+                "This fidelity block describes what the current DocMason Codex "
+                "transcript loader captured from local rollout storage, not the "
+                "full host product capability envelope."
+            ),
         },
         "turns": normalized_turns,
     }
@@ -491,8 +497,15 @@ def load_claude_code_transcript(
         "fidelity": {
             "has_full_tool_calls": True,
             "has_mid_turn_messages": has_mid_turn,
-            "has_attachments": False,
+            "capability_scope": "captured-transcript",
+            "attachments_captured": False,
             "capture_method": capture_method,
+            "fidelity_notes": (
+                "This fidelity block describes what the current DocMason Claude "
+                "Code transcript loader reconstructed from the hook mirror and "
+                "optional native transcript enrichment. It does not claim that "
+                "Claude Code itself lacks attachment or multimodal features."
+            ),
         },
         "turns": turns,
     }

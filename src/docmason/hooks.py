@@ -81,6 +81,40 @@ def _append_record(workspace_root: Path, session_id: str, record: dict[str, Any]
         f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
+def _maybe_refresh_session_start_skill_shims(workspace_root: Path) -> None:
+    """Refresh thin repo-local skill shims for prepared Claude workspaces.
+
+    This is intentionally narrower than full adapter sync:
+    - only runs on already prepared self-contained workspaces
+    - only refreshes the local shim layer used for slash-command discovery
+    - never raises, because hook plumbing must remain best-effort
+    """
+    try:
+        from .commands import sync_repo_local_skill_shims
+        from .project import WorkspacePaths, bootstrap_state
+    except Exception:
+        return
+
+    try:
+        paths = WorkspacePaths(root=workspace_root)
+        state = bootstrap_state(paths)
+        if not isinstance(state, dict) or not state:
+            return
+        recorded_root = state.get("workspace_root")
+        if isinstance(recorded_root, str) and recorded_root:
+            if Path(recorded_root).resolve() != workspace_root.resolve():
+                return
+        if not bool(state.get("environment_ready")):
+            return
+        if str(state.get("isolation_grade") or "") != "self-contained":
+            return
+        if not paths.canonical_skills_dir.exists():
+            return
+        sync_repo_local_skill_shims(paths)
+    except Exception:
+        return
+
+
 # ---------------------------------------------------------------------------
 # Event handlers
 # ---------------------------------------------------------------------------
@@ -100,6 +134,7 @@ def _handle_session_start(payload: dict[str, Any], workspace_root: Path) -> None
         "source": payload.get("source", ""),
     }
     _append_record(workspace_root, session_id, record)
+    _maybe_refresh_session_start_skill_shims(workspace_root)
 
 
 def _handle_session_end(payload: dict[str, Any], workspace_root: Path) -> None:

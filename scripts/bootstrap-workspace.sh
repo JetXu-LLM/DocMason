@@ -33,8 +33,40 @@ fail() {
 
 python_is_supported() {
   local candidate="$1"
+  local first_line=""
+  local probe_pid=""
+  local ticks=0
+
+  if [[ ! -x "$candidate" ]]; then
+    return 1
+  fi
+
+  if command -v file >/dev/null 2>&1; then
+    if file "$candidate" 2>/dev/null | grep -qi 'Python script text executable'; then
+      first_line="$(head -n 1 "$candidate" 2>/dev/null || true)"
+      if [[ "$first_line" == '#!/usr/bin/env python3' || "$first_line" == '#!/usr/bin/env python' ]]; then
+        return 1
+      fi
+    fi
+  fi
+
   "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
-    >/dev/null 2>&1
+    >/dev/null 2>&1 &
+  probe_pid="$!"
+  while kill -0 "$probe_pid" >/dev/null 2>&1; do
+    if (( ticks >= 30 )); then
+      pkill -P "$probe_pid" >/dev/null 2>&1 || true
+      kill "$probe_pid" >/dev/null 2>&1 || true
+      sleep 0.1
+      pkill -P "$probe_pid" >/dev/null 2>&1 || true
+      kill -9 "$probe_pid" >/dev/null 2>&1 || true
+      wait "$probe_pid" >/dev/null 2>&1 || true
+      return 1
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  wait "$probe_pid" >/dev/null 2>&1
 }
 
 resolve_candidate() {
@@ -69,18 +101,15 @@ find_supported_shared_python() {
     candidates+=("${DOCMASON_BOOTSTRAP_PYTHON}")
   fi
   candidates+=(
-    python3.14
     python3.13
     python3.12
     python3.11
     python3
     python
-    /opt/homebrew/bin/python3.14
     /opt/homebrew/bin/python3.13
     /opt/homebrew/bin/python3.12
     /opt/homebrew/bin/python3.11
     /opt/homebrew/bin/python3
-    /usr/local/bin/python3.14
     /usr/local/bin/python3.13
     /usr/local/bin/python3.12
     /usr/local/bin/python3.11

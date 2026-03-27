@@ -174,18 +174,23 @@ def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
     """Load active native-thread front-door context when it can be detected honestly."""
     from .conversation import (
         build_log_context,
+        current_host_identity,
         detect_agent_surface,
         latest_conversation_turn,
-        load_conversation_record,
-        native_conversation_id,
+        load_bound_conversation_record_for_host,
         normalize_front_door_state,
     )
+    from .interaction import load_bound_native_ledger
 
     agent_surface = detect_agent_surface()
-    native_id, _native_source = native_conversation_id()
-    conversation: dict[str, Any] = {}
-    if isinstance(native_id, str) and native_id:
-        conversation = load_conversation_record(paths, native_id)
+    host_identity = current_host_identity(agent_surface=agent_surface)
+    host_thread_ref = (
+        str(host_identity.get("host_thread_ref"))
+        if isinstance(host_identity.get("host_thread_ref"), str) and host_identity.get("host_thread_ref")
+        else None
+    )
+    conversation = load_bound_conversation_record_for_host(paths, host_identity=host_identity)
+    native_ledger = load_bound_native_ledger(paths, host_identity=host_identity)
 
     latest_turn = latest_conversation_turn(conversation)
     front_door_state = (
@@ -194,11 +199,15 @@ def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
         else None
     )
     warning = None
-    if isinstance(native_id, str) and native_id and front_door_state == "native-reconciled-only":
+    if (
+        isinstance(host_thread_ref, str)
+        and host_thread_ref
+        and front_door_state != "canonical-ask"
+    ):
         warning = {
             "code": "noncanonical-operator-direct",
             "detail": (
-                "This result is operator evidence only. The active native thread has not yet "
+                "This result is operator evidence only. The active host thread has not yet "
                 "entered canonical ask ownership for the current turn."
             ),
             "recommended_action": (
@@ -206,11 +215,21 @@ def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
                 "evidence as ordinary-answer completion."
             ),
         }
+        anomaly_flags = host_identity.get("anomaly_flags")
+        if isinstance(anomaly_flags, list) and anomaly_flags:
+            warning["host_identity_anomalies"] = [
+                value for value in anomaly_flags if isinstance(value, str) and value
+            ]
 
     log_context = None
-    if isinstance(native_id, str) and native_id and isinstance(latest_turn, dict):
+    conversation_id = (
+        str(conversation.get("conversation_id"))
+        if isinstance(conversation.get("conversation_id"), str) and conversation.get("conversation_id")
+        else None
+    )
+    if isinstance(conversation_id, str) and conversation_id and isinstance(latest_turn, dict):
         log_context = build_log_context(
-            conversation_id=native_id,
+            conversation_id=conversation_id,
             turn_id=str(latest_turn.get("turn_id") or ""),
             run_id=(
                 str(latest_turn.get("active_run_id"))
@@ -260,12 +279,16 @@ def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
 
     return {
         "agent_surface": agent_surface,
-        "conversation_id": native_id if isinstance(native_id, str) and native_id else None,
+        "conversation_id": conversation_id,
         "turn_id": (
             str(latest_turn.get("turn_id"))
             if isinstance(latest_turn, dict) and isinstance(latest_turn.get("turn_id"), str)
             else None
         ),
+        "host_identity": host_identity,
+        "native_ledger_id": native_ledger.get("ledger_id")
+        if isinstance(native_ledger.get("ledger_id"), str)
+        else None,
         "turn_front_door_state": front_door_state,
         "canonical_ask_opened": front_door_state == "canonical-ask",
         "warning": warning,

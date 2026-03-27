@@ -1,6 +1,6 @@
 # Workflow Notes
 
-The native reference path for workflow documentation is Codex on macOS.
+The current native reference path for workflow documentation is Codex on macOS.
 
 ## Stable Public CLI
 
@@ -154,7 +154,8 @@ artifact-level retrieval or cross-source comparison.
 ## Environment Preparation Notes
 
 - `./scripts/bootstrap-workspace.sh --yes` is the preferred zero-to-working launcher from a raw checkout.
-- The launcher should only choose a usable bootstrap Python and delegate to `docmason prepare --yes`.
+- The launcher should only choose a healthy bootstrap Python and delegate to `docmason prepare --yes`.
+- The launcher now rejects broken recursive stubs and startup-silent bootstrap candidates instead of hanging on them.
 - Prepared steady-state work should run from repo-local managed Python `3.13` under `.docmason/toolchain/python/`.
 - If `uv` is missing, `prepare` should provision it inside `.docmason/toolchain/bootstrap/venv` rather than keeping an externally anchored steady-state runtime.
 - The project runtime itself remains isolated inside repo-local `.venv`.

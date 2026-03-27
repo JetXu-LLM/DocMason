@@ -17,12 +17,14 @@ from unittest import mock
 from docmason.ask import prepare_ask_turn
 from docmason.commands import sync_workspace
 from docmason.coordination import workspace_lease
-from docmason.conversation import update_conversation_turn
+from docmason.conversation import host_identity_key, update_conversation_turn
 from docmason.interaction import (
     _persist_interaction_entry,
     build_promoted_interaction_memories,
     decode_data_url,
     interaction_ingest_snapshot,
+    promote_native_ledger_turn,
+    reconcile_claude_code_thread,
     reconcile_codex_thread,
 )
 from docmason.project import WorkspacePaths, read_json, write_json
@@ -97,6 +99,22 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             workspace,
             prepared_at="2026-03-17T00:00:00Z",
         )
+
+    def load_conversation(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        conversation_id: str,
+    ) -> dict[str, object]:
+        return read_json(workspace.conversations_dir / f"{conversation_id}.json")
+
+    def load_native_ledger(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        ledger_id: str,
+    ) -> dict[str, object]:
+        return read_json(workspace.native_ledger_dir / f"{ledger_id}.json")
 
     def create_pdf(self, path: Path, *, page_count: int = 1) -> None:
         from pypdf import PdfWriter
@@ -615,13 +633,18 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             codex_sessions_root=mock.Mock(return_value=sessions_root),
         )
 
-    def seed_prepared_turns(self, workspace: WorkspacePaths, *, thread_id: str) -> None:
+    def seed_prepared_turns(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        thread_id: str,
+    ) -> list[dict[str, object]]:
         with mock.patch.dict(
             os.environ,
-            {"DOCMASON_CONVERSATION_ID": thread_id},
+            {"CODEX_THREAD_ID": thread_id},
             clear=False,
         ):
-            prepare_ask_turn(
+            first = prepare_ask_turn(
                 workspace,
                 question="How should I draft the campaign planning brief for the programme lead?",
                 semantic_analysis=self.semantic_analysis(
@@ -629,7 +652,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     question_domain="composition",
                 ),
             )
-            prepare_ask_turn(
+            second = prepare_ask_turn(
                 workspace,
                 question=(
                     "How should I frame the next architecture review response? "
@@ -648,6 +671,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     ],
                 ),
             )
+        return [first, second]
 
     def test_data_url_decode_and_transcript_validation(self) -> None:
         mime_type, raw = decode_data_url(self.fake_png_data_url())
@@ -660,7 +684,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         }
         validate_normalized_transcript(payload)
 
-    def test_reconcile_native_thread_creates_pending_overlay_and_conversation_turns(self) -> None:
+    def test_reconcile_native_thread_writes_native_ledger_without_canonical_turns(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.create_pdf(workspace.source_dir / "a.pdf")
@@ -672,7 +696,6 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             thread_id=thread_id,
             source_ids=source_ids,
         )
-        self.seed_prepared_turns(workspace, thread_id=thread_id)
 
         with (
             self.patch_codex_storage(state_db, sessions_root),
@@ -686,22 +709,19 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             reconciled = reconcile_codex_thread(workspace, thread_id=thread_id)
 
         self.assertEqual(reconciled["status"], "reconciled")
-        conversation = read_json(workspace.conversations_dir / f"{thread_id}.json")
-        self.assertEqual(len(conversation["turns"]), 2)
-        self.assertEqual(conversation["turns"][0]["native_turn_id"], "native-turn-1")
-        self.assertEqual(conversation["turns"][0]["inner_workflow_id"], "grounded-composition")
-        self.assertEqual(conversation["turns"][0]["question_class"], "composition")
-        self.assertEqual(conversation["turns"][0]["front_door_state"], "canonical-ask")
-        self.assertEqual(conversation["turns"][1]["continuation_type"], "constraint-update")
-        self.assertEqual(conversation["turns"][1]["inner_workflow_id"], "grounded-composition")
-        self.assertEqual(conversation["turns"][1]["question_class"], "composition")
-        self.assertTrue(conversation["turns"][1]["bundle_paths"])
-        self.assertTrue(conversation["turns"][1]["attachments"])
-        self.assertEqual(conversation["turns"][1]["front_door_state"], "canonical-ask")
-        run_state = read_json(
-            workspace.runs_dir / conversation["turns"][0]["active_run_id"] / "state.json"
+        self.assertIsNone(reconciled["canonical_conversation_id"])
+        self.assertEqual(list(workspace.conversations_dir.glob("*.json")), [])
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
         )
-        self.assertEqual(run_state["run_origin"], "ask-front-door")
+        self.assertEqual(len(native_ledger["turns"]), 2)
+        self.assertEqual(native_ledger["turns"][0]["native_turn_id"], "native-turn-1")
+        self.assertEqual(native_ledger["turns"][0]["question_class"], "answer")
+        self.assertEqual(native_ledger["turns"][1]["continuation_type"], "constraint-update")
+        self.assertEqual(native_ledger["turns"][1]["question_class"], "answer")
+        self.assertTrue(native_ledger["turns"][1]["attachments"])
+        self.assertIsNone(native_ledger["turns"][1]["promotion"])
 
         snapshot = interaction_ingest_snapshot(workspace)
         self.assertEqual(snapshot["pending_capture_count"], 2)
@@ -713,6 +733,10 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertEqual(overlay_source_records[1]["answer_use_policy"], "direct-support")
         self.assertIn("structure", overlay_source_records[1]["available_channels"])
         self.assertIn("render", overlay_source_records[1]["available_channels"])
+        summary = refresh_log_review_summary(workspace)
+        self.assertEqual(summary["conversations"]["total"], 0)
+        self.assertEqual(summary["native_reconciliation"]["total"], 1)
+        self.assertEqual(read_json(workspace.answer_history_index_path)["record_count"], 0)
 
         overlay_retrieval = retrieve_corpus(
             workspace,
@@ -727,7 +751,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertEqual(overlay_retrieval["results"][0]["source_family"], "interaction-pending")
         self.assertTrue(overlay_retrieval["results"][0]["pending_promotion"])
 
-    def test_reconcile_uses_final_assistant_message_for_canonical_answer(self) -> None:
+    def test_reconcile_uses_final_assistant_message_for_native_ledger(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         thread_id = "thread-chatter"
@@ -745,34 +769,36 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                 transcript["turns"][0]["assistant_final_text"],
                 "Yes. Aliyun SMS supports HTTPS API access.",
             )
-            reconcile_codex_thread(workspace, thread_id=thread_id)
+            reconciled = reconcile_codex_thread(workspace, thread_id=thread_id)
 
-        conversation = read_json(workspace.conversations_dir / f"{thread_id}.json")
-        turn = conversation["turns"][0]
-        answer_path = workspace.root / turn["answer_file_path"]
-        self.assertEqual(
-            answer_path.read_text(encoding="utf-8").strip(),
-            "Yes. Aliyun SMS supports HTTPS API access.",
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
         )
         self.assertEqual(
-            turn["response_excerpt"],
+            native_ledger["turns"][0]["assistant_excerpt"],
             "Yes. Aliyun SMS supports HTTPS API access.",
         )
         entries = sorted(workspace.interaction_entries_dir.glob("*.json"))
         self.assertEqual(len(entries), 1)
         entry = read_json(entries[0])
+        self.assertEqual(
+            entry["assistant_excerpt"],
+            "Yes. Aliyun SMS supports HTTPS API access.",
+        )
         self.assertEqual(entry["question_class"], "answer")
         self.assertEqual(entry["question_domain"], "general-stable")
         self.assertEqual(entry["support_strategy"], "model-first")
         self.assertEqual(entry["analysis_origin"], "repair-backstop")
         self.assertIn("semantic_analysis", entry)
+        self.assertEqual(list(workspace.answers_dir.glob("**/*.md")), [])
         overlay_source_records = read_json(workspace.interaction_overlay_source_records_path)[
             "records"
         ]
         self.assertEqual(overlay_source_records[0]["question_class"], "answer")
         self.assertEqual(overlay_source_records[0]["support_strategy"], "model-first")
 
-    def test_prepare_ask_turn_upgrades_reconciled_native_turn_to_canonical_front_door(self) -> None:
+    def test_prepare_ask_turn_opens_new_canonical_turn_separate_from_native_ledger(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         thread_id = "thread-front-door-upgrade"
@@ -788,9 +814,6 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         ):
             reconciled = reconcile_codex_thread(workspace, thread_id=thread_id)
             self.assertEqual(reconciled["status"], "reconciled")
-            conversation = read_json(workspace.conversations_dir / f"{thread_id}.json")
-            self.assertEqual(conversation["turns"][0]["front_door_state"], "native-reconciled-only")
-
             prepared = prepare_ask_turn(
                 workspace,
                 question="Does Aliyun SMS support HTTPS API?",
@@ -803,10 +826,21 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertEqual(prepared["turn_id"], "turn-001")
         self.assertEqual(prepared["front_door_state"], "canonical-ask")
         self.assertEqual(prepared["front_door_run_id"], prepared["run_id"])
-        upgraded = read_json(workspace.conversations_dir / f"{thread_id}.json")
+        self.assertNotEqual(prepared["conversation_id"], thread_id)
+        upgraded = self.load_conversation(
+            workspace,
+            conversation_id=str(prepared["conversation_id"]),
+        )
         self.assertEqual(len(upgraded["turns"]), 1)
         self.assertEqual(upgraded["turns"][0]["front_door_state"], "canonical-ask")
         self.assertEqual(upgraded["turns"][0]["front_door_run_id"], prepared["run_id"])
+        self.assertIsNone(upgraded["turns"][0]["native_ledger_ref"])
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
+        )
+        self.assertEqual(len(native_ledger["turns"]), 1)
+        self.assertIsNone(native_ledger["turns"][0]["promotion"])
         run_state = read_json(workspace.runs_dir / prepared["run_id"] / "state.json")
         self.assertEqual(run_state["run_origin"], "ask-front-door")
 
@@ -824,7 +858,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             self.patch_interaction_storage(state_db, sessions_root),
             mock.patch.dict(os.environ, {"CODEX_THREAD_ID": thread_id}, clear=False),
         ):
-            prepare_ask_turn(
+            turn = prepare_ask_turn(
                 workspace,
                 question="Does Aliyun SMS support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
@@ -834,70 +868,88 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             )
             update_conversation_turn(
                 workspace,
-                conversation_id=thread_id,
+                conversation_id=str(turn["conversation_id"]),
                 turn_id="turn-001",
                 updates={
                     "turn_state": "waiting-shared-job",
                     "status": "waiting-shared-job",
                 },
             )
-            reconcile_codex_thread(workspace, thread_id=thread_id)
+            reconciled = reconcile_codex_thread(workspace, thread_id=thread_id)
 
-        conversation = read_json(workspace.conversations_dir / f"{thread_id}.json")
+        conversation = self.load_conversation(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+        )
         self.assertEqual(conversation["turns"][0]["front_door_state"], "canonical-ask")
         self.assertEqual(conversation["turns"][0]["turn_state"], "waiting-shared-job")
         run_state = read_json(
             workspace.runs_dir / conversation["turns"][0]["active_run_id"] / "state.json"
         )
         self.assertEqual(run_state["run_origin"], "ask-front-door")
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
+        )
+        self.assertEqual(native_ledger["turns"][0]["native_turn_id"], "native-turn-1")
 
-    def test_reconcile_repairs_legacy_routing_metadata(self) -> None:
+    def test_promote_native_ledger_turn_bridges_audit_to_canonical_turn(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
-        self.create_pdf(workspace.source_dir / "a.pdf")
-        self.create_pdf(workspace.source_dir / "b.pdf")
-        source_ids = self.publish_seeded_corpus(workspace)
-        thread_id = "thread-repair"
-        state_db, sessions_root = self.write_fake_codex_storage(
+        thread_id = "thread-promotion"
+        state_db, sessions_root = self.write_chatter_codex_storage(
             workspace,
             thread_id=thread_id,
-            source_ids=source_ids,
         )
-        self.seed_prepared_turns(workspace, thread_id=thread_id)
 
         with (
             self.patch_codex_storage(state_db, sessions_root),
             self.patch_interaction_storage(state_db, sessions_root),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": thread_id}, clear=False),
         ):
-            reconcile_codex_thread(workspace, thread_id=thread_id)
+            canonical = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="general-stable",
+                ),
+            )
+            reconciled = reconcile_codex_thread(workspace, thread_id=thread_id)
 
-        legacy_conversation = read_json(workspace.conversations_dir / f"{thread_id}.json")
-        legacy_conversation["turns"][1]["inner_workflow_id"] = "grounded-answer"
-        legacy_conversation["turns"][1]["question_class"] = None
-        legacy_conversation["turns"][1]["evidence_mode"] = None
-        legacy_conversation["turns"][1]["research_depth"] = None
-        legacy_conversation["turns"][1]["bundle_paths"] = []
-        write_json(workspace.conversations_dir / f"{thread_id}.json", legacy_conversation)
-
-        with (
-            self.patch_codex_storage(state_db, sessions_root),
-            self.patch_interaction_storage(
-                state_db,
-                sessions_root,
-            ),
-        ):
-            repaired = reconcile_codex_thread(workspace, thread_id=thread_id)
-
-        self.assertEqual(repaired["status"], "reconciled")
-        repaired_conversation = read_json(workspace.conversations_dir / f"{thread_id}.json")
-        self.assertEqual(
-            repaired_conversation["turns"][1]["inner_workflow_id"],
-            "grounded-composition",
+        promotion = promote_native_ledger_turn(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
+            native_turn_id="native-turn-1",
+            conversation_id=str(canonical["conversation_id"]),
+            turn_id=str(canonical["turn_id"]),
+            promotion_kind="controlled-recovery",
+            promotion_reason="operator-requested audit bridge",
         )
-        self.assertEqual(repaired_conversation["turns"][1]["question_class"], "composition")
-        self.assertEqual(repaired_conversation["turns"][1]["evidence_mode"], "kb-first-escalation")
-        self.assertEqual(repaired_conversation["turns"][1]["research_depth"], "deep")
-        self.assertTrue(repaired_conversation["turns"][1]["bundle_paths"])
+        self.assertEqual(promotion["promotion_kind"], "controlled-recovery")
+        canonical_conversation = self.load_conversation(
+            workspace,
+            conversation_id=str(canonical["conversation_id"]),
+        )
+        canonical_turn = canonical_conversation["turns"][0]
+        self.assertEqual(canonical_turn["promotion_kind"], "controlled-recovery")
+        self.assertEqual(canonical_turn["promotion_reason"], "operator-requested audit bridge")
+        self.assertEqual(
+            canonical_turn["native_ledger_ref"]["ledger_id"],
+            reconciled["native_ledger_id"],
+        )
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
+        )
+        self.assertEqual(
+            native_ledger["turns"][0]["promotion"]["conversation_id"],
+            canonical["conversation_id"],
+        )
+        self.assertEqual(
+            native_ledger["turns"][0]["promotion"]["turn_id"],
+            canonical["turn_id"],
+        )
 
     def test_prepare_ask_turn_recommends_sync_when_pending_interaction_is_relevant(self) -> None:
         workspace = self.make_workspace()
@@ -1170,7 +1222,94 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             "synthetic-session",
         )
 
-    def test_reconcile_codex_thread_waits_for_conversation_lease(self) -> None:
+    def test_reconcile_codex_and_claude_write_same_host_identity_envelope_shape(self) -> None:
+        workspace = self.make_workspace()
+        transcript = {
+            "cwd": str(workspace.root),
+            "turns": [
+                {
+                    "native_turn_id": "native-turn-1",
+                    "opened_at": "2026-03-17T00:00:00Z",
+                    "completed_at": "2026-03-17T00:01:00Z",
+                    "user_text": "Summarize the proposal.",
+                    "assistant_final_text": "Summary ready.",
+                    "attachments": [],
+                    "function_calls": [],
+                }
+            ],
+        }
+
+        with (
+            mock.patch(
+                "docmason.interaction.refresh_generated_connector_manifests",
+                return_value=None,
+            ),
+            mock.patch("docmason.interaction.load_codex_transcript", return_value=transcript),
+            mock.patch(
+                "docmason.interaction.load_claude_code_transcript",
+                return_value={**transcript, "fidelity": {"capture_method": "hook-mirror"}},
+            ),
+            mock.patch("docmason.interaction.refresh_runtime_projections", return_value={}),
+        ):
+            codex_result = reconcile_codex_thread(workspace, thread_id="codex-thread")
+            claude_result = reconcile_claude_code_thread(workspace, session_id="claude-session")
+
+        codex_identity = self.load_native_ledger(
+            workspace,
+            ledger_id=str(codex_result["native_ledger_id"]),
+        )["host_identity"]
+        claude_identity = self.load_native_ledger(
+            workspace,
+            ledger_id=str(claude_result["native_ledger_id"]),
+        )["host_identity"]
+        expected_keys = {
+            "host_provider",
+            "host_thread_ref",
+            "host_identity_source",
+            "host_identity_trust",
+            "anomaly_flags",
+        }
+        self.assertEqual(set(codex_identity.keys()), expected_keys)
+        self.assertEqual(set(claude_identity.keys()), expected_keys)
+        self.assertEqual(codex_identity["host_provider"], "codex")
+        self.assertEqual(claude_identity["host_provider"], "claude-code")
+
+    def test_reconcile_flags_manual_alias_anomaly_without_polluting_canonical_views(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        thread_id = "thread-anomaly"
+        state_db, sessions_root = self.write_chatter_codex_storage(
+            workspace,
+            thread_id=thread_id,
+        )
+
+        with (
+            self.patch_codex_storage(state_db, sessions_root),
+            self.patch_interaction_storage(state_db, sessions_root),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "CODEX_THREAD_ID": thread_id,
+                    "DOCMASON_CONVERSATION_ID": "manual-alias-thread",
+                },
+                clear=False,
+            ),
+        ):
+            reconciled = reconcile_codex_thread(workspace, thread_id=thread_id)
+
+        native_ledger = self.load_native_ledger(
+            workspace,
+            ledger_id=str(reconciled["native_ledger_id"]),
+        )
+        self.assertIn("anomalous-host-identity", native_ledger["host_identity"]["anomaly_flags"])
+        self.assertIn("manual-alias-override", native_ledger["host_identity"]["anomaly_flags"])
+        summary = refresh_log_review_summary(workspace)
+        self.assertEqual(summary["conversations"]["total"], 0)
+        self.assertEqual(read_json(workspace.answer_history_index_path)["record_count"], 0)
+        self.assertEqual(summary["native_reconciliation"]["total"], 1)
+        self.assertEqual(len(summary["native_reconciliation"]["anomalous_recent"]), 1)
+
+    def test_reconcile_codex_thread_waits_for_native_ledger_lease(self) -> None:
         workspace = self.make_workspace()
         result: dict[str, object] = {}
         finished = threading.Event()
@@ -1189,40 +1328,29 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                 }
             ],
         }
-        profile = {
-            "question_class": "direct",
-            "question_domain": "workspace-corpus",
-            "inner_workflow_id": "grounded-answer",
-            "support_strategy": "kb-first",
-            "analysis_origin": "test",
-            "evidence_requirements": {
-                "inspection_scope": "kb",
-                "preferred_channels": ["text"],
-            },
-            "semantic_analysis": self.semantic_analysis(
-                question_class="direct",
-                question_domain="workspace-corpus",
-            ),
-            "evidence_mode": "kb-native",
-            "research_depth": "standard",
-            "bundle_paths": [],
-        }
 
         def run_reconcile() -> None:
             result["payload"] = reconcile_codex_thread(workspace, thread_id="thread-123")
             finished.set()
 
-        with workspace_lease(workspace, "conversation:thread-123", timeout_seconds=1.0):
+        native_ledger_id = host_identity_key(
+            {
+                "host_provider": "codex",
+                "host_thread_ref": "thread-123",
+                "host_identity_source": "codex_thread_id",
+            }
+        )
+        with workspace_lease(
+            workspace,
+            f"native-ledger:{native_ledger_id}",
+            timeout_seconds=1.0,
+        ):
             with (
                 mock.patch(
                     "docmason.interaction.refresh_generated_connector_manifests",
                     return_value=None,
                 ),
                 mock.patch("docmason.interaction.load_codex_transcript", return_value=transcript),
-                mock.patch(
-                    "docmason.interaction.question_execution_profile",
-                    return_value=profile,
-                ),
                 mock.patch(
                     "docmason.interaction.build_tool_use_audit",
                     return_value={
@@ -1234,10 +1362,6 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     },
                 ),
                 mock.patch(
-                    "docmason.interaction.ensure_run_for_turn",
-                    return_value={"run_id": "run-123"},
-                ),
-                mock.patch(
                     "docmason.interaction.refresh_runtime_projections",
                     return_value={},
                 ),
@@ -1247,7 +1371,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                 time.sleep(0.2)
                 self.assertFalse(
                     finished.is_set(),
-                    "Reconciliation should wait while the conversation lease is active.",
+                    "Reconciliation should wait while the native ledger lease is active.",
                 )
         thread.join(timeout=5.0)
         self.assertFalse(thread.is_alive())

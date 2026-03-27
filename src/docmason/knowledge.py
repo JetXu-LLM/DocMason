@@ -3090,24 +3090,24 @@ def build_single_source_artifacts(
             "Unsupported source type for staging: "
             f"{source_entry.get('source_extension') or source_path.suffix}"
         )
-    suffix = definition.extension
-    if suffix == "pdf":
+    document_type = definition.document_type
+    if document_type == "pdf":
         return build_pdf_source(paths, source_path, source_entry, source_dir)
-    if suffix == "pptx":
+    if document_type == "pptx":
         if office_binary is None:
-            raise RuntimeError("LibreOffice is required to render PPTX sources.")
+            raise RuntimeError("LibreOffice is required to render PowerPoint sources.")
         return build_pptx_source(paths, source_path, source_entry, source_dir, office_binary)
-    if suffix == "docx":
+    if document_type == "docx":
         if office_binary is None:
-            raise RuntimeError("LibreOffice is required to render DOCX sources.")
+            raise RuntimeError("LibreOffice is required to render Word sources.")
         return build_docx_source(paths, source_path, source_entry, source_dir, office_binary)
-    if suffix == "xlsx":
+    if document_type == "xlsx":
         if office_binary is None:
-            raise RuntimeError("LibreOffice is required to render XLSX sources.")
+            raise RuntimeError("LibreOffice is required to render spreadsheet sources.")
         return build_xlsx_source(paths, source_path, source_entry, source_dir, office_binary)
-    if definition.document_type in TEXT_DOCUMENT_TYPES:
+    if document_type in TEXT_DOCUMENT_TYPES:
         return build_text_source(paths, source_path, source_entry, source_dir)
-    if definition.document_type == "email":
+    if document_type == "email":
         raise RuntimeError("Email sources must be staged through the email-specific builder.")
     raise RuntimeError(f"Unsupported source type for staging: {source_path.suffix}")
 

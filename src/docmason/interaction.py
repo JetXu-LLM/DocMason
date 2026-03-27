@@ -16,15 +16,11 @@ from .affordances import (
     merge_derived_affordances,
 )
 from .conversation import (
-    FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY,
-    base_turn_record,
-    ensure_conversation_record,
-    find_turn_by_question,
-    find_turn_index,
+    bound_conversation_id_for_host,
+    current_host_identity,
+    host_identity_key,
     semantic_log_context_fields,
-    stronger_front_door_state,
-    turn_has_canonical_ask_ownership,
-    workspace_snapshot,
+    update_conversation_turn,
 )
 from .coordination import workspace_lease
 from .front_controller import question_execution_profile
@@ -36,8 +32,8 @@ from .routing import (
     infer_question_class,
     infer_question_domain,
     normalize_memory_semantics,
+    normalize_question_analysis,
 )
-from .run_control import RUN_ORIGIN_NATIVE_RECONCILIATION, ensure_run_for_turn
 from .transcript import (
     codex_sessions_root,
     codex_state_db_path,
@@ -86,19 +82,6 @@ INTERACTION_REQUIRED_KNOWLEDGE_KEYS = (
     "citations",
     "related_sources",
 )
-_RECONCILIATION_PROTECTED_TURN_STATES = frozenset(
-    {
-        "prepared",
-        "awaiting-confirmation",
-        "waiting-shared-job",
-        "action-required",
-        "answered",
-        "completed",
-        "committed",
-    }
-)
-
-
 def utc_now() -> str:
     """Return the current UTC timestamp in ISO 8601 form."""
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
@@ -195,8 +178,15 @@ def refresh_generated_connector_manifests(paths: WorkspacePaths) -> dict[str, An
         "sessions_root": str(codex_sessions_root()),
         "connector_kind": "generated-local-adapter",
         "supports_native_reconciliation": True,
-        "supports_attachments": True,
-        "supports_multimodal_capture": True,
+        "capability_scope": "connector-capture",
+        "captures_attachments": True,
+        "captures_multimodal_content": True,
+        "host_product_capability_status": "not-evaluated",
+        "fidelity_notes": (
+            "These fields describe what the current DocMason Codex connector can "
+            "reconcile from local Codex storage. They are not a ranking of host "
+            "product capabilities."
+        ),
     }
     write_json(paths.codex_connector_manifest_path, codex_manifest)
     claude_code_hooks_configured = (paths.root / ".claude" / "settings.json").exists()
@@ -208,12 +198,18 @@ def refresh_generated_connector_manifests(paths: WorkspacePaths) -> dict[str, An
         "mirror_root": str(paths.claude_code_mirror_root),
         "connector_kind": "hook-mirror",
         "supports_native_reconciliation": True,
-        "supports_attachments": False,
-        "supports_multimodal_capture": False,
+        "capability_scope": "connector-capture",
+        "captures_attachments": False,
+        "captures_multimodal_content": False,
+        "host_product_capability_status": "not-evaluated",
         "fidelity_notes": (
-            "Hook-based capture: user prompts, tool calls (Bash+Agent), "
-            "final responses, session lifecycle. "
-            "No mid-turn messages or attachment capture via hooks alone."
+            "Current DocMason Claude Code capture uses repo-local hooks plus "
+            "optional native transcript enrichment. This connector records user "
+            "prompts, tool calls (Bash+Agent), final responses, and session "
+            "lifecycle. It does not currently ingest attachments or multimodal "
+            "payloads through the hook-mirror path. These fields describe "
+            "connector capture fidelity only, not Claude Code's native product "
+            "capabilities."
         ),
     }
     write_json(paths.claude_code_connector_manifest_path, claude_code_manifest)
@@ -1129,56 +1125,280 @@ def _persist_interaction_entry(
     return entry
 
 
-def _next_turn_id(conversation: dict[str, Any]) -> str:
-    turns = conversation.get("turns", [])
-    if not isinstance(turns, list):
-        return "turn-001"
-    return f"turn-{len(turns) + 1:03d}"
+def _native_ledger_path(paths: WorkspacePaths, ledger_id: str) -> Path:
+    return paths.native_ledger_dir / f"{ledger_id}.json"
 
 
-def _preserve_reconciled_turn_state(turn: dict[str, Any]) -> bool:
-    if turn_has_canonical_ask_ownership(turn):
-        return True
-    if isinstance(turn.get("committed_run_id"), str) and turn.get("committed_run_id"):
-        return True
-    return str(turn.get("turn_state") or "") in _RECONCILIATION_PROTECTED_TURN_STATES
+def _native_ledger_id(host_identity: dict[str, Any]) -> str:
+    key = host_identity_key(host_identity)
+    if isinstance(key, str) and key:
+        return key
+    return _sha256_text(json.dumps(host_identity, sort_keys=True, ensure_ascii=False))
 
 
-def reconcile_codex_thread(
+def load_native_ledger(paths: WorkspacePaths, ledger_id: str) -> dict[str, Any]:
+    """Load one native reconciliation ledger."""
+    return read_json(_native_ledger_path(paths, ledger_id))
+
+
+def load_bound_native_ledger(
     paths: WorkspacePaths,
     *,
-    thread_id: str | None = None,
+    host_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Reconcile a native Codex thread into conversations and interaction ingest."""
-    refresh_generated_connector_manifests(paths)
-    resolved_thread_id = thread_id or os.environ.get("CODEX_THREAD_ID")
-    if not isinstance(resolved_thread_id, str) or not resolved_thread_id:
-        return {"status": "not-available", "detail": "No native Codex thread id is available."}
-    transcript = load_codex_transcript(resolved_thread_id)
-    transcript_cwd = transcript.get("cwd")
-    if isinstance(transcript_cwd, str) and transcript_cwd:
-        try:
-            if Path(transcript_cwd).resolve() != paths.root.resolve():
-                return {
-                    "status": "ignored",
-                    "detail": "Native thread cwd does not match the current workspace root.",
-                    "conversation_id": resolved_thread_id,
-                }
-        except OSError:
-            pass
-    with workspace_lease(paths, f"conversation:{resolved_thread_id}"):
-        conversation = ensure_conversation_record(
-            paths,
-            conversation_id=resolved_thread_id,
-            conversation_id_source="codex_thread_id",
-            agent_surface="codex",
-        )
-        turns = conversation.get("turns", [])
-        if not isinstance(turns, list):
-            turns = []
-            conversation["turns"] = turns
-        captured_interaction_ids: list[str] = []
-        previous_consulted_source_ids: list[str] = []
+    """Load the native ledger for the current host identity, when available."""
+    resolved_host_identity = (
+        dict(host_identity) if isinstance(host_identity, dict) else current_host_identity()
+    )
+    ledger_id = _native_ledger_id(resolved_host_identity)
+    return load_native_ledger(paths, ledger_id)
+
+
+def _base_native_ledger(
+    *,
+    ledger_id: str,
+    host_identity: dict[str, Any],
+) -> dict[str, Any]:
+    now = utc_now()
+    return {
+        "schema_version": 1,
+        "ledger_id": ledger_id,
+        "host_identity": dict(host_identity),
+        "opened_at": now,
+        "updated_at": now,
+        "turns": [],
+    }
+
+
+def _native_profile(
+    question: str,
+    *,
+    semantic_analysis: dict[str, Any] | None = None,
+    fallback_hints: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = normalize_question_analysis(
+        question,
+        semantic_analysis=semantic_analysis,
+        fallback_hints=fallback_hints,
+    )
+    evidence_requirements = dict(normalized["evidence_requirements"])
+    preferred_channels = [
+        channel
+        for channel in evidence_requirements.get("preferred_channels", [])
+        if isinstance(channel, str)
+    ]
+    return {
+        "question_class": str(normalized["question_class"]),
+        "question_domain": str(normalized["question_domain"]),
+        "inner_workflow_id": str(normalized["inner_workflow_id"]),
+        "support_strategy": str(normalized["support_strategy"]),
+        "route_reason": str(normalized["route_reason"]),
+        "analysis_origin": str(normalized["analysis_origin"]),
+        "semantic_analysis": dict(normalized),
+        "inspection_scope": str(evidence_requirements.get("inspection_scope") or "unit"),
+        "preferred_channels": preferred_channels,
+        "evidence_requirements": evidence_requirements,
+        "memory_query_profile": dict(normalized["memory_query_profile"]),
+    }
+
+
+def _find_native_turn_index(ledger: dict[str, Any], native_turn_id: str) -> int | None:
+    turns = ledger.get("turns", [])
+    if not isinstance(turns, list):
+        return None
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            continue
+        if turn.get("native_turn_id") == native_turn_id:
+            return index
+    return None
+
+
+def _upsert_native_ledger_turn(
+    paths: WorkspacePaths,
+    *,
+    host_identity: dict[str, Any],
+    native_turn_id: str,
+    user_text: str,
+    assistant_excerpt: str,
+    recorded_at: str,
+    completed_at: str | None,
+    tool_use_audit: dict[str, Any],
+    related_source_ids: list[str],
+    continuation_type: str | None,
+    reused_previous_evidence: bool,
+    profile: dict[str, Any],
+    attachment_refs: list[dict[str, Any]],
+    reconciliation: dict[str, Any],
+) -> dict[str, Any]:
+    ledger_id = _native_ledger_id(host_identity)
+    path = _native_ledger_path(paths, ledger_id)
+    ledger = load_native_ledger(paths, ledger_id)
+    if not ledger:
+        ledger = _base_native_ledger(ledger_id=ledger_id, host_identity=host_identity)
+    turns = ledger.get("turns", [])
+    if not isinstance(turns, list):
+        turns = []
+    index = _find_native_turn_index(ledger, native_turn_id)
+    if index is None:
+        turn = {
+            "native_turn_id": native_turn_id,
+            "recorded_at": recorded_at,
+            "completed_at": completed_at,
+            "user_text": user_text,
+            "assistant_excerpt": assistant_excerpt[:500],
+            "tool_use_audit": tool_use_audit,
+            "related_source_ids": related_source_ids,
+            "continuation_type": continuation_type,
+            "reused_previous_evidence": reused_previous_evidence,
+            "attachments": attachment_refs,
+            "promotion": None,
+        }
+        turns.append(turn)
+        index = len(turns) - 1
+    else:
+        turn = turns[index]
+    turn.update(
+        {
+            "native_turn_id": native_turn_id,
+            "recorded_at": recorded_at,
+            "completed_at": completed_at,
+            "user_text": user_text,
+            "assistant_excerpt": assistant_excerpt[:500],
+            "tool_use_audit": tool_use_audit,
+            "related_source_ids": related_source_ids,
+            "continuation_type": continuation_type,
+            "reused_previous_evidence": reused_previous_evidence,
+            "attachments": attachment_refs,
+            "question_class": profile["question_class"],
+            "question_domain": profile["question_domain"],
+            "inner_workflow_id": profile["inner_workflow_id"],
+            "support_strategy": profile["support_strategy"],
+            "analysis_origin": profile["analysis_origin"],
+            "route_reason": profile["route_reason"],
+            "semantic_analysis": dict(profile["semantic_analysis"]),
+            "inspection_scope": profile["inspection_scope"],
+            "preferred_channels": list(profile["preferred_channels"]),
+            "anomaly_flags": list(host_identity.get("anomaly_flags", [])),
+            "reconciliation": reconciliation,
+        }
+    )
+    ledger["turns"] = turns
+    ledger["updated_at"] = utc_now()
+    ledger["host_identity"] = dict(host_identity)
+    ledger["anomaly_flags"] = list(host_identity.get("anomaly_flags", []))
+    write_json(path, ledger)
+    return {
+        "ledger_id": ledger_id,
+        "ledger_path": str(path.relative_to(paths.root)),
+        "turn": dict(turn),
+    }
+
+
+def promote_native_ledger_turn(
+    paths: WorkspacePaths,
+    *,
+    ledger_id: str,
+    native_turn_id: str,
+    conversation_id: str,
+    turn_id: str,
+    promotion_kind: str,
+    promotion_reason: str,
+) -> dict[str, Any]:
+    """Promote one native ledger turn into an explicitly linked canonical turn."""
+    ledger_path = _native_ledger_path(paths, ledger_id)
+    ledger = read_json(ledger_path)
+    turns = ledger.get("turns", [])
+    if not isinstance(turns, list):
+        raise KeyError(native_turn_id)
+    promoted_turn: dict[str, Any] | None = None
+    for turn in turns:
+        if not isinstance(turn, dict) or turn.get("native_turn_id") != native_turn_id:
+            continue
+        turn["promotion"] = {
+            "promotion_kind": promotion_kind,
+            "promotion_reason": promotion_reason,
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            "promoted_at": utc_now(),
+        }
+        promoted_turn = turn
+        break
+    if promoted_turn is None:
+        raise KeyError(native_turn_id)
+    ledger["updated_at"] = utc_now()
+    write_json(ledger_path, ledger)
+    native_ledger_ref = {
+        "ledger_id": ledger_id,
+        "native_turn_id": native_turn_id,
+        "ledger_path": str(ledger_path.relative_to(paths.root)),
+    }
+    update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates={
+            "native_ledger_ref": native_ledger_ref,
+            "promotion_kind": promotion_kind,
+            "promotion_reason": promotion_reason,
+        },
+    )
+    return {
+        "ledger_id": ledger_id,
+        "native_turn_id": native_turn_id,
+        "native_ledger_ref": native_ledger_ref,
+        "promotion_kind": promotion_kind,
+        "promotion_reason": promotion_reason,
+    }
+def _resolved_host_identity(
+    *,
+    provider: str,
+    host_thread_ref: str,
+    argument_source: str,
+) -> dict[str, Any]:
+    host_identity = current_host_identity(agent_surface=provider)
+    normalized_ref = str(host_thread_ref).strip()
+    if not normalized_ref:
+        return dict(host_identity)
+    existing_ref = str(host_identity.get("host_thread_ref") or "").strip()
+    if not existing_ref:
+        host_identity["host_thread_ref"] = normalized_ref
+        host_identity["host_identity_source"] = argument_source
+        host_identity["host_identity_trust"] = "reconciliation-argument"
+        return host_identity
+    if existing_ref != normalized_ref:
+        anomaly_flags = list(host_identity.get("anomaly_flags", []))
+        anomaly_flags.extend(["anomalous-host-identity", "host-thread-ref-mismatch"])
+        host_identity["anomaly_flags"] = _deduplicate_strings(anomaly_flags)
+        host_identity["host_thread_ref"] = normalized_ref
+        host_identity["host_identity_source"] = argument_source
+        host_identity["host_identity_trust"] = "reconciliation-argument"
+    return host_identity
+
+
+def _reconcile_native_transcript(
+    paths: WorkspacePaths,
+    *,
+    provider: str,
+    host_thread_ref: str,
+    host_identity_source: str,
+    transcript: dict[str, Any],
+    reconciliation_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    host_identity = _resolved_host_identity(
+        provider=provider,
+        host_thread_ref=host_thread_ref,
+        argument_source=host_identity_source,
+    )
+    native_ledger_id = _native_ledger_id(host_identity)
+    canonical_conversation_id = bound_conversation_id_for_host(
+        paths,
+        host_identity=host_identity,
+    )
+    captured_interaction_ids: list[str] = []
+    previous_consulted_source_ids: list[str] = []
+
+    with workspace_lease(paths, f"native-ledger:{native_ledger_id}"):
         for turn_index, native_turn in enumerate(transcript.get("turns", []), start=1):
             if not isinstance(native_turn, dict):
                 continue
@@ -1189,53 +1409,8 @@ def reconcile_codex_thread(
             attachments = native_turn.get("attachments", [])
             if not user_text and not attachments:
                 continue
-            existing_index = find_turn_index(conversation, native_turn_id=native_turn_id)
-            if existing_index is None:
-                existing_index = find_turn_by_question(conversation, user_question=user_text)
-            if existing_index is None:
-                turn_id = _next_turn_id(conversation)
-                turn_record = base_turn_record(
-                    paths,
-                    conversation_id=resolved_thread_id,
-                    turn_id=turn_id,
-                    user_question=user_text,
-                    entry_workflow_id="ask",
-                )
-                turn_record["opened_at"] = native_turn.get("opened_at") or utc_now()
-                turns.append(turn_record)
-                existing_index = len(turns) - 1
-            turn_record = turns[existing_index]
-            turn_id = str(turn_record["turn_id"])
+
             audit = build_tool_use_audit(paths, native_turn.get("function_calls", []))
-            turn_semantic_analysis = (
-                turn_record.get("semantic_analysis")
-                if isinstance(turn_record.get("semantic_analysis"), dict)
-                else None
-            )
-            profile = question_execution_profile(
-                paths,
-                conversation_id=resolved_thread_id,
-                turn_id=turn_id,
-                question=user_text,
-                semantic_analysis=turn_semantic_analysis,
-                fallback_hints={
-                    "question_class": turn_record.get("question_class"),
-                    "question_domain": turn_record.get("question_domain"),
-                    "inner_workflow_id": turn_record.get("inner_workflow_id"),
-                    "bundle_paths": turn_record.get("bundle_paths"),
-                },
-            )
-            question_class = str(profile["question_class"])
-            question_domain = str(profile["question_domain"])
-            inferred_inner_workflow_id = str(profile["inner_workflow_id"])
-            support_strategy = str(profile["support_strategy"])
-            analysis_origin = str(profile["analysis_origin"])
-            evidence_requirements = dict(profile["evidence_requirements"])
-            preferred_channels = [
-                channel
-                for channel in evidence_requirements.get("preferred_channels", [])
-                if isinstance(channel, str)
-            ]
             continuation_type, reused_previous_evidence = classify_continuation_type(
                 turn_index=turn_index,
                 user_text=user_text,
@@ -1249,12 +1424,13 @@ def reconcile_codex_thread(
             stored_attachments = [
                 _store_attachment(
                     paths,
-                    interaction_id=f"interaction-{resolved_thread_id}-{native_turn_id}",
+                    interaction_id=f"interaction-{native_ledger_id}-{native_turn_id}",
                     attachment_index=index,
                     attachment=attachment,
                 )
                 for index, attachment in enumerate(
-                    attachments if isinstance(attachments, list) else [], start=1
+                    attachments if isinstance(attachments, list) else [],
+                    start=1,
                 )
                 if isinstance(attachment, dict)
             ]
@@ -1264,10 +1440,15 @@ def reconcile_codex_thread(
             final_assistant_text = str(
                 native_turn.get("assistant_final_text") or native_turn.get("assistant_text", "")
             )
+            profile = _native_profile(user_text)
             interaction_entry = _persist_interaction_entry(
                 paths,
-                conversation_id=resolved_thread_id,
-                turn_id=turn_id,
+                conversation_id=(
+                    canonical_conversation_id
+                    if isinstance(canonical_conversation_id, str) and canonical_conversation_id
+                    else native_ledger_id
+                ),
+                turn_id=native_turn_id,
                 native_turn_id=native_turn_id,
                 recorded_at=str(native_turn.get("opened_at") or utc_now()),
                 user_text=user_text,
@@ -1276,142 +1457,96 @@ def reconcile_codex_thread(
                 continuation_type=continuation_type,
                 related_source_ids=related_source_ids,
                 tool_use_audit=audit,
-                question_class=question_class,
-                question_domain=question_domain,
-                support_strategy=support_strategy,
-                analysis_origin=analysis_origin,
-                support_basis=turn_record.get("support_basis")
-                if isinstance(turn_record.get("support_basis"), str)
-                else None,
-                support_manifest_path=turn_record.get("support_manifest_path")
-                if isinstance(turn_record.get("support_manifest_path"), str)
-                else None,
-                semantic_analysis=turn_record.get("semantic_analysis")
-                if isinstance(turn_record.get("semantic_analysis"), dict)
-                else dict(profile["semantic_analysis"]),
+                question_class=profile["question_class"],
+                question_domain=profile["question_domain"],
+                support_strategy=profile["support_strategy"],
+                analysis_origin=profile["analysis_origin"],
+                semantic_analysis=profile["semantic_analysis"],
             )
             captured_interaction_ids.append(str(interaction_entry["interaction_id"]))
-            run_payload = ensure_run_for_turn(
+            _upsert_native_ledger_turn(
                 paths,
-                conversation_id=resolved_thread_id,
-                turn_id=turn_id,
-                user_question=user_text,
-                entry_workflow_id="ask",
-                run_origin=RUN_ORIGIN_NATIVE_RECONCILIATION,
-            )
-            answer_file_reference = _write_answer_file_if_missing(
-                paths,
-                conversation_id=resolved_thread_id,
-                turn_id=turn_id,
-                assistant_text=final_assistant_text,
-            )
-            preserve_turn_state = _preserve_reconciled_turn_state(turn_record)
-            existing_inner_workflow_id = str(turn_record.get("inner_workflow_id") or "")
-            repaired_inner_workflow_id = existing_inner_workflow_id
-            if existing_inner_workflow_id in {"", "grounded-answer"}:
-                repaired_inner_workflow_id = inferred_inner_workflow_id
-            turn_record.update(
-                {
-                    "native_turn_id": native_turn_id,
-                    "active_run_id": run_payload["run_id"],
-                    "opened_at": native_turn.get("opened_at") or turn_record.get("opened_at"),
-                    "completed_at": native_turn.get("completed_at")
-                    or turn_record.get("completed_at"),
-                    "updated_at": utc_now(),
-                    "user_question": user_text,
-                    "entry_workflow_id": "ask",
-                    "inner_workflow_id": repaired_inner_workflow_id,
-                    "question_class": question_class,
-                    "question_domain": question_domain,
-                    "analysis_origin": analysis_origin,
-                    "semantic_analysis": dict(profile["semantic_analysis"]),
-                    "evidence_mode": str(profile["evidence_mode"]),
-                    "support_strategy": support_strategy,
-                    "inspection_scope": str(evidence_requirements.get("inspection_scope")),
-                    "preferred_channels": preferred_channels,
-                    "response_excerpt": (
-                        turn_record.get("response_excerpt")
-                        if preserve_turn_state
-                        else (final_assistant_text[:500] or turn_record.get("response_excerpt"))
-                    ),
-                    "answer_file_path": answer_file_reference,
-                    "status": (
-                        turn_record.get("status")
-                        if preserve_turn_state
-                        else ("answered" if final_assistant_text.strip() else "completed")
-                    ),
-                    "turn_state": (
-                        turn_record.get("turn_state")
-                        if preserve_turn_state
-                        else "reconciled"
-                    ),
-                    "front_door_state": stronger_front_door_state(
-                        turn_record.get("front_door_state"),
-                        FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY,
-                    ),
-                    "front_door_opened_at": (
-                        turn_record.get("front_door_opened_at")
-                        if turn_has_canonical_ask_ownership(turn_record)
-                        else None
-                    ),
-                    "front_door_run_id": (
-                        turn_record.get("front_door_run_id")
-                        if turn_has_canonical_ask_ownership(turn_record)
-                        else None
-                    ),
-                    "continuation_type": continuation_type,
-                    "reused_previous_evidence": reused_previous_evidence,
-                    "new_retrieval_executed": "docmason retrieve"
-                    in audit.get("docmason_commands", []),
-                    "new_trace_executed": "docmason trace" in audit.get("docmason_commands", []),
-                    "source_escalation_used": bool(
-                        audit.get("direct_knowledge_base_access")
-                        or audit.get("direct_original_doc_access")
-                        or audit.get("render_inspection_used")
-                    ),
-                    "research_depth": str(profile["research_depth"]),
-                    "bundle_paths": profile["bundle_paths"],
-                    "captured_interaction_ids": [interaction_entry["interaction_id"]],
-                    "attachments": stored_attachments,
-                    "tool_use_audit": audit,
-                    "reconciliation": {
-                        "provider": "codex",
-                        "status": "reconciled",
-                        "reconciled_at": utc_now(),
-                        "rollout_path": transcript.get("rollout_path"),
-                    },
-                }
+                host_identity=host_identity,
+                native_turn_id=native_turn_id,
+                user_text=user_text,
+                assistant_excerpt=final_assistant_text,
+                recorded_at=str(native_turn.get("opened_at") or utc_now()),
+                completed_at=(
+                    str(native_turn.get("completed_at"))
+                    if isinstance(native_turn.get("completed_at"), str)
+                    else None
+                ),
+                tool_use_audit=audit,
+                related_source_ids=related_source_ids,
+                continuation_type=continuation_type,
+                reused_previous_evidence=reused_previous_evidence,
+                profile=profile,
+                attachment_refs=stored_attachments,
+                reconciliation={
+                    **reconciliation_metadata,
+                    "provider": provider,
+                    "status": "reconciled",
+                    "reconciled_at": utc_now(),
+                },
             )
 
-        conversation["updated_at"] = utc_now()
-        conversation["workspace_snapshot"] = workspace_snapshot(paths)
-        write_json(paths.conversations_dir / f"{resolved_thread_id}.json", conversation)
         write_json(
-            paths.active_conversation_path,
+            paths.interaction_reconciliation_state_path,
             {
-                "conversation_id": resolved_thread_id,
-                "agent_surface": "codex",
-                "updated_at": utc_now(),
+                "last_reconciled_at": utc_now(),
+                "last_host_provider": provider,
+                "last_host_thread_ref": host_thread_ref,
+                "last_ledger_id": native_ledger_id,
+                "captured_interaction_ids": captured_interaction_ids,
+                "turn_count": len(transcript.get("turns", [])),
             },
         )
-    write_json(
-        paths.interaction_reconciliation_state_path,
-        {
-            "last_reconciled_at": utc_now(),
-            "last_thread_id": resolved_thread_id,
-            "captured_interaction_ids": captured_interaction_ids,
-            "turn_count": len(transcript.get("turns", [])),
-        },
-    )
-    overlay_manifest = refresh_interaction_overlay(paths)
-    refresh_runtime_projections(paths)
+        overlay_manifest = refresh_interaction_overlay(paths)
+        refresh_runtime_projections(paths)
     return {
         "status": "reconciled",
-        "conversation_id": resolved_thread_id,
+        "native_ledger_id": native_ledger_id,
+        "native_ledger_path": str(_native_ledger_path(paths, native_ledger_id).relative_to(paths.root)),
+        "canonical_conversation_id": canonical_conversation_id,
         "captured_interaction_ids": captured_interaction_ids,
         "turn_count": len(transcript.get("turns", [])),
         "pending_overlay": overlay_manifest,
+        "host_identity": host_identity,
     }
+
+
+def reconcile_codex_thread(
+    paths: WorkspacePaths,
+    *,
+    thread_id: str | None = None,
+) -> dict[str, Any]:
+    """Reconcile a native Codex thread into the native ledger and interaction ingest."""
+    refresh_generated_connector_manifests(paths)
+    resolved_thread_id = thread_id or os.environ.get("CODEX_THREAD_ID")
+    if not isinstance(resolved_thread_id, str) or not resolved_thread_id:
+        return {"status": "not-available", "detail": "No native Codex thread id is available."}
+    transcript = load_codex_transcript(resolved_thread_id)
+    transcript_cwd = transcript.get("cwd")
+    if isinstance(transcript_cwd, str) and transcript_cwd:
+        try:
+            if Path(transcript_cwd).resolve() != paths.root.resolve():
+                return {
+                    "status": "ignored",
+                    "detail": "Native thread cwd does not match the current workspace root.",
+                    "native_ledger_id": None,
+                }
+        except OSError:
+            pass
+    return _reconcile_native_transcript(
+        paths,
+        provider="codex",
+        host_thread_ref=resolved_thread_id,
+        host_identity_source="codex_thread_id",
+        transcript=transcript,
+        reconciliation_metadata={
+            "rollout_path": transcript.get("rollout_path"),
+        },
+    )
 
 
 def maybe_reconcile_active_codex_thread(paths: WorkspacePaths) -> dict[str, Any] | None:
@@ -1430,15 +1565,10 @@ def reconcile_claude_code_thread(
     *,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Reconcile a Claude Code hook-mirror session into conversations and interaction ingest.
+    """Reconcile a Claude Code hook-mirror session into native ledger and interaction ingest.
 
-    Follows the same pipeline as :func:`reconcile_codex_thread` but reads from
-    the hook-mirror JSONL written by the Claude Code hooks, optionally enriched
-    by the native Claude Code transcript when ``transcript_path`` was captured.
-
-    Attachments and screenshots are recorded as empty placeholders because the
-    Claude Code hook API does not expose them.  The ``fidelity`` metadata block
-    in the resulting conversation marks these degradations explicitly.
+    Reads from the hook-mirror JSONL written by the Claude Code hooks, optionally
+    enriched by the native Claude Code transcript when ``transcript_path`` was captured.
     """
     refresh_generated_connector_manifests(paths)
 
@@ -1463,266 +1593,26 @@ def reconcile_claude_code_thread(
                 return {
                     "status": "ignored",
                     "detail": "Hook-mirror session cwd does not match the current workspace root.",
-                    "conversation_id": resolved_session_id,
+                    "native_ledger_id": None,
                 }
         except OSError:
             pass
-
-    with workspace_lease(paths, f"conversation:{resolved_session_id}"):
-        conversation = ensure_conversation_record(
-            paths,
-            conversation_id=resolved_session_id,
-            conversation_id_source="claude_code_session_id",
-            agent_surface="claude-code",
-        )
-        turns = conversation.get("turns", [])
-        if not isinstance(turns, list):
-            turns = []
-            conversation["turns"] = turns
-
-        captured_interaction_ids: list[str] = []
-        previous_consulted_source_ids: list[str] = []
-
-        for turn_index, native_turn in enumerate(transcript.get("turns", []), start=1):
-            if not isinstance(native_turn, dict):
-                continue
-            native_turn_id = native_turn.get("native_turn_id")
-            if not isinstance(native_turn_id, str) or not native_turn_id:
-                continue
-            user_text = str(native_turn.get("user_text", "")).strip()
-            # Claude Code hooks do not expose attachments; record empty list.
-            attachments: list[dict[str, Any]] = []
-            if not user_text:
-                continue
-
-            existing_index = find_turn_index(conversation, native_turn_id=native_turn_id)
-            if existing_index is None:
-                existing_index = find_turn_by_question(conversation, user_question=user_text)
-            if existing_index is None:
-                turn_id = _next_turn_id(conversation)
-                turn_record = base_turn_record(
-                    paths,
-                    conversation_id=resolved_session_id,
-                    turn_id=turn_id,
-                    user_question=user_text,
-                    entry_workflow_id="ask",
-                )
-                turn_record["opened_at"] = native_turn.get("opened_at") or utc_now()
-                turns.append(turn_record)
-                existing_index = len(turns) - 1
-
-            turn_record = turns[existing_index]
-            turn_id = str(turn_record["turn_id"])
-
-            audit = build_tool_use_audit(paths, native_turn.get("function_calls", []))
-
-            turn_semantic_analysis = (
-                turn_record.get("semantic_analysis")
-                if isinstance(turn_record.get("semantic_analysis"), dict)
-                else None
-            )
-            profile = question_execution_profile(
-                paths,
-                conversation_id=resolved_session_id,
-                turn_id=turn_id,
-                question=user_text,
-                semantic_analysis=turn_semantic_analysis,
-                fallback_hints={
-                    "question_class": turn_record.get("question_class"),
-                    "question_domain": turn_record.get("question_domain"),
-                    "inner_workflow_id": turn_record.get("inner_workflow_id"),
-                    "bundle_paths": turn_record.get("bundle_paths"),
-                },
-            )
-
-            question_class = str(profile["question_class"])
-            question_domain = str(profile["question_domain"])
-            inferred_inner_workflow_id = str(profile["inner_workflow_id"])
-            support_strategy = str(profile["support_strategy"])
-            analysis_origin = str(profile["analysis_origin"])
-            evidence_requirements = dict(profile["evidence_requirements"])
-            preferred_channels = [
-                channel
-                for channel in evidence_requirements.get("preferred_channels", [])
-                if isinstance(channel, str)
-            ]
-
-            continuation_type, reused_previous_evidence = classify_continuation_type(
-                turn_index=turn_index,
-                user_text=user_text,
-                attachments=attachments,
-                audit=audit,
-                previous_consulted_source_ids=previous_consulted_source_ids,
-            )
-            previous_consulted_source_ids = (
-                audit.get("consulted_source_ids", []) or previous_consulted_source_ids
-            )
-
-            # No stored attachments — Claude Code hooks do not expose them.
-            stored_attachments: list[dict[str, Any]] = []
-
-            related_source_ids = _deduplicate_strings(
-                list(audit.get("consulted_source_ids", [])) or previous_consulted_source_ids
-            )
-
-            final_assistant_text = str(
-                native_turn.get("assistant_final_text") or native_turn.get("assistant_text", "")
-            )
-
-            interaction_entry = _persist_interaction_entry(
-                paths,
-                conversation_id=resolved_session_id,
-                turn_id=turn_id,
-                native_turn_id=native_turn_id,
-                recorded_at=str(native_turn.get("opened_at") or utc_now()),
-                user_text=user_text,
-                assistant_excerpt=final_assistant_text,
-                attachment_refs=stored_attachments,
-                continuation_type=continuation_type,
-                related_source_ids=related_source_ids,
-                tool_use_audit=audit,
-                question_class=question_class,
-                question_domain=question_domain,
-                support_strategy=support_strategy,
-                analysis_origin=analysis_origin,
-                support_basis=turn_record.get("support_basis")
-                if isinstance(turn_record.get("support_basis"), str)
-                else None,
-                support_manifest_path=turn_record.get("support_manifest_path")
-                if isinstance(turn_record.get("support_manifest_path"), str)
-                else None,
-                semantic_analysis=turn_record.get("semantic_analysis")
-                if isinstance(turn_record.get("semantic_analysis"), dict)
-                else dict(profile["semantic_analysis"]),
-            )
-            captured_interaction_ids.append(str(interaction_entry["interaction_id"]))
-            run_payload = ensure_run_for_turn(
-                paths,
-                conversation_id=resolved_session_id,
-                turn_id=turn_id,
-                user_question=user_text,
-                entry_workflow_id="ask",
-                run_origin=RUN_ORIGIN_NATIVE_RECONCILIATION,
-            )
-
-            answer_file_reference = _write_answer_file_if_missing(
-                paths,
-                conversation_id=resolved_session_id,
-                turn_id=turn_id,
-                assistant_text=final_assistant_text,
-            )
-            preserve_turn_state = _preserve_reconciled_turn_state(turn_record)
-
-            existing_inner_workflow_id = str(turn_record.get("inner_workflow_id") or "")
-            repaired_inner_workflow_id = existing_inner_workflow_id
-            if existing_inner_workflow_id in {"", "grounded-answer"}:
-                repaired_inner_workflow_id = inferred_inner_workflow_id
-
-            fidelity = transcript.get("fidelity", {})
-            turn_record.update(
-                {
-                    "native_turn_id": native_turn_id,
-                    "active_run_id": run_payload["run_id"],
-                    "opened_at": native_turn.get("opened_at") or turn_record.get("opened_at"),
-                    "completed_at": native_turn.get("completed_at")
-                    or turn_record.get("completed_at"),
-                    "updated_at": utc_now(),
-                    "user_question": user_text,
-                    "entry_workflow_id": "ask",
-                    "inner_workflow_id": repaired_inner_workflow_id,
-                    "question_class": question_class,
-                    "question_domain": question_domain,
-                    "analysis_origin": analysis_origin,
-                    "semantic_analysis": dict(profile["semantic_analysis"]),
-                    "evidence_mode": str(profile["evidence_mode"]),
-                    "support_strategy": support_strategy,
-                    "inspection_scope": str(evidence_requirements.get("inspection_scope")),
-                    "preferred_channels": preferred_channels,
-                    "response_excerpt": (
-                        turn_record.get("response_excerpt")
-                        if preserve_turn_state
-                        else (final_assistant_text[:500] or turn_record.get("response_excerpt"))
-                    ),
-                    "answer_file_path": answer_file_reference,
-                    "status": (
-                        turn_record.get("status")
-                        if preserve_turn_state
-                        else ("answered" if final_assistant_text.strip() else "completed")
-                    ),
-                    "turn_state": (
-                        turn_record.get("turn_state")
-                        if preserve_turn_state
-                        else "reconciled"
-                    ),
-                    "front_door_state": stronger_front_door_state(
-                        turn_record.get("front_door_state"),
-                        FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY,
-                    ),
-                    "front_door_opened_at": (
-                        turn_record.get("front_door_opened_at")
-                        if turn_has_canonical_ask_ownership(turn_record)
-                        else None
-                    ),
-                    "front_door_run_id": (
-                        turn_record.get("front_door_run_id")
-                        if turn_has_canonical_ask_ownership(turn_record)
-                        else None
-                    ),
-                    "continuation_type": continuation_type,
-                    "reused_previous_evidence": reused_previous_evidence,
-                    "new_retrieval_executed": "docmason retrieve"
-                    in audit.get("docmason_commands", []),
-                    "new_trace_executed": "docmason trace" in audit.get("docmason_commands", []),
-                    "source_escalation_used": bool(
-                        audit.get("direct_knowledge_base_access")
-                        or audit.get("direct_original_doc_access")
-                        or audit.get("render_inspection_used")
-                    ),
-                    "research_depth": str(profile["research_depth"]),
-                    "bundle_paths": profile["bundle_paths"],
-                    "captured_interaction_ids": [interaction_entry["interaction_id"]],
-                    "attachments": stored_attachments,
-                    "tool_use_audit": audit,
-                    "reconciliation": {
-                        "provider": "claude-code",
-                        "status": "reconciled",
-                        "reconciled_at": utc_now(),
-                        "capture_method": fidelity.get("capture_method", "hook-mirror"),
-                        "has_attachments": fidelity.get("has_attachments", False),
-                        "has_mid_turn_messages": fidelity.get("has_mid_turn_messages", False),
-                    },
-                }
-            )
-
-        conversation["updated_at"] = utc_now()
-        conversation["workspace_snapshot"] = workspace_snapshot(paths)
-        write_json(paths.conversations_dir / f"{resolved_session_id}.json", conversation)
-        write_json(
-            paths.active_conversation_path,
-            {
-                "conversation_id": resolved_session_id,
-                "agent_surface": "claude-code",
-                "updated_at": utc_now(),
-            },
-        )
-    write_json(
-        paths.interaction_reconciliation_state_path,
-        {
-            "last_reconciled_at": utc_now(),
-            "last_thread_id": resolved_session_id,
-            "captured_interaction_ids": captured_interaction_ids,
-            "turn_count": len(transcript.get("turns", [])),
+    fidelity = transcript.get("fidelity", {})
+    return _reconcile_native_transcript(
+        paths,
+        provider="claude-code",
+        host_thread_ref=resolved_session_id,
+        host_identity_source="claude_code_session_id",
+        transcript=transcript,
+        reconciliation_metadata={
+            "capture_method": fidelity.get("capture_method", "hook-mirror"),
+            "attachments_captured": fidelity.get(
+                "attachments_captured",
+                fidelity.get("has_attachments", False),
+            ),
+            "has_mid_turn_messages": fidelity.get("has_mid_turn_messages", False),
         },
     )
-    overlay_manifest = refresh_interaction_overlay(paths)
-    refresh_runtime_projections(paths)
-    return {
-        "status": "reconciled",
-        "conversation_id": resolved_session_id,
-        "captured_interaction_ids": captured_interaction_ids,
-        "turn_count": len(transcript.get("turns", [])),
-        "pending_overlay": overlay_manifest,
-    }
 
 
 def maybe_reconcile_active_claude_code_thread(

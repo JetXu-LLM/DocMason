@@ -31,6 +31,7 @@ from docmason.hybrid import (
 )
 from docmason.knowledge import (
     _ThirdPartyDiagnosticCapture,
+    build_single_source_artifacts,
     build_docx_source,
     build_pptx_source,
     build_xlsx_source,
@@ -581,6 +582,50 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertEqual(report.exit_code, 1)
         self.assertEqual(report.payload["status"], ACTION_REQUIRED)
         self.assertEqual(report.payload["sync_status"], "action-required")
+
+    def test_build_single_source_artifacts_routes_legacy_office_by_document_type(self) -> None:
+        workspace = self.make_workspace()
+        source_dir = workspace.knowledge_base_staging_dir / "sources" / "source-legacy"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        cases = [
+            ("legacy-deck.ppt", "pptx", "build_pptx_source"),
+            ("legacy-doc.doc", "docx", "build_docx_source"),
+            ("legacy-sheet.xls", "xlsx", "build_xlsx_source"),
+        ]
+
+        for filename, document_type, builder_name in cases:
+            with self.subTest(filename=filename, document_type=document_type):
+                source_path = workspace.source_dir / filename
+                source_path.write_bytes(b"legacy")
+                source_entry = {
+                    "source_id": f"source-{document_type}",
+                    "source_fingerprint": f"fingerprint-{document_type}",
+                    "current_path": f"original_doc/{filename}",
+                    "prior_paths": [],
+                    "document_type": document_type,
+                    "source_extension": source_path.suffix.lstrip("."),
+                    "first_seen_at": "2026-03-26T00:00:00Z",
+                    "last_seen_at": "2026-03-26T00:00:00Z",
+                    "identity_confidence": "new",
+                }
+                sentinel_manifest = {"document_type": document_type}
+                sentinel_evidence = {"document_type": document_type, "units": []}
+                builder_path = f"docmason.knowledge.{builder_name}"
+
+                with mock.patch(
+                    builder_path,
+                    return_value=(sentinel_manifest, sentinel_evidence),
+                ) as builder:
+                    manifest, evidence = build_single_source_artifacts(
+                        workspace,
+                        source_entry,
+                        source_dir,
+                        office_binary="soffice",
+                    )
+
+                builder.assert_called_once()
+                self.assertEqual(manifest, sentinel_manifest)
+                self.assertEqual(evidence, sentinel_evidence)
 
     def test_hidden_pptx_slides_do_not_consume_visible_render_slots(self) -> None:
         workspace = self.make_workspace()

@@ -1,7 +1,7 @@
 <div align="center">
   <h1>DocMason</h1>
   <p><strong>The repo is the app. Codex is the runtime.</strong></p>
-  <p>Turn private work files into a local, evidence-first knowledge base your AI agent can actually use.</p>
+  <p>Turn private work files into a local, evidence-first knowledge base for AI-assisted deep research.</p>
   <p>
     <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black">
     <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue">
@@ -17,7 +17,7 @@ DocMason is for people who need more than keyword search:
 - trace claims back to provenance
 - keep the workflow local, file-first, and auditable
 
-The native reference workflow is Codex on macOS.
+The current native reference workflow is Codex on macOS.
 Claude Code and GitHub Copilot also receive quiet repository-native compatibility adaptations, so users can open the same repo, follow the same bootstrap and sync path, and start working without a separate adapter ritual.
 
 The current repository also supports a narrower but important extension beyond pure factual QA:

@@ -61,7 +61,7 @@ If the agent cannot run local commands or inspect the published file-only knowle
 - If render references or low-confidence extraction suggest visual confirmation is required, escalate to render inspection or provenance trace before final synthesis.
 - If the retrieval result already shows that the preferred published evidence channels are sufficient, do not jump back to `original_doc/` as a first move.
 - If the retrieval result says published artifacts are insufficient because of hard-artifact semantic gaps, prefer the workflow-level hybrid enrichment path before source-level fallback.
-- If `recommended_hybrid_targets` is non-empty, use that packet as the narrowed Lane C starting point rather than inventing your own source or artifact subset.
+- If `recommended_hybrid_targets` is non-empty, use that packet as the narrowed governed multimodal refresh starting point rather than inventing your own source or artifact subset.
 - If a soft document alias is present but richer artifact-bearing evidence ranks elsewhere, do not assume the alias should hard-filter the query. Check the `reference_resolution` notice and the actual ranked artifacts together.
 - Retrieval alone is not the grounded-answer contract. Do not present retrieval output as a fully supported final answer.
 - Public `retrieve` now does implicit source-reference parsing, but public `trace` still remains ID-first in this phase.

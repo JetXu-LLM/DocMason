@@ -39,8 +39,9 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - return in the user's language unless they ask for another language
 2. Use the repository helpers in `docmason.ask`, `docmason.front_controller`, and `docmason.conversation` to:
    - reconcile any active native thread
+   - keep native reconciliation in the native ledger and interaction-ingest path by default
    - open or reuse the canonical turn
-   - upgrade that live turn into canonical ask ownership when reconciliation created it first
+   - keep canonical ask truth separate from native-ledger audit truth unless an explicit bridge or promotion is required
    - obtain the canonical answer-file path or composition bundle path
    - pass an agent-authored `semantic_analysis`
    - preserve flat semantic fields such as `question_class`, `question_domain`, `support_strategy`, and `analysis_origin`
@@ -108,6 +109,8 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 
 - `ask` is the user-facing top-level workflow surface.
 - A reconciled native turn is not yet a legal canonical ask turn until runtime ownership is opened explicitly.
+- Native reconciliation does not write canonical conversation truth by default; it lands in native ledger and interaction-ingest first.
+- Canonical ask may later link to native-ledger evidence through explicit promotion or bridge metadata when the governed path requires it.
 - `grounded-answer` and `grounded-composition` remain inner specialist workflows.
 - Tracked repo search, live corpus discovery, knowledge-base artifact discovery, and runtime
   artifact discovery are different surfaces; do not substitute one for another silently.

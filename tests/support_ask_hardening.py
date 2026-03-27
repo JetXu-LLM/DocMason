@@ -100,6 +100,14 @@ class AskHardeningTests(unittest.TestCase):
             prepared_at="2026-03-17T00:00:00Z",
         )
 
+    def load_conversation(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        conversation_id: str,
+    ) -> dict[str, object]:
+        return read_json(workspace.conversations_dir / f"{conversation_id}.json")
+
     def create_pdf(self, path: Path, *, page_count: int = 1) -> None:
         from pypdf import PdfWriter
 
@@ -573,7 +581,10 @@ class AskHardeningTests(unittest.TestCase):
                 "trace_ids": [trace["trace_id"]],
             },
         )
-        live_turn = read_json(workspace.conversations_dir / "thread-hybrid-state.json")["turns"][0]
+        live_turn = self.load_conversation(
+            workspace,
+            conversation_id=turn["conversation_id"],
+        )["turns"][0]
         snapshot_id = live_turn["version_context"]["published_snapshot_id"]
         lane_c_source_id = source_ids[0]
         lane_c_job = ensure_shared_job(
@@ -627,6 +638,7 @@ class AskHardeningTests(unittest.TestCase):
             1,
         )
         self.assertEqual(completed["session_ids"], [trace["session_id"]])
+        self.assertIsNone(completed["freshness_notice"])
 
     def test_trace_answer_file_persists_version_context(self) -> None:
         workspace = self.make_workspace()
@@ -656,7 +668,10 @@ class AskHardeningTests(unittest.TestCase):
             top=2,
             log_context=turn["log_context"],
         )
-        live_turn = read_json(workspace.conversations_dir / "thread-version-trace.json")["turns"][0]
+        live_turn = self.load_conversation(
+            workspace,
+            conversation_id=turn["conversation_id"],
+        )["turns"][0]
         query_session = read_json(workspace.query_sessions_dir / f"{trace['session_id']}.json")
         self.assertEqual(
             trace["version_context"]["published_snapshot_id"],
@@ -850,9 +865,15 @@ class AskHardeningTests(unittest.TestCase):
             manifest["attached_run_ids"],
             [first_turn["run_id"], second_turn["run_id"]],
         )
-        owner_turn = read_json(workspace.conversations_dir / "thread-lane-c-1.json")["turns"][0]
+        owner_turn = self.load_conversation(
+            workspace,
+            conversation_id=first_turn["conversation_id"],
+        )["turns"][0]
         self.assertEqual(owner_turn["status"], "waiting-shared-job")
-        waiting_turn = read_json(workspace.conversations_dir / "thread-lane-c-2.json")["turns"][0]
+        waiting_turn = self.load_conversation(
+            workspace,
+            conversation_id=second_turn["conversation_id"],
+        )["turns"][0]
         self.assertEqual(waiting_turn["status"], "waiting-shared-job")
         settled = settle_lane_c_shared_refresh(
             workspace,
@@ -868,11 +889,14 @@ class AskHardeningTests(unittest.TestCase):
         }
         self.assertEqual(covered_turns[first_turn["turn_id"]]["status"], "prepared")
         self.assertEqual(covered_turns[second_turn["turn_id"]]["status"], "prepared")
-        second_live_turn = read_json(workspace.conversations_dir / "thread-lane-c-2.json")["turns"][0]
+        second_live_turn = self.load_conversation(
+            workspace,
+            conversation_id=second_turn["conversation_id"],
+        )["turns"][0]
         self.assertEqual(second_live_turn["status"], "prepared")
         self.assertEqual(
             second_live_turn["freshness_notice"],
-            "Lane C settled. Reretrieve and retrace before committing the answer.",
+            "The governed multimodal refresh finished. Rerun retrieval and trace before committing the answer.",
         )
 
     def test_settle_lane_c_shared_refresh_blocked_commits_boundary_for_waiters(self) -> None:
@@ -1010,7 +1034,9 @@ class AskHardeningTests(unittest.TestCase):
             session_ids=[trace["session_id"]],
             trace_ids=[trace["trace_id"]],
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="The scanned workflow page needs governed Lane C before a final answer.",
+            response_excerpt=(
+                "The scanned workflow page needs a governed multimodal refresh before a final answer."
+            ),
             status="answered",
         )
         self.assertEqual(transitioned["status"], "waiting-shared-job")
@@ -1022,7 +1048,10 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(lane_c_job["job_family"], "lane-c")
         self.assertEqual(lane_c_job["status"], "running")
         self.assertEqual(
-            read_json(workspace.conversations_dir / "thread-lane-c-mainline.json")["turns"][0]["status"],
+            self.load_conversation(
+                workspace,
+                conversation_id=turn["conversation_id"],
+            )["turns"][0]["status"],
             "waiting-shared-job",
         )
         self.assertFalse((workspace.runs_dir / turn["run_id"] / "commit.json").exists())
@@ -1166,7 +1195,10 @@ class AskHardeningTests(unittest.TestCase):
 
         self.assertEqual(first["conversation_id"], second["conversation_id"])
         self.assertEqual(first["turn_id"], second["turn_id"])
-        conversation = read_json(workspace.conversations_dir / "thread-reuse.json")
+        conversation = self.load_conversation(
+            workspace,
+            conversation_id=first["conversation_id"],
+        )
         self.assertEqual(len(conversation["turns"]), 1)
 
     def test_prepare_ask_turn_surfaces_shared_sync_confirmation_state(self) -> None:
@@ -1217,7 +1249,10 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(turn["status"], "awaiting-confirmation")
         self.assertEqual(turn["confirmation_kind"], "material-sync")
         self.assertEqual(turn["attached_shared_job_ids"], ["job-sync-001"])
-        conversation = read_json(workspace.conversations_dir / "thread-sync-confirm.json")
+        conversation = self.load_conversation(
+            workspace,
+            conversation_id=turn["conversation_id"],
+        )
         self.assertEqual(conversation["turns"][0]["turn_state"], "awaiting-confirmation")
         self.assertEqual(
             conversation["turns"][0]["attached_shared_job_ids"],
@@ -1338,15 +1373,19 @@ class AskHardeningTests(unittest.TestCase):
                     "confirmation_reason": job["confirmation_reason"],
                 },
             )
-            with mock.patch(
-                "docmason.ask.prepare_workspace",
-                return_value=CommandReport(
-                    0,
-                    {"status": READY, "prepare_status": READY, "control_plane": {}},
-                    [],
+            with (
+                mock.patch(
+                    "docmason.ask.prepare_workspace",
+                    return_value=CommandReport(
+                        0,
+                        {"status": READY, "prepare_status": READY, "control_plane": {}},
+                        [],
+                    ),
                 ),
+                mock.patch("docmason.ask.maybe_reconcile_active_thread") as reconcile_mock,
             ):
                 resumed = prepare_ask_turn(workspace, question="yes")
+                reconcile_mock.assert_not_called()
 
         self.assertEqual(resumed["conversation_id"], turn["conversation_id"])
         self.assertEqual(resumed["turn_id"], turn["turn_id"])
@@ -1418,6 +1457,113 @@ class AskHardeningTests(unittest.TestCase):
 
         self.assertEqual(turn["conversation_id"], legacy_conversation_id)
         self.assertTrue((workspace.conversations_dir / f"{legacy_conversation_id}.json").exists())
+
+    def test_legacy_native_only_host_conversation_is_not_rebound_as_canonical_truth(self) -> None:
+        workspace = self.make_workspace()
+        legacy_thread_id = "thread-legacy-native-only"
+        write_json(
+            workspace.conversations_dir / f"{legacy_thread_id}.json",
+            {
+                "conversation_id": legacy_thread_id,
+                "conversation_id_source": "codex_thread_id",
+                "agent_surface": "codex",
+                "opened_at": "2026-03-24T00:00:00Z",
+                "updated_at": "2026-03-24T00:00:00Z",
+                "workspace_snapshot": {},
+                "turns": [
+                    {
+                        "turn_id": "turn-001",
+                        "native_turn_id": "native-turn-001",
+                        "user_question": "Legacy native-only prompt",
+                        "entry_workflow_id": "ask",
+                        "front_door_state": "native-reconciled-only",
+                        "status": "completed",
+                        "turn_state": "completed",
+                        "updated_at": "2026-03-24T00:00:00Z",
+                    }
+                ],
+            },
+        )
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": legacy_thread_id}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="external-factual",
+                ),
+            )
+
+        self.assertNotEqual(turn["conversation_id"], legacy_thread_id)
+        current_conversation = self.load_conversation(
+            workspace,
+            conversation_id=turn["conversation_id"],
+        )
+        self.assertEqual(current_conversation["turns"][0]["front_door_state"], "canonical-ask")
+        legacy_conversation = self.load_conversation(
+            workspace,
+            conversation_id=legacy_thread_id,
+        )
+        self.assertEqual(legacy_conversation["turns"][0]["front_door_state"], "native-reconciled-only")
+
+    def test_claude_project_dir_weak_identity_upgrades_to_session_binding_without_split(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        weak_env = {
+            "DOCMASON_AGENT_SURFACE": "claude-code",
+            "CODEX_THREAD_ID": "",
+            "CLAUDE_PROJECT_DIR": str(workspace.root),
+            "CLAUDE_SESSION_ID": "",
+            "CLAUDE_CONVERSATION_ID": "",
+        }
+        with mock.patch.dict(os.environ, weak_env, clear=False):
+            weak_turn = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="external-factual",
+                ),
+            )
+
+        weak_conversation = self.load_conversation(
+            workspace,
+            conversation_id=weak_turn["conversation_id"],
+        )
+        self.assertEqual(
+            weak_conversation["host_identity"]["host_identity_source"],
+            "claude_project_dir",
+        )
+        self.assertIsNone(weak_conversation["host_identity_key"])
+
+        strong_env = {
+            **weak_env,
+            "CLAUDE_SESSION_ID": "session-1",
+        }
+        with mock.patch.dict(os.environ, strong_env, clear=False):
+            strong_turn = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="external-factual",
+                ),
+            )
+
+        self.assertEqual(strong_turn["conversation_id"], weak_turn["conversation_id"])
+        self.assertEqual(strong_turn["turn_id"], weak_turn["turn_id"])
+        upgraded_conversation = self.load_conversation(
+            workspace,
+            conversation_id=strong_turn["conversation_id"],
+        )
+        self.assertEqual(
+            upgraded_conversation["host_identity"]["host_identity_source"],
+            "claude_session_id",
+        )
+        self.assertIsInstance(upgraded_conversation["host_identity_key"], str)
+        bindings = read_json(workspace.host_identity_bindings_path)
+        self.assertEqual(len(bindings["bindings"]), 1)
 
     def test_external_support_manifest_drives_trace_and_history_without_answer_cache(self) -> None:
         workspace = self.make_workspace()

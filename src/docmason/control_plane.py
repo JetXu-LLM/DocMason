@@ -163,20 +163,31 @@ def strong_source_fingerprint_signature(active_sources: list[dict[str, Any]]) ->
     for source in active_sources:
         if not isinstance(source, dict):
             continue
-        source_id = source.get("source_id")
         fingerprint = source.get("source_fingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
             continue
+        current_path = str(source.get("current_path") or "")
+        identity_basis = str(source.get("identity_basis") or "")
+        change_classification = str(source.get("change_classification") or "")
+        stable_source_id = ""
+        raw_source_id = source.get("source_id")
+        if (
+            isinstance(raw_source_id, str)
+            and raw_source_id
+            and identity_basis in {"path", "fingerprint", "relocation-heuristic"}
+            and change_classification not in {"added", "ambiguous"}
+        ):
+            stable_source_id = raw_source_id
         descriptors.append(
             {
-                "source_id": str(source_id or ""),
-                "current_path": str(source.get("current_path") or ""),
+                "stable_source_id": stable_source_id,
+                "current_path": current_path,
                 "fingerprint": fingerprint,
             }
         )
     descriptors.sort(
         key=lambda item: (
-            item["source_id"],
+            item["stable_source_id"],
             item["current_path"],
             item["fingerprint"],
         )

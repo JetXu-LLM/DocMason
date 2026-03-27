@@ -9,7 +9,9 @@ from .admissibility import evaluate_commit_admissibility
 from .conversation import (
     FRONT_DOOR_STATE_CANONICAL_ASK,
     build_log_context,
+    current_host_identity,
     load_turn_record,
+    load_bound_conversation_record_for_host,
     open_conversation_turn,
     semantic_log_context_fields,
     semantic_log_context_from_record,
@@ -510,6 +512,12 @@ def _maybe_handle_confirmation_reply(
         active = read_json(paths.legacy_active_conversation_path)
     conversation_id = active.get("conversation_id")
     if not isinstance(conversation_id, str) or not conversation_id:
+        bound = load_bound_conversation_record_for_host(
+            paths,
+            host_identity=current_host_identity(),
+        )
+        conversation_id = bound.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
         return None
     pending = find_conversation_confirmation_job(paths, conversation_id)
     if not pending:
@@ -630,7 +638,7 @@ def begin_lane_c_shared_refresh(
     selected_source_id: str | None = None,
     target: str = "current",
 ) -> dict[str, Any]:
-    """Create or attach the governed Lane C shared job for one source-scoped refresh."""
+    """Create or attach the governed ask-time multimodal refresh for one source."""
     from .run_control import load_run_state
 
     run_state = load_run_state(paths, run_id)
@@ -638,7 +646,7 @@ def begin_lane_c_shared_refresh(
     version_truth = dict(raw_version_truth) if isinstance(raw_version_truth, dict) else {}
     published_snapshot_id = str(version_truth.get("published_snapshot_id") or "")
     if not published_snapshot_id:
-        raise ValueError("Lane C requires a published snapshot id.")
+        raise ValueError("The governed multimodal refresh requires a published snapshot id.")
 
     normalized_targets = [
         item
@@ -646,7 +654,7 @@ def begin_lane_c_shared_refresh(
         if isinstance(item, dict) and isinstance(item.get("source_id"), str) and item.get("source_id")
     ]
     if not normalized_targets:
-        raise ValueError("Lane C requires at least one recommended hybrid target.")
+        raise ValueError("The governed multimodal refresh requires at least one recommended target.")
     chosen_target = None
     if isinstance(selected_source_id, str) and selected_source_id:
         for item in normalized_targets:
@@ -654,7 +662,9 @@ def begin_lane_c_shared_refresh(
                 chosen_target = item
                 break
         if chosen_target is None:
-            raise ValueError(f"Selected Lane C source `{selected_source_id}` is not recommended.")
+            raise ValueError(
+                f"Selected multimodal refresh source `{selected_source_id}` is not recommended."
+            )
     else:
         chosen_target = normalized_targets[0]
     source_id = str(chosen_target["source_id"])
@@ -692,7 +702,7 @@ def begin_lane_c_shared_refresh(
     updates: dict[str, Any] = {
         "turn_state": "waiting-shared-job",
         "status": "waiting-shared-job",
-        "freshness_notice": "The ask is waiting on a governed Lane C refresh.",
+        "freshness_notice": "The ask is waiting on a governed multimodal refresh.",
         "hybrid_refresh_triggered": True,
         "hybrid_refresh_sources": [source_id],
         "hybrid_refresh_snapshot_id": published_snapshot_id,
@@ -739,11 +749,11 @@ def settle_lane_c_shared_refresh(
     completion_status: str,
     summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Settle one governed Lane C shared job and persist turn-visible state."""
+    """Settle one governed ask-time multimodal refresh and persist turn-visible state."""
     from .run_control import load_run_state
 
     if completion_status not in {"covered", "blocked"}:
-        raise ValueError("Lane C completion_status must be `covered` or `blocked`.")
+        raise ValueError("Multimodal refresh completion_status must be `covered` or `blocked`.")
     if completion_status == "covered":
         manifest = complete_shared_job(paths, job_id, result=summary or {"status": "covered"})
     else:
@@ -813,7 +823,7 @@ def settle_lane_c_shared_refresh(
                         "status": "prepared",
                         "turn_state": "prepared",
                         "freshness_notice": (
-                            "Lane C settled. Reretrieve and retrace before committing the answer."
+                            "The governed multimodal refresh finished. Rerun retrieval and trace before committing the answer."
                         ),
                     },
                 )
@@ -928,7 +938,7 @@ def _maybe_begin_lane_c_before_commit(
     ]
     if not recommended_targets:
         raise ValueError(
-            "Lane C is required for this turn, but the trace payload does not include "
+            "A governed multimodal refresh is required for this turn, but the trace payload does not include "
             "recommended_hybrid_targets."
         )
     target = (
@@ -1188,7 +1198,6 @@ def prepare_ask_turn(
     semantic_analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Prepare one `ask` turn with routing, freshness guidance, and conversation linkage."""
-    maybe_reconcile_active_thread(paths)
     confirmation_resolution = _maybe_handle_confirmation_reply(
         paths,
         question=question,
@@ -1200,6 +1209,8 @@ def prepare_ask_turn(
         question = confirmation_resolution[0]
         if isinstance(confirmation_resolution[1], dict):
             semantic_analysis = confirmation_resolution[1]
+    else:
+        maybe_reconcile_active_thread(paths)
     opened = open_conversation_turn(paths, user_question=question, entry_workflow_id="ask")
     run_payload = ensure_run_for_turn(
         paths,
@@ -2023,6 +2034,7 @@ def complete_ask_turn(
             "inner_workflow_id": inner_workflow_id,
             "session_ids": resolved_session_ids,
             "trace_ids": effective_trace_ids,
+            "freshness_notice": None,
             "answer_state": effective_answer_state,
             "render_inspection_required": resolved_render_inspection_required,
             "sync_requested": sync_requested,

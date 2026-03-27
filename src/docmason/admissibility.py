@@ -114,15 +114,19 @@ def evaluate_commit_admissibility(
     ]
     hybrid_refresh_completion_status = str(turn.get("hybrid_refresh_completion_status") or "")
     if hybrid_refresh_triggered and hybrid_refresh_completion_status not in {"covered", "blocked"}:
-        issues.append("Lane C was triggered but did not settle to covered or blocked.")
+        issues.append(
+            "The governed multimodal refresh was triggered but did not settle to covered or blocked."
+        )
     if hybrid_refresh_triggered and not effective_session_ids:
-        issues.append("Lane C settled without a post-refresh retrieve session.")
+        issues.append(
+            "The governed multimodal refresh settled without a post-refresh retrieve session."
+        )
     if hybrid_refresh_triggered and not effective_trace_ids:
-        issues.append("Lane C settled without a post-refresh trace.")
+        issues.append("The governed multimodal refresh settled without a post-refresh trace.")
     if hybrid_refresh_triggered and not hybrid_refresh_snapshot_id:
-        issues.append("Lane C turn state is missing the settled snapshot id.")
+        issues.append("The governed multimodal refresh turn state is missing the settled snapshot id.")
     if hybrid_refresh_triggered and not hybrid_refresh_job_ids:
-        issues.append("Lane C turn state is missing the settled shared job id.")
+        issues.append("The governed multimodal refresh turn state is missing the settled shared job id.")
     if hybrid_refresh_triggered and hybrid_refresh_snapshot_id and hybrid_refresh_sources:
         expected_job_keys = {
             lane_c_job_key(
@@ -135,18 +139,22 @@ def evaluate_commit_admissibility(
         for job_id in hybrid_refresh_job_ids:
             manifest = load_shared_job(paths, job_id)
             if not manifest:
-                issues.append(f"Lane C shared job `{job_id}` is missing.")
+                issues.append(f"Governed multimodal refresh shared job `{job_id}` is missing.")
                 continue
             if not shared_job_is_settled(manifest):
-                issues.append(f"Lane C shared job `{job_id}` is not yet settled.")
+                issues.append(
+                    f"Governed multimodal refresh shared job `{job_id}` is not yet settled."
+                )
             if manifest.get("job_family") != "lane-c":
-                issues.append(f"Shared job `{job_id}` is not a Lane C job.")
+                issues.append(f"Shared job `{job_id}` is not a governed multimodal refresh job.")
             if manifest.get("job_key") in expected_job_keys:
                 matched_expected_job = True
         if not matched_expected_job:
-            issues.append("Lane C settled jobs do not match the selected snapshot/source scope.")
+            issues.append(
+                "The settled governed multimodal refresh jobs do not match the selected snapshot/source scope."
+            )
     if hybrid_refresh_completion_status == "blocked" and support_basis != "governed-boundary":
-        issues.append("Blocked Lane C turns must commit as governed-boundary.")
+        issues.append("Blocked governed multimodal refresh turns must commit as governed-boundary.")
     if isinstance(answer_file_path, str) and answer_file_path:
         answer_path = Path(answer_file_path)
         if not answer_path.is_absolute():

@@ -269,6 +269,10 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("Final user-facing replies should normally match the user's language", agents)
         self.assertIn("Do not commit or expose private corpus inputs", agents)
         self.assertIn("inspect the matching canonical skill instead of guessing from memory", agents)
+        self.assertIn(
+            "ordinary natural-language questions still enter through canonical `ask`",
+            agents,
+        )
         self.assertNotIn("## Procedure", agents)
         self.assertNotIn("## Completion Signal", agents)
         self.assertLess(
@@ -282,6 +286,11 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("The routed inner workflow owns the deeper evidence loop.", ask_skill)
         self.assertIn("keep one concise `route_reason`", ask_skill)
         self.assertIn("route to `knowledge-base-sync`", ask_skill)
+        self.assertIn("native ledger", ask_skill)
+        self.assertNotIn(
+            "upgrade that live turn into canonical ask ownership when reconciliation created it first",
+            ask_skill,
+        )
         self.assertNotIn("recommended_hybrid_targets", ask_skill)
         self.assertNotIn("Lane C owner", ask_skill)
         self.assertIn("not a free-standing ordinary front door", answer_skill)

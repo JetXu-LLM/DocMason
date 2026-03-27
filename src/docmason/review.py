@@ -35,6 +35,13 @@ def _record_has_canonical_ask_ownership(record: dict[str, Any] | None) -> bool:
     )
 
 
+def _conversation_has_canonical_truth(payload: dict[str, Any]) -> bool:
+    turns = payload.get("turns", [])
+    if not isinstance(turns, list):
+        return False
+    return any(_record_has_canonical_ask_ownership(turn) for turn in turns if isinstance(turn, dict))
+
+
 def _effective_log_origin(
     payload: dict[str, Any],
     *,
@@ -129,7 +136,11 @@ def _compact_conversation(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _projection_conversations(paths: WorkspacePaths) -> list[dict[str, Any]]:
     return sorted(
-        _load_log_payloads(paths.conversation_projections_dir),
+        [
+            payload
+            for payload in _load_log_payloads(paths.conversation_projections_dir)
+            if _conversation_has_canonical_truth(payload)
+        ],
         key=lambda payload: str(payload.get("updated_at") or ""),
         reverse=True,
     )
@@ -147,6 +158,8 @@ def _load_conversations(paths: WorkspacePaths) -> dict[tuple[str, str], dict[str
         for turn in turns:
             if not isinstance(turn, dict):
                 continue
+            if not _record_has_canonical_ask_ownership(turn):
+                continue
             turn_id = turn.get("turn_id")
             if isinstance(turn_id, str) and turn_id:
                 conversations[(conversation_id, turn_id)] = {
@@ -159,6 +172,54 @@ def _load_conversations(paths: WorkspacePaths) -> dict[tuple[str, str], dict[str
                     "turn": turn,
                 }
     return conversations
+
+
+def _load_native_ledgers(paths: WorkspacePaths) -> list[dict[str, Any]]:
+    if not paths.native_ledger_dir.exists():
+        return []
+    ledgers = [read_json(path) for path in sorted(paths.native_ledger_dir.glob("*.json"))]
+    return [payload for payload in ledgers if payload]
+
+
+def _compact_native_ledger(payload: dict[str, Any]) -> dict[str, Any]:
+    turns = payload.get("turns", [])
+    latest_turn = turns[-1] if isinstance(turns, list) and turns else {}
+    host_identity = payload.get("host_identity")
+    return {
+        "ledger_id": payload.get("ledger_id"),
+        "host_provider": host_identity.get("host_provider")
+        if isinstance(host_identity, dict)
+        else None,
+        "host_thread_ref": host_identity.get("host_thread_ref")
+        if isinstance(host_identity, dict)
+        else None,
+        "host_identity_trust": host_identity.get("host_identity_trust")
+        if isinstance(host_identity, dict)
+        else None,
+        "anomaly_flags": (
+            [
+                value
+                for value in host_identity.get("anomaly_flags", [])
+                if isinstance(value, str) and value
+            ]
+            if isinstance(host_identity, dict)
+            else []
+        ),
+        "updated_at": payload.get("updated_at"),
+        "turn_count": len(turns) if isinstance(turns, list) else 0,
+        "latest_native_turn_id": latest_turn.get("native_turn_id")
+        if isinstance(latest_turn, dict)
+        else None,
+        "latest_question_class": latest_turn.get("question_class")
+        if isinstance(latest_turn, dict)
+        else None,
+        "latest_question_domain": latest_turn.get("question_domain")
+        if isinstance(latest_turn, dict)
+        else None,
+        "latest_route_reason": latest_turn.get("route_reason")
+        if isinstance(latest_turn, dict)
+        else None,
+    }
 
 
 def _run_commit_payload(paths: WorkspacePaths, run_id: str | None) -> dict[str, Any]:
@@ -593,6 +654,11 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
     )
     live_conversation_lookup = _load_conversations(paths)
     conversations = _projection_conversations(paths)
+    native_ledgers = sorted(
+        _load_native_ledgers(paths),
+        key=lambda payload: str(payload.get("updated_at") or ""),
+        reverse=True,
+    )
     real_query_sessions = [
         payload for payload in query_sessions if payload.get("log_origin") != "evaluation-suite"
     ]
@@ -642,6 +708,7 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
             if isinstance(turn, dict)
             and isinstance(turn.get("turn_id"), str)
             and isinstance(turn.get("committed_run_id"), str)
+            and _record_has_canonical_ask_ownership(turn)
         ],
         key=lambda item: str(item.get("recorded_at") or ""),
         reverse=True,
@@ -862,6 +929,19 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
             "total": len(conversations),
             "recent": [_compact_conversation(payload) for payload in conversations[:RECENT_LIMIT]],
         },
+        "native_reconciliation": {
+            "total": len(native_ledgers),
+            "recent": [_compact_native_ledger(payload) for payload in native_ledgers[:RECENT_LIMIT]],
+            "anomalous_recent": [
+                _compact_native_ledger(payload)
+                for payload in native_ledgers
+                if isinstance(payload.get("host_identity"), dict)
+                and any(
+                    isinstance(value, str) and value == "anomalous-host-identity"
+                    for value in payload["host_identity"].get("anomaly_flags", [])
+                )
+            ][:RECENT_LIMIT],
+        },
     }
     return summary
 
@@ -910,6 +990,8 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
             continue
         for turn in turns:
             if not isinstance(turn, dict):
+                continue
+            if not _record_has_canonical_ask_ownership(turn):
                 continue
             turn_id = turn.get("turn_id")
             question_text = turn.get("user_question")

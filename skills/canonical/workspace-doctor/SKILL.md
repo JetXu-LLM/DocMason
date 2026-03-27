@@ -20,6 +20,7 @@ If the agent cannot inspect local files or run commands, stop and explain that t
 1. Run `docmason doctor --json`.
 2. Explain blockers first, then degraded conditions, then optional follow-up.
 3. If the environment is not ready and `.venv` is absent, direct the next action to `./scripts/bootstrap-workspace.sh --yes`.
+   - treat the launcher as the bounded liveness gate for bootstrap Python selection, not as an unbounded trust of whatever `python3` happens to be first on `PATH`
 4. Otherwise, if the environment is not ready, direct the next action to `docmason prepare --yes`.
    - treat `mixed` and `degraded` toolchain states as repair-needed, not ordinary ask-time ready
 5. If `doctor` reports a control-plane blocker or pending confirmation, surface that blocker before lower-severity degraded conditions.

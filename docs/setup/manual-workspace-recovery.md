@@ -5,6 +5,14 @@ Use this document only when the normal automation path is unavailable or incompl
 - `./scripts/bootstrap-workspace.sh --yes`
 - `docmason prepare --yes`
 
+The launcher contract is now strict:
+
+- it performs bounded liveness probing instead of trusting an arbitrary `python3 -c` forever
+- it prefers repo-local managed Python, then the repo-local bootstrap venv, then
+  `DOCMASON_BOOTSTRAP_PYTHON`, then a healthy shared Python `3.13`, `3.12`, or `3.11`
+- it rejects obviously broken bootstrap candidates such as shebang-only recursive stubs,
+  startup-silent candidates, and timed-out launcher chains
+
 The normal product expectation is still:
 
 - repo-local managed Python `3.13` under `.docmason/toolchain/python/`
@@ -33,10 +41,12 @@ An environment is good enough for ordinary DocMason work when all of these are t
    - It should contain `pyproject.toml`, `docmason.yaml`, `src/docmason/`, and `scripts/`.
    - If the repository was moved, always work from the new real path.
 
-2. Find a supported Python.
-   - Preferred: `python3.11`, `python3.12`, `python3.13`, or newer.
+2. Find a healthy supported Python.
+   - Preferred shared fallback order: `python3.13`, `python3.12`, `python3.11`.
    - On macOS, Homebrew Python is acceptable.
    - On Linux, use the distro package manager or an already-installed supported Python.
+   - Do not trust a wrapper that resolves to a recursive `#!/usr/bin/env python3` stub or a
+     candidate that hangs on a trivial startup probe.
 
 3. Run the repo-local prepare flow from source with that bootstrap Python.
 

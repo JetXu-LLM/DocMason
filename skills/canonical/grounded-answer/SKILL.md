@@ -51,11 +51,11 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
      - `recommended_hybrid_targets`
      - artifact `section_path`, `caption_text`, `continuation_group_ids`, `procedure_hints`, and `semantic_labels`
      - score details such as `structure_context_bonus`, `semantic_overlay_bonus`, and `compare_coverage_bonus`
-   - when published sufficiency fails because of hard-artifact semantic gaps, the grounded-answer path must enter governed Lane C before any raw source inspection
+  - when published sufficiency fails because of hard-artifact semantic gaps, the grounded-answer path must enter the governed ask-time multimodal refresh before any raw source inspection
      - use `recommended_hybrid_targets` as the only legal query-aware narrowing entrypoint
-     - if the turn becomes a Lane C waiter, keep the same turn paused and reuse the shared result
-     - once Lane C picks a source, complete that source's current hybrid candidates, reretrieve, and retrace before treating the ask as ready to answer
-     - if Lane C settles `blocked`, close the turn as `abstained + governed-boundary`
+     - if the turn becomes a waiter on that governed refresh, keep the same turn paused and reuse the shared result
+     - once the governed refresh picks a source, complete that source's current hybrid candidates, reretrieve, and retrace before treating the ask as ready to answer
+     - if the governed refresh settles `blocked`, close the turn as `abstained + governed-boundary`
 5. Run provenance tracing for the strongest support when you need corroboration, contradiction checks, or answer-state clarification:
    - `docmason trace --source-id <source_id> --json`
    - `docmason trace --answer-file <path> --json`

@@ -1,6 +1,10 @@
 # DocMason Agent Contract
 
-DocMason is a Python-first, file-only, agent-native workspace for turning complex office documents, first-class `.eml` messages, and selected repository-native text sources into a multimodal knowledge base for serious white-collar work.
+DocMason is a repo-native application workspace. The agent is the runtime.
+
+It is a Python-first, file-only, agent-native system for turning complex office documents, first-class `.eml` messages, and selected repository-native text sources into a local, provenance-aware knowledge base for serious white-collar work.
+
+Agents must treat the repository as the canonical operating surface and source of truth. Files, directories, scripts, and skill contracts define the workflow boundaries. Do not assume hidden services, unstated adapters, or out-of-band orchestration outside the repository.
 
 This file is the minimal first-contact contract.
 Detailed workflow procedure belongs in `skills/canonical/*/SKILL.md`.
@@ -32,11 +36,15 @@ If the request is clearly explicit operator work, route directly instead:
 
 All other workflows are inner or follow-on workflows, not first-contact entry surfaces.
 
-If you are not operating on the native Codex path:
+If you are not operating on the native Codex path and the platform mapping or workspace readiness is not yet established:
 
 - do not guess how this repository should map onto your platform
 - start with `skills/canonical/workspace-bootstrap/SKILL.md`
 - let workspace bootstrap determine whether generated adapter guidance is needed for the current ecosystem
+
+Once the adapted workspace is ready and the platform mapping is already established:
+
+- ordinary natural-language questions still enter through canonical `ask`
 
 ## Discovery Boundaries
 

@@ -9,6 +9,7 @@ import os
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -28,7 +29,7 @@ from docmason.commands import (
     sync_workspace,
     sync_adapters,
 )
-from docmason.control_plane import ensure_shared_job, load_shared_job
+from docmason.control_plane import ensure_shared_job, load_shared_job, sync_input_signature
 from docmason.coordination import LeaseConflictError
 from docmason.project import (
     WorkspacePaths,
@@ -36,7 +37,9 @@ from docmason.project import (
     source_inventory_signature,
     write_json,
 )
-from docmason.toolchain import inspect_toolchain
+from docmason.toolchain import ProbeExecution, inspect_toolchain
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
@@ -617,11 +620,90 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         workspace.venv_docmason.chmod(0o755)
 
-        with mock.patch("docmason.toolchain.ENTRYPOINT_PROBE_TIMEOUT_SECONDS", 0.5):
+        def probe_runner(
+            command: list[str] | tuple[str, ...],
+            cwd: Path,
+            timeout_seconds: float,
+        ) -> ProbeExecution:
+            del cwd, timeout_seconds
+            command_list = list(command)
+            if command_list[:2] == [str(workspace.venv_python), "-c"]:
+                return ProbeExecution(exit_code=0)
+            if command_list[:2] == [str(workspace.venv_docmason), "--help"]:
+                return ProbeExecution(exit_code=-1, timed_out=True)
+            return ProbeExecution(exit_code=0)
+
+        with mock.patch("docmason.toolchain._default_probe_runner", side_effect=probe_runner):
             toolchain = inspect_toolchain(workspace, editable_install=True)
 
         self.assertEqual(toolchain["entrypoint_health"], "startup-silent")
         self.assertEqual(toolchain["repair_reason"], "entrypoint-broken")
+
+    def test_bootstrap_launcher_skips_bad_env_python_stub_and_uses_healthy_fallback(self) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        (workspace.root / "runtime").mkdir(parents=True, exist_ok=True)
+        (workspace.root / "docs" / "setup").mkdir(parents=True, exist_ok=True)
+        (workspace.root / "docs" / "setup" / "manual-workspace-recovery.md").write_text(
+            "# Manual recovery\n",
+            encoding="utf-8",
+        )
+        (workspace.root / "src" / "docmason" / "__main__.py").write_text(
+            "from __future__ import annotations\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "\n"
+            "marker = Path(os.environ['DOCMASON_BOOTSTRAP_MARKER'])\n"
+            "marker.write_text(sys.executable + '\\n', encoding='utf-8')\n"
+            "print(json.dumps({'status': 'ready'}))\n",
+            encoding="utf-8",
+        )
+
+        bad_stub = workspace.root / ".bad-python" / "python3"
+        bad_stub.parent.mkdir(parents=True, exist_ok=True)
+        bad_stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            "os.execvp('python3', ['python3', *os.sys.argv[1:]])\n",
+            encoding="utf-8",
+        )
+        bad_stub.chmod(0o755)
+
+        good_python = workspace.root / ".good-python" / "python3.13"
+        good_python.parent.mkdir(parents=True, exist_ok=True)
+        good_python.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        good_python.chmod(0o755)
+
+        marker_path = workspace.root / "runtime" / "bootstrap-python.txt"
+        env = {
+            **os.environ,
+            "PATH": f"{good_python.parent}:{os.environ.get('PATH', '')}",
+            "DOCMASON_BOOTSTRAP_PYTHON": str(bad_stub),
+            "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
+        }
+        completed = subprocess.run(
+            [str(script_path), "--yes", "--json"],
+            cwd=workspace.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertTrue(marker_path.read_text(encoding="utf-8").strip())
 
     def test_inspect_toolchain_distinguishes_shared_host_bootstrap_from_legacy_external(self) -> None:
         workspace = self.make_workspace()
@@ -1232,6 +1314,115 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(first["manifest"]["job_id"], second["manifest"]["job_id"])
         manifest = load_shared_job(workspace, str(first["manifest"]["job_id"]))
         self.assertCountEqual(manifest["attached_run_ids"], [owner_run_id, waiter_run_id])
+
+    def test_first_publish_sync_signature_is_stable_across_preview_only_source_ids(self) -> None:
+        active_sources_a = [
+            {
+                "source_id": "preview-source-a",
+                "current_path": "original_doc/a.pdf",
+                "source_fingerprint": "fingerprint-a",
+                "identity_basis": "path",
+                "change_classification": "added",
+            }
+        ]
+        active_sources_b = [
+            {
+                "source_id": "preview-source-b",
+                "current_path": "original_doc/a.pdf",
+                "source_fingerprint": "fingerprint-a",
+                "identity_basis": "path",
+                "change_classification": "added",
+            }
+        ]
+        change_set_a = {
+            "changes": [
+                {
+                    "source_id": "preview-source-a",
+                    "change_classification": "added",
+                    "current_path": "original_doc/a.pdf",
+                    "previous_path": "",
+                    "source_fingerprint": "fingerprint-a",
+                    "matched_source_ids": [],
+                }
+            ]
+        }
+        change_set_b = {
+            "changes": [
+                {
+                    "source_id": "preview-source-b",
+                    "change_classification": "added",
+                    "current_path": "original_doc/a.pdf",
+                    "previous_path": "",
+                    "source_fingerprint": "fingerprint-a",
+                    "matched_source_ids": [],
+                }
+            ]
+        }
+
+        signature_a = sync_input_signature(
+            active_sources=active_sources_a,
+            change_set=change_set_a,
+            pending_interaction_signature_value="pending:none",
+        )
+        signature_b = sync_input_signature(
+            active_sources=active_sources_b,
+            change_set=change_set_b,
+            pending_interaction_signature_value="pending:none",
+        )
+
+        self.assertEqual(signature_a, signature_b)
+
+    def test_stable_first_publish_sync_signature_reuses_one_shared_sync_job(self) -> None:
+        workspace = self.make_workspace()
+        signature = sync_input_signature(
+            active_sources=[
+                {
+                    "source_id": "preview-source-any",
+                    "current_path": "original_doc/a.pdf",
+                    "source_fingerprint": "fingerprint-a",
+                    "identity_basis": "path",
+                    "change_classification": "added",
+                }
+            ],
+            change_set={
+                "changes": [
+                    {
+                        "source_id": "preview-source-any",
+                        "change_classification": "added",
+                        "current_path": "original_doc/a.pdf",
+                        "previous_path": "",
+                        "source_fingerprint": "fingerprint-a",
+                        "matched_source_ids": [],
+                    }
+                ]
+            },
+            pending_interaction_signature_value="pending:none",
+        )
+
+        owner = ensure_shared_job(
+            workspace,
+            job_key=f"sync:{signature}",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={"target": "current"},
+            input_signature=signature,
+            owner={"kind": "run", "id": "run-owner"},
+            run_id="run-owner",
+        )
+        waiter = ensure_shared_job(
+            workspace,
+            job_key=f"sync:{signature}",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={"target": "current"},
+            input_signature=signature,
+            owner={"kind": "run", "id": "run-waiter"},
+            run_id="run-waiter",
+        )
+
+        self.assertEqual(owner["caller_role"], "owner")
+        self.assertEqual(waiter["caller_role"], "waiter")
+        self.assertEqual(owner["manifest"]["job_id"], waiter["manifest"]["job_id"])
 
     def test_sync_adapters_generates_deterministic_claude_files(self) -> None:
         workspace = self.make_workspace()

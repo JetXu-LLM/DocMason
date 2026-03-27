@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import uuid
@@ -47,6 +48,30 @@ _FRONT_DOOR_STATE_PRIORITY = {
     FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY: 1,
     FRONT_DOOR_STATE_CANONICAL_ASK: 2,
 }
+_BINDABLE_HOST_IDENTITY_SOURCES = frozenset(
+    {
+        "codex_thread_id",
+        "claude_session_id",
+        "claude_conversation_id",
+        "docmason_conversation_id",
+    }
+)
+_HOST_IDENTITY_SOURCE_PRIORITY = {
+    None: 0,
+    "claude_project_dir": 1,
+    "docmason_conversation_id": 2,
+    "codex_thread_id": 3,
+    "claude_conversation_id": 3,
+    "claude_session_id": 4,
+}
+_HOST_IDENTITY_TRUST_PRIORITY = {
+    None: 0,
+    "unbound": 0,
+    "weak-host-env": 1,
+    "manual-override": 2,
+    "host-env-claimed": 3,
+    "reconciliation-argument": 4,
+}
 
 
 def utc_now() -> str:
@@ -75,6 +100,11 @@ def _nonempty_string(value: Any) -> str | None:
     return None
 
 
+def _stable_json_digest(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def normalize_front_door_state(value: Any) -> str | None:
     """Normalize one persisted front-door state into a supported value."""
     normalized = _nonempty_string(value)
@@ -100,6 +130,20 @@ def turn_has_canonical_ask_ownership(turn: dict[str, Any] | None) -> bool:
     if not isinstance(turn, dict):
         return False
     return normalize_front_door_state(turn.get("front_door_state")) == FRONT_DOOR_STATE_CANONICAL_ASK
+
+
+def conversation_has_canonical_ask_ownership(conversation: dict[str, Any] | None) -> bool:
+    """Return whether one conversation contains any canonical-ask turn."""
+    if not isinstance(conversation, dict):
+        return False
+    turns = conversation.get("turns", [])
+    if not isinstance(turns, list):
+        return False
+    return any(
+        turn_has_canonical_ask_ownership(turn)
+        for turn in turns
+        if isinstance(turn, dict)
+    )
 
 
 def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
@@ -141,6 +185,12 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["front_door_opened_at"] = None
     if "front_door_run_id" not in turn:
         turn["front_door_run_id"] = None
+    if "native_ledger_ref" not in turn:
+        turn["native_ledger_ref"] = None
+    if "promotion_kind" not in turn:
+        turn["promotion_kind"] = None
+    if "promotion_reason" not in turn:
+        turn["promotion_reason"] = None
     return turn
 
 
@@ -232,6 +282,237 @@ def detect_agent_surface() -> str:
     return "unknown-agent"
 
 
+def current_host_identity(*, agent_surface: str | None = None) -> dict[str, Any]:
+    """Return the normalized host identity envelope for the current execution context."""
+    provider = agent_surface or detect_agent_surface()
+    explicit_surface = _nonempty_string(os.environ.get("DOCMASON_AGENT_SURFACE"))
+    explicit_conversation_id = _nonempty_string(os.environ.get("DOCMASON_CONVERSATION_ID"))
+    codex_thread_id = _nonempty_string(os.environ.get("CODEX_THREAD_ID"))
+    claude_session_id = _nonempty_string(os.environ.get("CLAUDE_SESSION_ID"))
+    claude_conversation_id = _nonempty_string(os.environ.get("CLAUDE_CONVERSATION_ID"))
+    claude_project_dir = _nonempty_string(os.environ.get("CLAUDE_PROJECT_DIR"))
+
+    host_thread_ref = None
+    host_identity_source = None
+    host_identity_trust = "unbound"
+    anomaly_flags: list[str] = []
+
+    if provider == "codex" and codex_thread_id:
+        host_thread_ref = codex_thread_id
+        host_identity_source = "codeX_thread_id".lower()
+        host_identity_trust = "host-env-claimed"
+    elif provider == "claude-code" and claude_session_id:
+        host_thread_ref = claude_session_id
+        host_identity_source = "claude_session_id"
+        host_identity_trust = "host-env-claimed"
+    elif provider == "claude-code" and claude_conversation_id:
+        host_thread_ref = claude_conversation_id
+        host_identity_source = "claude_conversation_id"
+        host_identity_trust = "host-env-claimed"
+    elif provider == "claude-code" and claude_project_dir:
+        host_thread_ref = claude_project_dir
+        host_identity_source = "claude_project_dir"
+        host_identity_trust = "weak-host-env"
+    elif explicit_conversation_id:
+        host_thread_ref = explicit_conversation_id
+        host_identity_source = "docmason_conversation_id"
+        host_identity_trust = "manual-override"
+
+    if explicit_surface and explicit_surface != provider:
+        anomaly_flags.extend(["anomalous-host-identity", "provider-surface-mismatch"])
+    if explicit_conversation_id:
+        trusted_host_ref = None
+        if codex_thread_id:
+            trusted_host_ref = codex_thread_id
+        elif claude_session_id:
+            trusted_host_ref = claude_session_id
+        elif claude_conversation_id:
+            trusted_host_ref = claude_conversation_id
+        if trusted_host_ref and trusted_host_ref != explicit_conversation_id:
+            anomaly_flags.extend(["anomalous-host-identity", "manual-alias-override"])
+    if provider == "unknown-agent" and host_thread_ref:
+        anomaly_flags.extend(["anomalous-host-identity", "unknown-provider-host-ref"])
+
+    return {
+        "host_provider": provider,
+        "host_thread_ref": host_thread_ref,
+        "host_identity_source": host_identity_source,
+        "host_identity_trust": host_identity_trust,
+        "anomaly_flags": _deduplicate_strings(anomaly_flags),
+    }
+
+
+def host_identity_is_bindable(host_identity: dict[str, Any] | None) -> bool:
+    """Return whether the host identity is strong enough for canonical binding."""
+    if not isinstance(host_identity, dict):
+        return False
+    source = _nonempty_string(host_identity.get("host_identity_source"))
+    thread_ref = _nonempty_string(host_identity.get("host_thread_ref"))
+    return source in _BINDABLE_HOST_IDENTITY_SOURCES and thread_ref is not None
+
+
+def host_identity_key(host_identity: dict[str, Any] | None) -> str | None:
+    """Return a stable binding key for one host identity envelope when possible."""
+    if not isinstance(host_identity, dict):
+        return None
+    provider = _nonempty_string(host_identity.get("host_provider"))
+    thread_ref = _nonempty_string(host_identity.get("host_thread_ref"))
+    if provider is None or thread_ref is None or not host_identity_is_bindable(host_identity):
+        return None
+    return _stable_json_digest(
+        {
+            "host_provider": provider,
+            "host_thread_ref": thread_ref,
+        }
+    )
+
+
+def _host_identity_priority(host_identity: dict[str, Any] | None) -> tuple[int, int, int]:
+    if not isinstance(host_identity, dict):
+        return (0, 0, 0)
+    return (
+        1 if host_identity_is_bindable(host_identity) else 0,
+        _HOST_IDENTITY_SOURCE_PRIORITY.get(
+            _nonempty_string(host_identity.get("host_identity_source")),
+            0,
+        ),
+        _HOST_IDENTITY_TRUST_PRIORITY.get(
+            _nonempty_string(host_identity.get("host_identity_trust")),
+            0,
+        ),
+    )
+
+
+def _should_upgrade_host_identity(
+    current: dict[str, Any] | None,
+    candidate: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(candidate, dict) or not candidate:
+        return False
+    if not isinstance(current, dict) or not current:
+        return True
+    return _host_identity_priority(candidate) > _host_identity_priority(current)
+
+
+def load_host_identity_bindings(paths: WorkspacePaths) -> dict[str, Any]:
+    """Load host-identity to canonical-conversation bindings."""
+    payload = read_json(paths.host_identity_bindings_path)
+    bindings = payload.get("bindings")
+    return {
+        "schema_version": int(payload.get("schema_version", 1) or 1),
+        "updated_at": payload.get("updated_at"),
+        "bindings": bindings if isinstance(bindings, dict) else {},
+    }
+
+
+def _write_host_identity_bindings(
+    paths: WorkspacePaths,
+    *,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": 1,
+        "updated_at": utc_now(),
+        "bindings": bindings,
+    }
+    write_json(paths.host_identity_bindings_path, payload)
+    return payload
+
+
+def bind_host_identity_to_conversation(
+    paths: WorkspacePaths,
+    *,
+    host_identity: dict[str, Any] | None,
+    conversation_id: str,
+) -> None:
+    """Persist the canonical conversation bound to one host identity envelope."""
+    key = host_identity_key(host_identity)
+    if key is None:
+        return
+    bindings = load_host_identity_bindings(paths)["bindings"]
+    bindings[key] = {
+        "conversation_id": conversation_id,
+        "host_identity": dict(host_identity or {}),
+        "bound_at": utc_now(),
+    }
+    _write_host_identity_bindings(paths, bindings=bindings)
+
+
+def _active_conversation_fallback_id(
+    paths: WorkspacePaths,
+    *,
+    agent_surface: str,
+    host_identity: dict[str, Any] | None,
+) -> str | None:
+    current_host_identity_key = host_identity_key(host_identity)
+    active = read_json(paths.active_conversation_path)
+    active_id = active.get("conversation_id")
+    active_agent = active.get("agent_surface")
+    active_host_identity = active.get("host_identity")
+    active_host_identity_key = _nonempty_string(active.get("host_identity_key"))
+    active_effective_key = active_host_identity_key or host_identity_key(active_host_identity)
+    updated_at = _parse_timestamp(active.get("updated_at"))
+    if (
+        isinstance(active_id, str)
+        and active_id
+        and active_agent == agent_surface
+        and updated_at is not None
+        and datetime.now(tz=UTC) - updated_at <= ACTIVE_CONVERSATION_IDLE_WINDOW
+        and (
+            current_host_identity_key is None
+            or active_effective_key == current_host_identity_key
+            or active_effective_key is None
+        )
+    ):
+        return active_id
+
+    legacy_active = read_json(paths.legacy_active_conversation_path)
+    legacy_id = legacy_active.get("conversation_id")
+    if (
+        current_host_identity_key is None
+        and isinstance(legacy_id, str)
+        and legacy_id
+        and _conversation_record_exists(paths, legacy_id)
+    ):
+        return legacy_id
+    return None
+
+
+def bound_conversation_id_for_host(
+    paths: WorkspacePaths,
+    *,
+    host_identity: dict[str, Any] | None,
+) -> str | None:
+    """Return the canonical conversation bound to the current host identity, when present."""
+    key = host_identity_key(host_identity)
+    if key is None:
+        return None
+    binding = load_host_identity_bindings(paths)["bindings"].get(key)
+    if not isinstance(binding, dict):
+        legacy_host_ref = (
+            _nonempty_string(host_identity.get("host_thread_ref"))
+            if isinstance(host_identity, dict)
+            else None
+        )
+        legacy_conversation = (
+            load_conversation_record(paths, legacy_host_ref)
+            if legacy_host_ref and _conversation_record_exists(paths, legacy_host_ref)
+            else {}
+        )
+        if legacy_host_ref and conversation_has_canonical_ask_ownership(legacy_conversation):
+            bind_host_identity_to_conversation(
+                paths,
+                host_identity=host_identity,
+                conversation_id=legacy_host_ref,
+            )
+            return legacy_host_ref
+        return None
+    conversation_id = _nonempty_string(binding.get("conversation_id"))
+    if conversation_id and _conversation_record_exists(paths, conversation_id):
+        return conversation_id
+    return None
+
+
 def current_corpus_signature(paths: WorkspacePaths) -> str | None:
     """Return the current published corpus signature when available."""
     state = sync_state(paths)
@@ -262,17 +543,12 @@ def workspace_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
 
 
 def native_conversation_id() -> tuple[str | None, str | None]:
-    """Return a conversation identifier from the current agent surface when available."""
-    for variable in (
-        "DOCMASON_CONVERSATION_ID",
-        "CODEX_THREAD_ID",
-        "CLAUDE_CONVERSATION_ID",
-        "CLAUDE_SESSION_ID",
-    ):
-        value = os.environ.get(variable)
-        if value:
-            return value, variable.lower()
-    return None, None
+    """Return the current host-native thread reference when one is available."""
+    host_identity = current_host_identity()
+    return (
+        _nonempty_string(host_identity.get("host_thread_ref")),
+        _nonempty_string(host_identity.get("host_identity_source")),
+    )
 
 
 def _load_active_conversation(paths: WorkspacePaths) -> dict[str, Any]:
@@ -291,6 +567,32 @@ def load_active_conversation_record(paths: WorkspacePaths) -> dict[str, Any]:
     return load_conversation_record(paths, conversation_id)
 
 
+def load_bound_conversation_record_for_host(
+    paths: WorkspacePaths,
+    *,
+    host_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load the canonical conversation currently bound to the host identity envelope."""
+    resolved_host_identity = (
+        dict(host_identity) if isinstance(host_identity, dict) else current_host_identity()
+    )
+    conversation_id = bound_conversation_id_for_host(
+        paths,
+        host_identity=resolved_host_identity,
+    )
+    if not isinstance(conversation_id, str) or not conversation_id:
+        conversation_id = _active_conversation_fallback_id(
+            paths,
+            agent_surface=str(
+                resolved_host_identity.get("host_provider") or detect_agent_surface()
+            ),
+            host_identity=resolved_host_identity,
+        )
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return {}
+    return load_conversation_record(paths, conversation_id)
+
+
 def _conversation_record_exists(paths: WorkspacePaths, conversation_id: str) -> bool:
     return conversation_path(paths, conversation_id).exists() or legacy_conversation_path(
         paths, conversation_id
@@ -298,32 +600,27 @@ def _conversation_record_exists(paths: WorkspacePaths, conversation_id: str) -> 
 
 
 def resolve_conversation_id(paths: WorkspacePaths, *, agent_surface: str) -> tuple[str, str]:
-    """Resolve the parent conversation identifier for the current chat."""
-    native_id, native_source = native_conversation_id()
-    if native_id is not None and native_source is not None:
-        return native_id, native_source
+    """Resolve the canonical conversation identifier for the current chat."""
+    host_identity = current_host_identity(agent_surface=agent_surface)
+    bound_conversation_id = bound_conversation_id_for_host(paths, host_identity=host_identity)
+    if bound_conversation_id is not None:
+        return bound_conversation_id, "host-identity-binding"
 
-    active = read_json(paths.active_conversation_path)
-    active_id = active.get("conversation_id")
-    active_agent = active.get("agent_surface")
-    updated_at = _parse_timestamp(active.get("updated_at"))
-    if (
-        isinstance(active_id, str)
-        and active_id
-        and active_agent == agent_surface
-        and updated_at is not None
-        and datetime.now(tz=UTC) - updated_at <= ACTIVE_CONVERSATION_IDLE_WINDOW
-    ):
-        return active_id, "workspace-active-fallback"
-    legacy_active = read_json(paths.legacy_active_conversation_path)
-    legacy_id = legacy_active.get("conversation_id")
-    if (
-        isinstance(legacy_id, str)
-        and legacy_id
-        and _conversation_record_exists(paths, legacy_id)
-    ):
-        return legacy_id, "workspace-active-fallback"
-    return str(uuid.uuid4()), "generated"
+    active_fallback_id = _active_conversation_fallback_id(
+        paths,
+        agent_surface=agent_surface,
+        host_identity=host_identity,
+    )
+    if isinstance(active_fallback_id, str) and active_fallback_id:
+        return active_fallback_id, "workspace-active-fallback"
+
+    conversation_id = str(uuid.uuid4())
+    bind_host_identity_to_conversation(
+        paths,
+        host_identity=host_identity,
+        conversation_id=conversation_id,
+    )
+    return conversation_id, "generated"
 
 
 def conversation_path(paths: WorkspacePaths, conversation_id: str) -> Path:
@@ -371,6 +668,9 @@ def base_turn_record(
         "native_turn_id": None,
         "active_run_id": None,
         "committed_run_id": None,
+        "native_ledger_ref": None,
+        "promotion_kind": None,
+        "promotion_reason": None,
         "turn_state": "opened",
         "version_context": None,
         "capability_profile": None,
@@ -442,11 +742,27 @@ def ensure_conversation_record(
     conversation_id: str,
     conversation_id_source: str,
     agent_surface: str,
+    host_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Load or initialize one parent conversation record."""
     now = utc_now()
     conversation = load_conversation_record(paths, conversation_id)
     if conversation:
+        if _should_upgrade_host_identity(
+            conversation.get("host_identity")
+            if isinstance(conversation.get("host_identity"), dict)
+            else None,
+            host_identity,
+        ):
+            conversation["host_identity"] = dict(host_identity)
+            conversation["host_identity_key"] = host_identity_key(host_identity)
+            write_json(conversation_path(paths, conversation_id), conversation)
+        if host_identity_is_bindable(host_identity):
+            bind_host_identity_to_conversation(
+                paths,
+                host_identity=host_identity,
+                conversation_id=conversation_id,
+            )
         if not conversation_path(paths, conversation_id).exists():
             ensure_json_parent(conversation_path(paths, conversation_id))
             write_json(conversation_path(paths, conversation_id), conversation)
@@ -455,6 +771,8 @@ def ensure_conversation_record(
         "conversation_id": conversation_id,
         "conversation_id_source": conversation_id_source,
         "agent_surface": agent_surface,
+        "host_identity": dict(host_identity or {}),
+        "host_identity_key": host_identity_key(host_identity),
         "opened_at": now,
         "updated_at": now,
         "workspace_snapshot": workspace_snapshot(paths),
@@ -533,6 +851,8 @@ def open_conversation_turn(
     if not user_question:
         raise ValueError("User question is empty.")
     agent_surface = detect_agent_surface()
+    host_identity = current_host_identity(agent_surface=agent_surface)
+    host_identity_key_value = host_identity_key(host_identity)
     conversation_id, conversation_id_source = resolve_conversation_id(
         paths,
         agent_surface=agent_surface,
@@ -545,6 +865,7 @@ def open_conversation_turn(
             conversation_id=conversation_id,
             conversation_id_source=conversation_id_source,
             agent_surface=agent_surface,
+            host_identity=host_identity,
         )
         turns = conversation.get("turns", [])
         if not isinstance(turns, list):
@@ -584,6 +905,8 @@ def open_conversation_turn(
             {
                 "conversation_id": conversation_id,
                 "agent_surface": agent_surface,
+                "host_identity": dict(host_identity),
+                "host_identity_key": host_identity_key_value,
                 "updated_at": now,
             },
         )
@@ -595,6 +918,8 @@ def open_conversation_turn(
         "answer_file_path": str(answer_path.relative_to(paths.root)),
         "conversation_id_source": conversation_id_source,
         "agent_surface": agent_surface,
+        "host_identity": dict(host_identity),
+        "host_identity_key": host_identity_key_value,
         "workspace_snapshot": conversation["workspace_snapshot"],
         "native_turn_id": turn.get("native_turn_id"),
         "front_door_state": turn.get("front_door_state"),
@@ -723,6 +1048,12 @@ def update_conversation_turn(
             {
                 "conversation_id": conversation_id,
                 "agent_surface": conversation.get("agent_surface", detect_agent_surface()),
+                "host_identity": (
+                    dict(conversation.get("host_identity"))
+                    if isinstance(conversation.get("host_identity"), dict)
+                    else {}
+                ),
+                "host_identity_key": conversation.get("host_identity_key"),
                 "updated_at": now,
             },
         )

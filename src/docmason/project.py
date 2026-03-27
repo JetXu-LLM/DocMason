@@ -362,6 +362,14 @@ class WorkspacePaths:
         return self.state_dir / "conversations"
 
     @property
+    def native_ledger_dir(self) -> Path:
+        return self.state_dir / "native-ledger"
+
+    @property
+    def host_identity_bindings_path(self) -> Path:
+        return self.state_dir / "host-identity-bindings.json"
+
+    @property
     def logs_dir(self) -> Path:
         return self.runtime_dir / "logs"
 
