@@ -382,6 +382,10 @@ class WorkspacePaths:
         return self.logs_dir / "retrieval-traces"
 
     @property
+    def turn_artifact_index_dir(self) -> Path:
+        return self.logs_dir / "turn-artifact-index"
+
+    @property
     def conversations_dir(self) -> Path:
         return self.live_conversations_dir
 

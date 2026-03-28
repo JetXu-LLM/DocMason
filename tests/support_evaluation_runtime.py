@@ -34,6 +34,7 @@ from docmason.evaluation import (
     write_feedback_record,
 )
 from docmason.project import WorkspacePaths, read_json, source_inventory_signature, write_json
+from docmason.review import refresh_log_review_summary
 from docmason.run_control import load_run_state
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
@@ -931,7 +932,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                             "ask-prepared",
                             "trace-completed",
                             "admissibility-passed",
-                            "projection-refreshed",
+                            "projection-enqueued",
                         ],
                     },
                 ),
@@ -975,7 +976,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                             "ask-prepared",
                             "trace-completed",
                             "admissibility-passed",
-                            "projection-refreshed",
+                            "projection-enqueued",
                         ],
                     },
                 ),
@@ -1004,7 +1005,6 @@ class EvaluationRuntimeTests(unittest.TestCase):
         self.assertIn("answer_file", ready_case["artifact_paths"])
         self.assertIn("query_session_01", ready_case["artifact_paths"])
         self.assertIn("retrieval_trace_01", ready_case["artifact_paths"])
-        self.assertIn("conversation_projection", ready_case["artifact_paths"])
         self.assertIn("review_summary", ready_case["artifact_paths"])
         self.assertIn("benchmark_candidates", ready_case["artifact_paths"])
         self.assertIn("answer_history_index", ready_case["artifact_paths"])
@@ -1074,7 +1074,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(query_session["log_origin"], "evaluation-suite")
         self.assertEqual(retrieval_trace["log_origin"], "evaluation-suite")
-        summary = read_json(workspace.review_summary_path)
+        summary = refresh_log_review_summary(workspace)
         self.assertEqual(summary["query_sessions"]["real_total"], 0)
         self.assertEqual(summary["query_sessions"]["synthetic_total"], 1)
         self.assertEqual(summary["retrieval_traces"]["real_total"], 0)
@@ -1468,7 +1468,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                             "preanswer-governance-started",
                             "shared-job-declined",
                             "shared-job-settled",
-                            "projection-refreshed",
+                            "projection-enqueued",
                         ],
                     },
                 )
@@ -1612,7 +1612,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                             "shared-job-approved",
                             "trace-completed",
                             "admissibility-passed",
-                            "projection-refreshed",
+                            "projection-enqueued",
                         ],
                     },
                 )
@@ -1733,7 +1733,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                             "ask-prepared",
                             "trace-completed",
                             "admissibility-passed",
-                            "projection-refreshed",
+                            "projection-enqueued",
                         ],
                     },
                 )
@@ -1756,6 +1756,100 @@ class EvaluationRuntimeTests(unittest.TestCase):
         case = run_payload["cases"][0]
         self.assertTrue(case["execution"]["result"]["auto_prepare_triggered"])
         self.assertTrue(case["execution"]["result"]["auto_sync_triggered"])
+
+    def test_run_suite_replays_same_run_governance_reuse_without_duplicate_sync(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        self.create_pdf(workspace.source_dir / "fresh.pdf")
+
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-governance-reuse",
+                    family="ask-governance",
+                    question="What do the latest workspace documents say about the architecture strategy?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                        needs_latest_workspace_state=True,
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids[0]],
+                    required_sources_or_units=[source_ids[0]],
+                    minimum_support_overlap=1,
+                    reference_facts=[
+                        "The replay should reuse the same governed preanswer result instead of rerunning sync."
+                    ],
+                    continuations=[
+                        {
+                            "message": "What do the latest workspace documents say about the architecture strategy?",
+                            "semantic_analysis": self.semantic_analysis(
+                                question_class="answer",
+                                question_domain="workspace-corpus",
+                                needs_latest_workspace_state=True,
+                            ),
+                        }
+                    ],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "reused_turn": True,
+                        "auto_sync_triggered": True,
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                        "required_run_events": [
+                            "preanswer-governance-started",
+                            "ask-prepared",
+                            "preanswer-governance-reused",
+                            "trace-completed",
+                            "admissibility-passed",
+                            "projection-enqueued",
+                        ],
+                    },
+                )
+            ],
+        )
+
+        def fake_sync(*args: object, **kwargs: object) -> CommandReport:
+            return sync_workspace(
+                workspace,
+                assume_yes=True,
+                owner=kwargs.get("owner"),
+                run_id=kwargs.get("run_id"),
+            )
+
+        with mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync):
+            run_payload = run_evaluation_suite(
+                workspace,
+                suite_path=suite_path,
+                rubric_path=rubric_path,
+                judge_trials_path=judge_path,
+                run_label="Ask governance reuse",
+            )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        case = run_payload["cases"][0]
+        failed_checks = {
+            check["name"]: check
+            for check in case["deterministic_checks"]
+            if not check["passed"]
+        }
+        self.assertNotIn("same_run_preanswer_governance_reentry", failed_checks)
+        self.assertNotIn("same_run_ask_prepared_reentry", failed_checks)
+        self.assertNotIn("same_run_answer_critical_sync_job_reentry", failed_checks)
 
     def test_run_suite_replays_lane_c_blocked_ask_turn(self) -> None:
         workspace = self.make_workspace()
@@ -1810,7 +1904,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                             "preanswer-governance-started",
                             "shared-job-waiting",
                             "shared-job-settled",
-                            "projection-refreshed",
+                            "projection-enqueued",
                         ],
                     },
                 )
@@ -1895,7 +1989,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                             "shared-job-settled",
                             "trace-completed",
                             "admissibility-passed",
-                            "projection-refreshed",
+                            "projection-enqueued",
                         ],
                     },
                 )

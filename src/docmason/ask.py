@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -55,20 +57,25 @@ from .project import (
     read_json,
     write_json,
 )
-from .projections import refresh_runtime_projections
+from .projections import queue_projection_refresh
 from .routing import tokenize_text
 from .run_control import (
     RUN_ORIGIN_ASK_FRONT_DOOR,
     attach_shared_job_to_run,
+    begin_run_phase,
     commit_run,
     ensure_run_for_turn,
+    finish_run_phase,
     load_run_state,
     record_run_event,
     record_run_event_for_runs,
     record_run_event_if_present,
+    record_shared_job_settled_once,
     refresh_turn_run_version_truth,
     update_run_state,
+    version_context,
 )
+from .runtime_log_index import discover_turn_artifact_candidates, update_turn_artifact_index
 from .source_references import (
     build_reference_resolution_summary,
     resolve_workspace_reference,
@@ -77,6 +84,55 @@ from .source_references import (
 
 def _workspace_notices_enabled(question_domain: str) -> bool:
     return question_domain in {"workspace-corpus", "composition"}
+
+
+def _interaction_backlog_policy(
+    *,
+    question_class: str,
+    question_domain: str,
+    inspection_scope: str,
+    reference_resolution: dict[str, Any] | None,
+    interaction_snapshot: dict[str, Any],
+    interaction_relevance: dict[str, Any],
+) -> dict[str, str | bool | None]:
+    """Classify pending interaction backlog as blocking, advisory, or ignored."""
+    pending_count = int(interaction_snapshot.get("pending_promotion_count", 0) or 0)
+    if pending_count <= 0 or question_domain != "workspace-corpus":
+        return {"state": "ignored", "notice": None}
+    exact_or_source_narrowed_reference = (
+        isinstance(reference_resolution, dict)
+        and (
+            str(reference_resolution.get("status") or "") == "exact"
+            or (
+                str(reference_resolution.get("source_match_status") or "") == "exact"
+                and bool(reference_resolution.get("source_narrowing_allowed"))
+            )
+        )
+    )
+    narrowed_exact_source = (
+        question_class == "answer"
+        and exact_or_source_narrowed_reference
+        and inspection_scope in {"source", "unit"}
+    )
+    if interaction_snapshot.get("load_warnings"):
+        notice = (
+            "Pending interaction-derived runtime state could not be read completely "
+            "during this check."
+        )
+        return {
+            "state": "advisory" if narrowed_exact_source else "blocking",
+            "notice": notice,
+        }
+    if interaction_relevance.get("has_relevant_pending_interaction"):
+        notice = (
+            "Pending interaction-derived knowledge appears relevant and still "
+            "awaits sync-time promotion."
+        )
+        return {
+            "state": "advisory" if narrowed_exact_source else "blocking",
+            "notice": notice,
+        }
+    return {"state": "ignored", "notice": None}
 
 
 def _latest_trace_record(paths: WorkspacePaths, trace_ids: list[str] | None) -> dict[str, Any]:
@@ -146,18 +202,6 @@ def _resolved_string_list(value: list[Any] | None) -> list[str]:
     )
 
 
-def _normalized_artifact_path(paths: WorkspacePaths, value: Any) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
-    path = Path(value)
-    if not path.is_absolute():
-        path = paths.root / path
-    try:
-        return str(path.relative_to(paths.root))
-    except ValueError:
-        return str(path)
-
-
 def _effective_ask_log_origin(
     explicit: Any,
     *,
@@ -172,89 +216,167 @@ def _effective_ask_log_origin(
     )
 
 
-def _log_payload_matches_turn(
-    paths: WorkspacePaths,
-    payload: dict[str, Any],
+def _stable_json_digest(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _question_digest(question: str) -> str:
+    return hashlib.sha256(question.strip().encode("utf-8")).hexdigest()
+
+
+def _profile_digest(
     *,
-    conversation_id: str,
-    turn_id: str,
-    run_id: str | None,
-    inner_workflow_id: str,
-    answer_file_path: str | None = None,
-) -> bool:
-    if payload.get("conversation_id") != conversation_id or payload.get("turn_id") != turn_id:
-        return False
-    if isinstance(run_id, str) and run_id:
-        payload_run_id = payload.get("run_id")
-        if isinstance(payload_run_id, str) and payload_run_id and payload_run_id != run_id:
-            return False
-    if payload.get("entry_workflow_id") != "ask":
-        return False
-    payload_inner_workflow = payload.get("inner_workflow_id")
+    profile: dict[str, Any],
+    normalized_semantic_analysis: dict[str, Any],
+) -> str:
+    return _stable_json_digest(
+        {
+            "inner_workflow_id": profile.get("inner_workflow_id"),
+            "question_class": profile.get("question_class"),
+            "question_domain": profile.get("question_domain"),
+            "route_reason": profile.get("route_reason"),
+            "support_strategy": profile.get("support_strategy"),
+            "evidence_mode": profile.get("evidence_mode"),
+            "research_depth": profile.get("research_depth"),
+            "evidence_requirements": profile.get("evidence_requirements"),
+            "memory_query_profile": profile.get("memory_query_profile"),
+            "semantic_analysis": normalized_semantic_analysis,
+        }
+    )
+
+
+def _turn_answer_file_is_empty(paths: WorkspacePaths, turn: dict[str, Any]) -> bool:
+    answer_file_path = turn.get("answer_file_path")
+    if not isinstance(answer_file_path, str) or not answer_file_path:
+        return True
+    path = Path(answer_file_path)
+    if not path.is_absolute():
+        path = paths.root / path
+    if not path.exists():
+        return True
+    return not path.read_text(encoding="utf-8").strip()
+
+
+def _turn_has_governance_reuse_blocker(paths: WorkspacePaths, turn: dict[str, Any]) -> bool:
+    if isinstance(turn.get("committed_run_id"), str) and turn.get("committed_run_id"):
+        return True
+    if _resolved_string_list(turn.get("session_ids")):
+        return True
+    if _resolved_string_list(turn.get("trace_ids")):
+        return True
+    response_excerpt = turn.get("response_excerpt")
+    if isinstance(response_excerpt, str) and response_excerpt.strip():
+        return True
+    return not _turn_answer_file_is_empty(paths, turn)
+
+
+def _governance_basis(
+    *,
+    question_digest: str,
+    profile_digest: str,
+    version_truth: dict[str, Any],
+    turn: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "question_digest": question_digest,
+        "profile_digest": profile_digest,
+        "published_snapshot_id": (
+            str(version_truth.get("published_snapshot_id"))
+            if isinstance(version_truth.get("published_snapshot_id"), str)
+            and version_truth.get("published_snapshot_id")
+            else None
+        ),
+        "published_source_signature": (
+            str(version_truth.get("published_source_signature"))
+            if isinstance(version_truth.get("published_source_signature"), str)
+            and version_truth.get("published_source_signature")
+            else None
+        ),
+        "turn_status": (
+            str(turn.get("status"))
+            if isinstance(turn.get("status"), str) and turn.get("status")
+            else None
+        ),
+        "attached_shared_job_ids": _resolved_string_list(turn.get("attached_shared_job_ids")),
+        "confirmation_kind": (
+            str(turn.get("confirmation_kind"))
+            if isinstance(turn.get("confirmation_kind"), str) and turn.get("confirmation_kind")
+            else None
+        ),
+        "confirmation_reason": (
+            str(turn.get("confirmation_reason"))
+            if isinstance(turn.get("confirmation_reason"), str) and turn.get("confirmation_reason")
+            else None
+        ),
+    }
+
+
+def _governance_invalidation_reasons(
+    *,
+    paths: WorkspacePaths,
+    turn: dict[str, Any],
+    run_id: str,
+    current_basis: dict[str, Any],
+    cached_state: dict[str, Any] | None,
+    explicit_continuation: bool,
+) -> list[str]:
+    reasons: list[str] = []
+    if not isinstance(cached_state, dict):
+        return reasons
+    active_run_id = (
+        str(turn.get("active_run_id"))
+        if isinstance(turn.get("active_run_id"), str) and turn.get("active_run_id")
+        else None
+    )
+    if explicit_continuation:
+        reasons.append("explicit-continuation")
+    if active_run_id != run_id:
+        reasons.append("active-run-changed")
+    if _turn_has_governance_reuse_blocker(paths, turn):
+        reasons.append("canonical-evidence-present")
+    if current_basis["question_digest"] != cached_state.get("question_digest"):
+        reasons.append("question-digest-changed")
+    if current_basis["profile_digest"] != cached_state.get("profile_digest"):
+        reasons.append("profile-changed")
+    if current_basis["published_snapshot_id"] != cached_state.get("published_snapshot_id"):
+        reasons.append("published-snapshot-changed")
     if (
-        isinstance(payload_inner_workflow, str)
-        and payload_inner_workflow
-        and payload_inner_workflow != inner_workflow_id
+        current_basis["published_source_signature"]
+        != cached_state.get("published_source_signature")
     ):
-        return False
-    payload_front_door_state = normalize_front_door_state(payload.get("front_door_state"))
-    if payload_front_door_state and payload_front_door_state != FRONT_DOOR_STATE_CANONICAL_ASK:
-        return False
-    expected_answer_file = _normalized_artifact_path(paths, answer_file_path)
-    payload_answer_file = _normalized_artifact_path(paths, payload.get("answer_file_path"))
-    if expected_answer_file and payload_answer_file and payload_answer_file != expected_answer_file:
-        return False
-    return True
+        reasons.append("published-source-signature-changed")
+    if current_basis["turn_status"] != cached_state.get("turn_status"):
+        reasons.append("turn-status-changed")
+    if current_basis["attached_shared_job_ids"] != _resolved_string_list(
+        cached_state.get("attached_shared_job_ids")
+    ):
+        reasons.append("attached-shared-jobs-changed")
+    if current_basis["confirmation_kind"] != cached_state.get("confirmation_kind"):
+        reasons.append("confirmation-kind-changed")
+    if current_basis["confirmation_reason"] != cached_state.get("confirmation_reason"):
+        reasons.append("confirmation-reason-changed")
+    return list(dict.fromkeys(reasons))
 
 
-def _discover_unique_turn_log_artifacts(
+def _cache_preanswer_governance_state(
     paths: WorkspacePaths,
     *,
-    conversation_id: str,
-    turn_id: str,
-    run_id: str | None,
-    inner_workflow_id: str,
-    answer_file_path: str | None,
-) -> tuple[list[str], list[str]]:
-    session_candidates: list[tuple[str, str]] = []
-    trace_candidates: list[tuple[str, str]] = []
-    for path in sorted(paths.query_sessions_dir.glob("*.json")):
-        payload = read_json(path)
-        if not payload or not _log_payload_matches_turn(
-            paths,
-            payload,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            run_id=run_id,
-            inner_workflow_id=inner_workflow_id,
-            answer_file_path=answer_file_path,
-        ):
-            continue
-        session_id = payload.get("session_id")
-        if isinstance(session_id, str) and session_id:
-            session_candidates.append((str(payload.get("recorded_at") or ""), session_id))
-    for path in sorted(paths.retrieval_traces_dir.glob("*.json")):
-        payload = read_json(path)
-        if not payload or not _log_payload_matches_turn(
-            paths,
-            payload,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            run_id=run_id,
-            inner_workflow_id=inner_workflow_id,
-            answer_file_path=answer_file_path,
-        ):
-            continue
-        trace_id = payload.get("trace_id")
-        if isinstance(trace_id, str) and trace_id:
-            trace_candidates.append((str(payload.get("recorded_at") or ""), trace_id))
-    ordered_sessions = [
-        session_id for _recorded_at, session_id in sorted(session_candidates)
-    ]
-    ordered_traces = [
-        trace_id for _recorded_at, trace_id in sorted(trace_candidates)
-    ]
-    return ordered_sessions, ordered_traces
+    run_id: str,
+    basis: dict[str, Any],
+    response_payload: dict[str, Any],
+) -> None:
+    update_run_state(
+        paths,
+        run_id=run_id,
+        updates={
+            "preanswer_governance_state": {
+                "schema_version": 1,
+                **basis,
+                "response_payload": response_payload,
+            }
+        },
+    )
 
 
 def _resolved_log_artifact_ids(
@@ -280,6 +402,27 @@ def _preview_source_changes(
     from .workspace_probe import preview_source_changes
 
     return preview_source_changes(paths)
+
+
+def _refresh_turn_execution_cost_profile(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    run_id: str | None,
+) -> None:
+    if not isinstance(run_id, str) or not run_id:
+        return
+    run_state = load_run_state(paths, run_id)
+    profile = run_state.get("execution_cost_profile")
+    if not isinstance(profile, dict):
+        return
+    update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates={"execution_cost_profile": profile},
+    )
 
 
 def _sync_turn_log_artifacts(
@@ -351,6 +494,7 @@ def _sync_turn_log_artifacts(
             continue
         payload.update({key: value for key, value in update_fields.items() if value is not None})
         write_json(session_path, payload)
+        update_turn_artifact_index(paths, payload=payload)
     for trace_id in trace_ids:
         trace_path = paths.retrieval_traces_dir / f"{trace_id}.json"
         payload = read_json(trace_path)
@@ -358,6 +502,7 @@ def _sync_turn_log_artifacts(
             continue
         payload.update({key: value for key, value in update_fields.items() if value is not None})
         write_json(trace_path, payload)
+        update_turn_artifact_index(paths, payload=payload)
 
 
 def _changed_source_relevance(
@@ -538,6 +683,12 @@ def _commit_governed_boundary_turn(
     answer_path = paths.root / answer_file_path
     answer_path.parent.mkdir(parents=True, exist_ok=True)
     answer_path.write_text(reason.strip() + "\n", encoding="utf-8")
+    begin_run_phase(
+        paths,
+        run_id=run_id,
+        phase="commit",
+        payload={"support_basis": "governed-boundary"},
+    )
     updated = commit_run(
         paths,
         conversation_id=conversation_id,
@@ -563,13 +714,32 @@ def _commit_governed_boundary_turn(
             "response_excerpt": reason.strip(),
         },
     )
-    refresh_runtime_projections(paths)
+    projection_refresh = queue_projection_refresh(
+        paths,
+        reason="A governed-boundary canonical turn was committed.",
+    )
+    finish_run_phase(
+        paths,
+        run_id=run_id,
+        phase="commit",
+        payload={"status": "completed", "support_basis": "governed-boundary"},
+    )
+    _refresh_turn_execution_cost_profile(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        run_id=run_id,
+    )
     record_run_event_if_present(
         paths,
         run_id=run_id,
         stage="projection",
-        event_type="projection-refreshed",
-        payload={"conversation_id": conversation_id, "turn_id": turn_id},
+        event_type="projection-enqueued",
+        payload={
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            "shared_job_id": projection_refresh.get("shared_job_id"),
+        },
     )
     return {
         "conversation_id": conversation_id,
@@ -614,6 +784,12 @@ def _apply_control_plane_pause(
             attach_run_to_shared_job(paths, job_id=job_id, run_id=run_id)
         except FileNotFoundError:
             attach_shared_job_to_run(paths, run_id=run_id, job_id=job_id)
+        begin_run_phase(
+            paths,
+            run_id=run_id,
+            phase="retry_wait",
+            payload={"job_id": job_id, "state": pause_state},
+        )
         record_run_event_if_present(
             paths,
             run_id=run_id,
@@ -684,6 +860,12 @@ def _maybe_handle_confirmation_reply(
                 or "The confirmation-required shared job was declined."
             ),
         )
+        finish_run_phase(
+            paths,
+            run_id=run_id,
+            phase="retry_wait",
+            payload={"job_id": declined_job.get("job_id"), "status": "declined"},
+        )
         record_run_event_for_runs(
             paths,
             run_ids=declined_job.get("attached_run_ids"),
@@ -691,12 +873,11 @@ def _maybe_handle_confirmation_reply(
             event_type="shared-job-declined",
             payload={"job_id": declined_job.get("job_id")},
         )
-        record_run_event_for_runs(
+        record_shared_job_settled_once(
             paths,
             run_ids=declined_job.get("attached_run_ids"),
-            stage="control-plane",
-            event_type="shared-job-settled",
-            payload={"job_id": declined_job.get("job_id"), "status": "declined"},
+            job_id=str(declined_job.get("job_id") or ""),
+            status="declined",
         )
         reason = (
             str(
@@ -764,15 +945,20 @@ def _maybe_handle_confirmation_reply(
         return "blocked", updated
     settled_manifest = load_shared_job(paths, str(manifest["job_id"]))
     if settled_manifest and shared_job_is_settled(settled_manifest):
-        record_run_event_for_runs(
+        finish_run_phase(
             paths,
-            run_ids=settled_manifest.get("attached_run_ids"),
-            stage="control-plane",
-            event_type="shared-job-settled",
+            run_id=run_id,
+            phase="retry_wait",
             payload={
                 "job_id": settled_manifest.get("job_id"),
                 "status": settled_manifest.get("status"),
             },
+        )
+        record_shared_job_settled_once(
+            paths,
+            run_ids=settled_manifest.get("attached_run_ids"),
+            job_id=str(settled_manifest.get("job_id") or ""),
+            status=str(settled_manifest.get("status") or ""),
         )
     original_question = str(turn.get("user_question") or "").strip()
     if not original_question:
@@ -922,12 +1108,11 @@ def settle_lane_c_shared_refresh(
         manifest = complete_shared_job(paths, job_id, result=summary or {"status": "covered"})
     else:
         manifest = block_shared_job(paths, job_id, result=summary or {"status": "blocked"})
-    record_run_event_for_runs(
+    record_shared_job_settled_once(
         paths,
         run_ids=manifest.get("attached_run_ids"),
-        stage="control-plane",
-        event_type="shared-job-settled",
-        payload={"job_id": manifest.get("job_id"), "status": manifest.get("status")},
+        job_id=str(manifest.get("job_id") or ""),
+        status=str(manifest.get("status") or ""),
     )
     scope = manifest.get("scope", {})
     settled_snapshot_id = (
@@ -1392,12 +1577,14 @@ def prepare_ask_turn(
     This is an internal ask-lifecycle primitive used by canonical workflow code.
     It is not a preferred host integration entrypoint.
     """
+    explicit_continuation = False
     confirmation_resolution = _maybe_handle_confirmation_reply(
         paths,
         question=question,
         semantic_analysis=semantic_analysis,
     )
     if confirmation_resolution is not None:
+        explicit_continuation = True
         if confirmation_resolution[0] in {"declined", "blocked"}:
             return dict(confirmation_resolution[1] or {})
         question = confirmation_resolution[0]
@@ -1425,8 +1612,16 @@ def prepare_ask_turn(
         run_id=run_id,
         log_origin=effective_log_origin,
     )
+    current_turn = {
+        "conversation_id": opened["conversation_id"],
+        "turn_id": opened["turn_id"],
+        **load_turn_record(
+            paths,
+            conversation_id=opened["conversation_id"],
+            turn_id=opened["turn_id"],
+        ),
+    }
     knowledge_base = opened["workspace_snapshot"]["knowledge_base"]
-    interaction_snapshot = interaction_ingest_snapshot(paths)
     profile = question_execution_profile(
         paths,
         conversation_id=opened["conversation_id"],
@@ -1438,23 +1633,6 @@ def prepare_ask_turn(
     question_domain = str(profile["question_domain"])
     inner_workflow_id = str(profile["inner_workflow_id"])
     route_reason = str(profile["route_reason"])
-    record_run_event(
-        paths,
-        run_id=run_id,
-        stage="prepare",
-        event_type="preanswer-governance-started",
-        payload={
-            "question_class": question_class,
-            "question_domain": question_domain,
-            "inner_workflow_id": inner_workflow_id,
-        },
-    )
-    interaction_relevance = interaction_overlay_relevance(
-        paths,
-        question,
-        question_class=question_class,
-        question_domain=question_domain,
-    )
     memory_query_profile = profile["memory_query_profile"]
     bundle_paths = profile["bundle_paths"]
     evidence_mode = str(profile["evidence_mode"])
@@ -1473,6 +1651,89 @@ def prepare_ask_turn(
     needs_latest_workspace_state = bool(profile["needs_latest_workspace_state"])
     analysis_origin = str(profile["analysis_origin"])
     normalized_semantic_analysis = dict(profile["semantic_analysis"])
+    current_version_truth = version_context(paths)
+    current_governance_basis = _governance_basis(
+        question_digest=_question_digest(question),
+        profile_digest=_profile_digest(
+            profile=profile,
+            normalized_semantic_analysis=normalized_semantic_analysis,
+        ),
+        version_truth=current_version_truth,
+        turn=current_turn,
+    )
+    cached_governance_state = run_payload.get("preanswer_governance_state")
+    invalidation_reasons = _governance_invalidation_reasons(
+        paths=paths,
+        turn=current_turn,
+        run_id=run_id,
+        current_basis=current_governance_basis,
+        cached_state=(
+            cached_governance_state if isinstance(cached_governance_state, dict) else None
+        ),
+        explicit_continuation=explicit_continuation,
+    )
+    if invalidation_reasons:
+        update_run_state(paths, run_id=run_id, updates={"preanswer_governance_state": None})
+        record_run_event(
+            paths,
+            run_id=run_id,
+            stage="prepare",
+            event_type="preanswer-governance-invalidated",
+            payload={"reasons": invalidation_reasons},
+        )
+    cached_response_payload = (
+        cached_governance_state.get("response_payload")
+        if isinstance(cached_governance_state, dict)
+        else None
+    )
+    reusable_response = (
+        cached_response_payload.copy()
+        if (
+            isinstance(cached_governance_state, dict)
+            and not invalidation_reasons
+            and current_governance_basis["turn_status"]
+            in {"prepared", "action-required", "awaiting-confirmation", "waiting-shared-job"}
+            and isinstance(cached_response_payload, dict)
+            and not _turn_has_governance_reuse_blocker(paths, current_turn)
+        )
+        else None
+    )
+    if reusable_response is not None:
+        record_run_event(
+            paths,
+            run_id=run_id,
+            stage="prepare",
+            event_type="preanswer-governance-reused",
+            payload={
+                "status": current_governance_basis["turn_status"],
+                "attached_shared_job_ids": current_governance_basis["attached_shared_job_ids"],
+            },
+        )
+        return reusable_response
+    record_run_event(
+        paths,
+        run_id=run_id,
+        stage="prepare",
+        event_type="preanswer-governance-started",
+        payload={
+            "question_class": question_class,
+            "question_domain": question_domain,
+            "inner_workflow_id": inner_workflow_id,
+        },
+    )
+    begin_run_phase(
+        paths,
+        run_id=run_id,
+        phase="preanswer_governance",
+        payload={"question_class": question_class, "question_domain": question_domain},
+    )
+    interaction_relevance = interaction_overlay_relevance(
+        paths,
+        question,
+        question_class=question_class,
+        question_domain=question_domain,
+    )
+    interaction_snapshot = interaction_ingest_snapshot(paths)
     warm_start = profile["warm_start_evidence"]
     workspace_notices_enabled = _workspace_notices_enabled(question_domain)
     reference_resolution = (
@@ -1483,6 +1744,14 @@ def prepare_ask_turn(
     if isinstance(reference_resolution, dict) and not reference_resolution.get("detected"):
         reference_resolution = None
     reference_resolution_summary = build_reference_resolution_summary(reference_resolution)
+    backlog_policy = _interaction_backlog_policy(
+        question_class=question_class,
+        question_domain=question_domain,
+        inspection_scope=inspection_scope,
+        reference_resolution=reference_resolution,
+        interaction_snapshot=interaction_snapshot,
+        interaction_relevance=interaction_relevance,
+    )
 
     environment_state = cached_bootstrap_readiness(paths)
     environment_ready = bool(environment_state["ready"])
@@ -1598,34 +1867,19 @@ def prepare_ask_turn(
         and not action_required
         and interaction_snapshot["pending_promotion_count"]
     ):
-        if interaction_snapshot.get("load_warnings"):
+        backlog_notice = (
+            str(backlog_policy.get("notice"))
+            if isinstance(backlog_policy.get("notice"), str)
+            else None
+        )
+        if backlog_policy.get("state") in {"blocking", "advisory"} and backlog_notice:
             sync_suggested = True
             if freshness_notice:
-                freshness_notice = (
-                    f"{freshness_notice} Pending interaction-derived runtime state could not be "
-                    "read completely during this check, so a sync may be needed once active "
-                    "writes finish."
-                )
+                freshness_notice = f"{freshness_notice} {backlog_notice}"
             else:
-                freshness_notice = (
-                    "Pending interaction-derived runtime state could not be read completely "
-                    "during this check, so a sync may be needed once active writes finish."
-                )
-        elif interaction_relevance["has_relevant_pending_interaction"]:
-            sync_suggested = True
-            if freshness_notice:
-                freshness_notice = (
-                    f"{freshness_notice} Pending interaction-derived knowledge also appears "
-                    "relevant and still awaits sync-time promotion."
-                )
-            else:
-                freshness_notice = (
-                    "Pending interaction-derived knowledge appears relevant and still awaits "
-                    "sync-time promotion."
-                )
-            if environment_ready:
-                sync_suggested = True
-                prefer_sync_before_answer = True
+                freshness_notice = backlog_notice
+        if backlog_policy.get("state") == "blocking" and environment_ready:
+            prefer_sync_before_answer = True
 
     if (
         workspace_notices_enabled
@@ -1636,10 +1890,7 @@ def prepare_ask_turn(
             or (knowledge_base["stale"] and prefer_sync_before_answer)
             or (
                 interaction_snapshot["pending_promotion_count"]
-                and (
-                    interaction_relevance["has_relevant_pending_interaction"]
-                    or bool(interaction_snapshot.get("load_warnings"))
-                )
+                and backlog_policy.get("state") == "blocking"
             )
         )
     ):
@@ -1652,8 +1903,19 @@ def prepare_ask_turn(
                 auto_sync_reason = candidate_reason
             else:
                 auto_sync_reason = (
-                    "Relevant pending interaction-derived knowledge still awaits "
-                    "sync-time promotion."
+                    (
+                        "Relevant pending interaction-derived knowledge still awaits "
+                        "sync-time promotion."
+                    )
+                    if not interaction_snapshot.get("load_warnings")
+                    else (
+                        str(backlog_policy.get("notice"))
+                        if isinstance(backlog_policy.get("notice"), str)
+                        else (
+                            "Pending interaction-derived runtime state could not be read "
+                            "completely during this check."
+                        )
+                    )
                 )
         (
             sync_environment_ready,
@@ -1777,10 +2039,7 @@ def prepare_ask_turn(
         workspace_notices_enabled
         and question_domain == "workspace-corpus"
         and interaction_snapshot["pending_promotion_count"]
-        and (
-            interaction_relevance["has_relevant_pending_interaction"]
-            or bool(interaction_snapshot.get("load_warnings"))
-        )
+        and backlog_policy.get("state") in {"blocking", "advisory"}
     )
 
     if control_plane_pause_state == "awaiting-confirmation":
@@ -1791,7 +2050,13 @@ def prepare_ask_turn(
         status = "waiting-shared-job"
     else:
         status = "action-required" if action_required else "prepared"
-    update_conversation_turn(
+    finish_run_phase(
+        paths,
+        run_id=run_id,
+        phase="preanswer_governance",
+        payload={"status": status, "auto_sync_triggered": auto_sync_triggered},
+    )
+    updated_turn = update_conversation_turn(
         paths,
         conversation_id=opened["conversation_id"],
         turn_id=opened["turn_id"],
@@ -1894,6 +2159,23 @@ def prepare_ask_turn(
     response["confirmation_kind"] = confirmation_kind
     response["confirmation_prompt"] = confirmation_prompt
     response["confirmation_reason"] = confirmation_reason
+    final_governance_basis = _governance_basis(
+        question_digest=current_governance_basis["question_digest"],
+        profile_digest=current_governance_basis["profile_digest"],
+        version_truth=version_context(paths),
+        turn={
+            "status": updated_turn.get("status"),
+            "attached_shared_job_ids": updated_turn.get("attached_shared_job_ids"),
+            "confirmation_kind": updated_turn.get("confirmation_kind"),
+            "confirmation_reason": updated_turn.get("confirmation_reason"),
+        },
+    )
+    _cache_preanswer_governance_state(
+        paths,
+        run_id=run_id,
+        basis=final_governance_basis,
+        response_payload=response,
+    )
     return response
 
 
@@ -1976,7 +2258,7 @@ def complete_ask_turn(
         }
     resolved_front_door_state = normalize_front_door_state(current_turn.get("front_door_state"))
     provisional_answer_file_path = answer_file_path or current_turn.get("answer_file_path")
-    discovered_session_ids, discovered_trace_ids = _discover_unique_turn_log_artifacts(
+    discovered_session_ids, discovered_trace_ids = discover_turn_artifact_candidates(
         paths,
         conversation_id=conversation_id,
         turn_id=turn_id,
@@ -2272,6 +2554,12 @@ def complete_ask_turn(
         raise ValueError(
             str(admissibility_gate_result.get("reason") or "The turn is not commit-admissible.")
         )
+    begin_run_phase(
+        paths,
+        run_id=run_id,
+        phase="commit",
+        payload={"support_basis": effective_support_basis, "answer_state": effective_answer_state},
+    )
     updated = commit_run(
         paths,
         conversation_id=conversation_id,
@@ -2405,12 +2693,31 @@ def complete_ask_turn(
         else None,
         hybrid_refresh_summary=resolved_hybrid_refresh_summary,
     )
-    refresh_runtime_projections(paths)
+    projection_refresh = queue_projection_refresh(
+        paths,
+        reason="A canonical ask turn was committed.",
+    )
+    finish_run_phase(
+        paths,
+        run_id=run_id,
+        phase="commit",
+        payload={"support_basis": effective_support_basis, "answer_state": effective_answer_state},
+    )
+    _refresh_turn_execution_cost_profile(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        run_id=run_id,
+    )
     record_run_event_if_present(
         paths,
         run_id=run_id,
         stage="projection",
-        event_type="projection-refreshed",
-        payload={"conversation_id": conversation_id, "turn_id": turn_id},
+        event_type="projection-enqueued",
+        payload={
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            "shared_job_id": projection_refresh.get("shared_job_id"),
+        },
     )
     return updated

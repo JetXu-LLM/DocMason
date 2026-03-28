@@ -24,8 +24,6 @@ from .control_plane import (
     classify_sync_materiality,
     complete_shared_job,
     ensure_shared_job,
-    load_shared_job,
-    load_shared_jobs_index,
     pending_interaction_signature,
     required_prepare_capabilities,
     shared_job_control_plane_payload,
@@ -57,22 +55,22 @@ from .project import (
     write_json,
 )
 from .review import refresh_log_review_summary
-from .run_control import record_run_event_for_runs
+from .run_control import record_run_event_for_runs, record_shared_job_settled_once
 from .toolchain import (
     PREPARED_WORKSPACE_PYTHON_BASELINE,
     inspect_entrypoint,
     inspect_toolchain,
-)
-from .workspace_probe import (
-    office_renderer_snapshot,
-    pdf_renderer_snapshot,
-    preview_source_changes,
 )
 from .workflows import (
     WorkflowMetadata,
     WorkflowMetadataError,
     load_workflow_metadata,
     render_workflow_routing_markdown,
+)
+from .workspace_probe import (
+    office_renderer_snapshot,
+    pdf_renderer_snapshot,
+    preview_source_changes,
 )
 
 READY = "ready"
@@ -186,7 +184,10 @@ def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
     host_identity = current_host_identity(agent_surface=agent_surface)
     host_thread_ref = (
         str(host_identity.get("host_thread_ref"))
-        if isinstance(host_identity.get("host_thread_ref"), str) and host_identity.get("host_thread_ref")
+        if (
+            isinstance(host_identity.get("host_thread_ref"), str)
+            and host_identity.get("host_thread_ref")
+        )
         else None
     )
     conversation = load_bound_conversation_record_for_host(paths, host_identity=host_identity)
@@ -198,7 +199,7 @@ def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
         if isinstance(latest_turn, dict)
         else None
     )
-    warning = None
+    warning: dict[str, Any] | None = None
     if (
         isinstance(host_thread_ref, str)
         and host_thread_ref
@@ -224,7 +225,10 @@ def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
     log_context = None
     conversation_id = (
         str(conversation.get("conversation_id"))
-        if isinstance(conversation.get("conversation_id"), str) and conversation.get("conversation_id")
+        if (
+            isinstance(conversation.get("conversation_id"), str)
+            and conversation.get("conversation_id")
+        )
         else None
     )
     if isinstance(conversation_id, str) and conversation_id and isinstance(latest_turn, dict):
@@ -306,7 +310,7 @@ def _reconcile_command_context(
     reconciliation_state = "ready"
     reconciliation_result = None
     try:
-        reconciliation_result = _maybe_reconcile_active_thread(paths)
+        _maybe_reconcile_active_thread(paths)
     except LeaseConflictError as exc:
         reconciliation_state = "blocked" if mutating else "warning"
         coordination = _coordination_from_lease_conflict(
@@ -478,9 +482,13 @@ def summarize_command_failure(command: Sequence[str], execution: CommandExecutio
     return f"{' '.join(command)} failed with exit code {execution.exit_code}: {details}"
 
 
-def _unique_command_owner(job_family: str) -> dict[str, str]:
+def _unique_command_owner(job_family: str) -> dict[str, Any]:
     """Return a unique control-plane owner identity for one command invocation."""
-    return {"kind": "command", "id": f"{job_family}-command:{uuid.uuid4()}"}
+    return {
+        "kind": "command",
+        "id": f"{job_family}-command:{uuid.uuid4()}",
+        "pid": os.getpid(),
+    }
 
 
 def python_supported() -> bool:
@@ -865,7 +873,9 @@ def _install_uv_into_bootstrap_venv(
     if workspace.toolchain_bootstrap_uv.exists():
         actions_performed.append("Installed uv into the repo-local bootstrap helper venv.")
         return str(workspace.toolchain_bootstrap_uv), actions_performed, actions_skipped
-    actions_skipped.append("uv install completed but the bootstrap-helper uv executable is missing.")
+    actions_skipped.append(
+        "uv install completed but the bootstrap-helper uv executable is missing."
+    )
     return None, actions_performed, actions_skipped
 
 
@@ -897,9 +907,18 @@ def _provision_managed_python(
 
     executable = latest_managed_python_candidate(workspace)
     if executable is None:
-        return None, "uv reported success, but no repo-local managed Python 3.13 executable was found."
+        return (
+            None,
+            "uv reported success, but no repo-local managed Python 3.13 executable "
+            "was found.",
+        )
     _refresh_symlink(workspace.toolchain_python_current_dir, executable.parent.parent)
-    return workspace.toolchain_python_current_dir / "bin" / f"python{PREPARED_WORKSPACE_PYTHON_BASELINE}", None
+    return (
+        workspace.toolchain_python_current_dir
+        / "bin"
+        / f"python{PREPARED_WORKSPACE_PYTHON_BASELINE}",
+        None,
+    )
 
 
 def _rebuild_repo_local_venv(
@@ -1273,7 +1292,10 @@ def prepare_workspace(
             command_name="Prepare status",
             status_field="prepare_status",
             coordination=command_context["coordination"],
-            environment=environment_snapshot(workspace, editable_install_probe=editable_install_probe),
+            environment=environment_snapshot(
+                workspace,
+                editable_install_probe=editable_install_probe,
+            ),
         )
     actions_performed: list[str] = []
     actions_skipped: list[str] = []
@@ -1378,14 +1400,20 @@ def prepare_workspace(
                 },
                 "manual_recovery_doc": manual_workspace_recovery_doc(),
                 "next_steps": [
-                    "Run `docmason prepare --yes` to let the workspace create a repo-local bootstrap helper and install uv.",
+                    (
+                        "Run `docmason prepare --yes` to let the workspace create "
+                        "a repo-local bootstrap helper and install uv."
+                    ),
                     manual_recovery_next_step,
                 ],
             }
             lines = [
                 f"Prepare status: {ACTION_REQUIRED}",
                 "uv is required to provision the repo-local managed Python 3.13 toolchain.",
-                "Next step: run `docmason prepare --yes` to let the workspace create a repo-local bootstrap helper and install uv.",
+                (
+                    "Next step: run `docmason prepare --yes` to let the workspace "
+                    "create a repo-local bootstrap helper and install uv."
+                ),
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
         uv_binary, bootstrap_actions, bootstrap_skips = _install_uv_into_bootstrap_venv(
@@ -1408,14 +1436,20 @@ def prepare_workspace(
                 },
                 "manual_recovery_doc": manual_workspace_recovery_doc(),
                 "next_steps": [
-                    f"Install uv with {uv_install_display} or repair the bootstrap helper venv, then rerun `docmason prepare`.",
+                    (
+                        f"Install uv with {uv_install_display} or repair the "
+                        "bootstrap helper venv, then rerun `docmason prepare`."
+                    ),
                     manual_recovery_next_step,
                 ],
             }
             lines = [
                 f"Prepare status: {ACTION_REQUIRED}",
                 "The workspace could not provision a repo-local uv bootstrap helper.",
-                "Next step: install uv manually or repair the bootstrap helper venv, then rerun `docmason prepare`.",
+                (
+                    "Next step: install uv manually or repair the bootstrap helper "
+                    "venv, then rerun `docmason prepare`."
+                ),
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
     managed_python, managed_error = _provision_managed_python(
@@ -1436,17 +1470,21 @@ def prepare_workspace(
             },
             "manual_recovery_doc": manual_workspace_recovery_doc(),
             "next_steps": [
-                managed_error or "Provision the repo-local managed Python 3.13 toolchain and retry.",
+                managed_error
+                or "Provision the repo-local managed Python 3.13 toolchain and retry.",
                 manual_recovery_next_step,
             ],
         }
         lines = [
             f"Prepare status: {ACTION_REQUIRED}",
-            managed_error or "The repo-local managed Python 3.13 toolchain could not be provisioned.",
+            managed_error
+            or "The repo-local managed Python 3.13 toolchain could not be provisioned.",
             manual_recovery_next_step,
         ]
         return make_report(ACTION_REQUIRED, payload, lines)
-    actions_performed.append("Provisioned repo-local managed Python 3.13 under `.docmason/toolchain/python`.")
+    actions_performed.append(
+        "Provisioned repo-local managed Python 3.13 under `.docmason/toolchain/python`."
+    )
 
     venv_error = _rebuild_repo_local_venv(
         workspace,
@@ -1500,7 +1538,10 @@ def prepare_workspace(
             manual_recovery_next_step,
         ]
         return make_report(ACTION_REQUIRED, payload, lines)
-    actions_performed.append("Installed DocMason in editable mode with dev dependencies into the repo-local `.venv` via uv.")
+    actions_performed.append(
+        "Installed DocMason in editable mode with dev dependencies into the "
+        "repo-local `.venv` via uv."
+    )
 
     entrypoint_probe = inspect_entrypoint(workspace)
     entrypoint_health = str(entrypoint_probe.get("entrypoint_health") or "module-import-failed")
@@ -1796,15 +1837,11 @@ def prepare_workspace(
                 str(prepare_shared_job["job_id"]),
                 result={"status": status, "detail": "Prepare completed."},
             )
-        record_run_event_for_runs(
+        record_shared_job_settled_once(
             workspace,
             run_ids=prepare_shared_job.get("attached_run_ids"),
-            stage="control-plane",
-            event_type="shared-job-settled",
-            payload={
-                "job_id": prepare_shared_job.get("job_id"),
-                "status": prepare_shared_job.get("status"),
-            },
+            job_id=str(prepare_shared_job.get("job_id") or ""),
+            status=str(prepare_shared_job.get("status") or ""),
         )
 
     payload = {
@@ -1901,7 +1938,10 @@ def doctor_workspace(
                 "Prepared-workspace toolchain is mixed and requires repo-local repair before "
                 "ordinary ask can continue safely."
             ),
-            "Run `docmason prepare --yes` to rebuild `.venv` against repo-local managed Python 3.13.",
+            (
+                "Run `docmason prepare --yes` to rebuild `.venv` against "
+                "repo-local managed Python 3.13."
+            ),
         )
     else:
         add_check(
@@ -1976,7 +2016,10 @@ def doctor_workspace(
         add_check(
             "uv",
             DEGRADED,
-            "uv is not installed; `prepare` will use the repo-local bootstrap helper to install or repair uv before continuing.",
+            (
+                "uv is not installed; `prepare` will use the repo-local "
+                "bootstrap helper to install or repair uv before continuing."
+            ),
             f"Recommended: install uv with {uv_install_display}, or run "
             "`docmason prepare --yes` to let the workspace attempt that install path.",
         )
@@ -2222,7 +2265,10 @@ def doctor_workspace(
         add_check(
             "control-plane",
             READY,
-            "No confirmation-required shared control-plane job is currently blocking the workspace.",
+            (
+                "No confirmation-required shared control-plane job is currently "
+                "blocking the workspace."
+            ),
         )
 
     overall = READY
@@ -2393,7 +2439,9 @@ def sync_workspace(
                 readiness_next_steps.append(pdf_renderer_next_step())
                 required_capabilities.append("pdf-rendering")
             else:
-                readiness_next_steps.append("Run `docmason prepare` before retrying `docmason sync`.")
+                readiness_next_steps.append(
+                    "Run `docmason prepare` before retrying `docmason sync`."
+                )
             detail = str(sync_readiness.get("detail") or "The workspace is not ready for sync.")
             payload = {
                 "status": ACTION_REQUIRED,
@@ -2422,9 +2470,12 @@ def sync_workspace(
                 detail,
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
-        _index_payload, active_sources, _ambiguous_match, preview_change_set = preview_source_changes(
-            workspace
-        )
+        (
+            _index_payload,
+            active_sources,
+            _ambiguous_match,
+            preview_change_set,
+        ) = preview_source_changes(workspace)
         interaction_signature = pending_interaction_signature(workspace)
         kb_snapshot = knowledge_base_snapshot(workspace)
         sync_signature = sync_input_signature(
@@ -2543,7 +2594,9 @@ def sync_workspace(
                 "required_capabilities": [],
                 "pending_work_path": None,
                 "next_workflows": [],
-                "next_steps": ["Wait for the active shared sync job to settle, then retry if needed."],
+                "next_steps": [
+                    "Wait for the active shared sync job to settle, then retry if needed."
+                ],
             }
             lines = [
                 f"Sync status: {DEGRADED}",
@@ -2563,15 +2616,11 @@ def sync_workspace(
                 result={"detail": result.get("detail"), "status": result.get("status")},
             )
         if shared_job_is_settled(shared_job):
-            record_run_event_for_runs(
+            record_shared_job_settled_once(
                 workspace,
                 run_ids=shared_job.get("attached_run_ids"),
-                stage="control-plane",
-                event_type="shared-job-settled",
-                payload={
-                    "job_id": shared_job.get("job_id"),
-                    "status": shared_job.get("status"),
-                },
+                job_id=str(shared_job.get("job_id") or ""),
+                status=str(shared_job.get("status") or ""),
             )
     status = validation_command_status(result["status"])
     next_workflows: list[str] = []
@@ -2613,6 +2662,11 @@ def sync_workspace(
         "hybrid_enrichment": result.get("hybrid_enrichment", {}),
         "autonomous_steps": result.get("autonomous_steps", []),
         "required_capabilities": result.get("required_capabilities", []),
+        "phase_costs": result.get("phase_costs", {}),
+        "publish_skipped": result.get("publish_skipped", False),
+        "publish_skip_reason": result.get("publish_skip_reason"),
+        "repair_actions": result.get("repair_actions", []),
+        "projection_state": result.get("projection_state", {}),
         "pending_work_path": pending_work_path,
         "next_workflows": next_workflows,
         "next_steps": follow_up_steps,
@@ -2623,6 +2677,11 @@ def sync_workspace(
         f"Staging rebuilt: {'yes' if result.get('rebuilt', False) else 'no'}",
         f"Published: {'yes' if result['published'] else 'no'}",
     ]
+    if result.get("publish_skipped"):
+        lines.append("Publish skipped: yes")
+    publish_skip_reason = result.get("publish_skip_reason")
+    if isinstance(publish_skip_reason, str) and publish_skip_reason:
+        lines.append(f"Publish skip reason: {publish_skip_reason}")
     build_stats = result.get("build_stats", {})
     if isinstance(build_stats, dict):
         lines.append(
@@ -2674,6 +2733,26 @@ def sync_workspace(
             f"moved-or-renamed={stats.get('moved_or_renamed', 0)}, "
             f"deleted={stats.get('deleted', 0)}, "
             f"ambiguous={stats.get('ambiguous', 0)}"
+        )
+    phase_costs = result.get("phase_costs", {})
+    if isinstance(phase_costs, dict):
+        lines.append(
+            "Phase costs (s): "
+            + ", ".join(
+                f"{name}={float(value):.3f}"
+                for name, value in phase_costs.items()
+                if isinstance(value, (int, float))
+            )
+        )
+    repair_actions = result.get("repair_actions", [])
+    if isinstance(repair_actions, list) and repair_actions:
+        lines.append(f"Repair actions: {len(repair_actions)}")
+    projection_state = result.get("projection_state", {})
+    if isinstance(projection_state, dict):
+        lines.append(
+            "Projection state: "
+            f"dirty={'yes' if projection_state.get('dirty') else 'no'}, "
+            f"active_job={projection_state.get('active_job_id') or 'none'}"
         )
     if result["pending_sources"]:
         lines.append(

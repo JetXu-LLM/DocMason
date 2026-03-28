@@ -218,6 +218,68 @@ def _load_conversations(paths: WorkspacePaths) -> dict[tuple[str, str], dict[str
     return conversations
 
 
+def _committed_canonical_turn_artifacts(
+    paths: WorkspacePaths,
+) -> tuple[
+    dict[tuple[str, str], dict[str, Any]],
+    set[str],
+    set[str],
+]:
+    """Return committed canonical turns plus the session and trace ids they own."""
+    turn_lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    owned_session_ids: set[str] = set()
+    owned_trace_ids: set[str] = set()
+    for payload in _load_log_payloads(paths.conversations_dir):
+        conversation_id = payload.get("conversation_id")
+        if not isinstance(conversation_id, str) or not conversation_id:
+            continue
+        turns = payload.get("turns", [])
+        if not isinstance(turns, list):
+            continue
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            if not _record_has_canonical_ask_ownership(turn) or _is_synthetic_turn(turn):
+                continue
+            turn_id = turn.get("turn_id")
+            committed_run_id = turn.get("committed_run_id")
+            if (
+                not isinstance(turn_id, str)
+                or not turn_id
+                or not isinstance(committed_run_id, str)
+                or not committed_run_id
+            ):
+                continue
+            key = (conversation_id, turn_id)
+            turn_lookup[key] = turn
+            support = resolve_canonical_turn_support(paths, turn=turn)
+            owned_session_ids.update(support["session_ids"])
+            owned_trace_ids.update(support["trace_ids"])
+    return turn_lookup, owned_session_ids, owned_trace_ids
+
+
+def _payload_is_noncanonical_leftover(
+    payload: dict[str, Any],
+    *,
+    committed_turn_lookup: dict[tuple[str, str], dict[str, Any]],
+    owned_session_ids: set[str],
+    owned_trace_ids: set[str],
+) -> bool:
+    conversation_id = payload.get("conversation_id")
+    turn_id = payload.get("turn_id")
+    if not isinstance(conversation_id, str) or not isinstance(turn_id, str):
+        return False
+    if (conversation_id, turn_id) not in committed_turn_lookup:
+        return False
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        return session_id not in owned_session_ids
+    trace_id = payload.get("trace_id")
+    if isinstance(trace_id, str) and trace_id:
+        return trace_id not in owned_trace_ids
+    return False
+
+
 def _load_native_ledgers(paths: WorkspacePaths) -> list[dict[str, Any]]:
     if not paths.native_ledger_dir.exists():
         return []
@@ -385,6 +447,50 @@ def _run_commit_payload(paths: WorkspacePaths, run_id: str | None) -> dict[str, 
     return read_json(paths.runs_dir / run_id / "state.json")
 
 
+def resolve_canonical_turn_support(
+    paths: WorkspacePaths,
+    *,
+    turn: dict[str, Any],
+) -> dict[str, list[str]]:
+    """Return the final canonical trace-owned support set for one committed turn."""
+    trace_ids = [
+        value for value in turn.get("trace_ids", []) if isinstance(value, str) and value
+    ]
+    session_ids: list[str] = []
+    supporting_source_ids: list[str] = []
+    supporting_unit_ids: list[str] = []
+    supporting_artifact_ids: list[str] = []
+    for trace_id in trace_ids:
+        payload = read_json(paths.retrieval_traces_dir / f"{trace_id}.json")
+        if not payload:
+            continue
+        session_id = payload.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            session_ids.append(session_id)
+        supporting_source_ids.extend(
+            value
+            for value in payload.get("supporting_source_ids", [])
+            if isinstance(value, str) and value
+        )
+        supporting_unit_ids.extend(
+            value
+            for value in payload.get("supporting_unit_ids", [])
+            if isinstance(value, str) and value
+        )
+        supporting_artifact_ids.extend(
+            value
+            for value in payload.get("supporting_artifact_ids", [])
+            if isinstance(value, str) and value
+        )
+    return {
+        "trace_ids": list(dict.fromkeys(trace_ids)),
+        "session_ids": list(dict.fromkeys(session_ids)),
+        "supporting_source_ids": list(dict.fromkeys(supporting_source_ids)),
+        "supporting_unit_ids": list(dict.fromkeys(supporting_unit_ids)),
+        "supporting_artifact_ids": list(dict.fromkeys(supporting_artifact_ids)),
+    }
+
+
 def _question_is_mixed_language(text: str) -> bool:
     has_latin = any("a" <= char.lower() <= "z" for char in text)
     has_cjk = any("\u4e00" <= char <= "\u9fff" for char in text)
@@ -507,6 +613,9 @@ def build_benchmark_candidates(
 ) -> dict[str, Any]:
     """Build candidate benchmark suggestions from runtime logs and conversation turns."""
     review_summary = summary or read_json(paths.review_summary_path)
+    committed_turn_lookup, owned_session_ids, owned_trace_ids = _committed_canonical_turn_artifacts(
+        paths
+    )
     query_sessions = sorted(
         _load_log_payloads(paths.query_sessions_dir),
         key=_recorded_at,
@@ -542,6 +651,13 @@ def build_benchmark_candidates(
 
     grouped: dict[tuple[str | None, str | None, str | None], dict[str, Any]] = {}
     for payload in [*query_sessions, *retrieval_traces]:
+        if _payload_is_noncanonical_leftover(
+            payload,
+            committed_turn_lookup=committed_turn_lookup,
+            owned_session_ids=owned_session_ids,
+            owned_trace_ids=owned_trace_ids,
+        ):
+            continue
         conversation_id = payload.get("conversation_id")
         turn_id = payload.get("turn_id")
         session_id = (
@@ -607,6 +723,17 @@ def build_benchmark_candidates(
             )
         group = grouped.get(group_key)
         if group is None:
+            canonical_support = (
+                resolve_canonical_turn_support(paths, turn=conversation_record["turn"])
+                if isinstance(conversation_record, dict)
+                else {
+                    "trace_ids": [],
+                    "session_ids": [],
+                    "supporting_source_ids": [],
+                    "supporting_unit_ids": [],
+                    "supporting_artifact_ids": [],
+                }
+            )
             group = {
                 "candidate_id": (
                     f"candidate-{conversation_id}-{turn_id}"
@@ -642,6 +769,7 @@ def build_benchmark_candidates(
                 "feedback_tags": [],
                 "feedback_match_count": 0,
                 "reference_resolution_summary": None,
+                "canonical_support": canonical_support,
             }
             if isinstance(conversation_record, dict):
                 group["conversation_path"] = conversation_record["conversation_path"]
@@ -654,14 +782,21 @@ def build_benchmark_candidates(
                 conversation_record["turn"] if isinstance(conversation_record, dict) else None,
             )
         )
-        if session_id:
+        canonical_support = group.get("canonical_support", {})
+        canonical_session_ids = canonical_support.get("session_ids", [])
+        canonical_trace_ids = canonical_support.get("trace_ids", [])
+        if session_id and (
+            not isinstance(conversation_record, dict) or session_id in canonical_session_ids
+        ):
             group["session_ids"].append(session_id)
             group["feedback_match_count"] += len(feedback_by_session.get(session_id, []))
             for record in feedback_by_session.get(session_id, []):
                 tags = record.get("feedback_tags", [])
                 if isinstance(tags, list):
                     group["feedback_tags"].extend(tag for tag in tags if isinstance(tag, str))
-        if trace_id:
+        if trace_id and (
+            not isinstance(conversation_record, dict) or trace_id in canonical_trace_ids
+        ):
             group["trace_ids"].append(trace_id)
             group["feedback_match_count"] += len(feedback_by_trace.get(trace_id, []))
             for record in feedback_by_trace.get(trace_id, []):
@@ -739,6 +874,19 @@ def build_benchmark_candidates(
             "candidate_source": group.get("candidate_source"),
             **group["question_context"],
         }
+        canonical_support = (
+            group["canonical_support"] if isinstance(group.get("canonical_support"), dict) else {}
+        )
+        if (
+            isinstance(group.get("candidate_source"), str)
+            and group["candidate_source"] == "committed-turn"
+        ):
+            candidate["supporting_source_ids"] = canonical_support.get("supporting_source_ids", [])
+            candidate["supporting_unit_ids"] = canonical_support.get("supporting_unit_ids", [])
+            candidate["supporting_artifact_ids"] = canonical_support.get(
+                "supporting_artifact_ids",
+                [],
+            )
         if isinstance(group.get("reference_resolution_summary"), str):
             candidate["reference_resolution_summary"] = group["reference_resolution_summary"]
         if isinstance(group.get("conversation_path"), str):
@@ -816,6 +964,9 @@ def _top_counts(counter: Counter[str], *, key_name: str) -> list[dict[str, Any]]
 
 def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
     """Build a review-friendly summary over runtime query and trace logs."""
+    committed_turn_lookup, owned_session_ids, owned_trace_ids = _committed_canonical_turn_artifacts(
+        paths
+    )
     query_sessions = sorted(
         _load_log_payloads(paths.query_sessions_dir),
         key=_recorded_at,
@@ -866,19 +1017,23 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
     committed_turns = sorted(
         [
             {
-                "conversation_id": payload["conversation_id"],
-                "turn_id": turn["turn_id"],
-                "run_id": turn.get("committed_run_id"),
-                "recorded_at": (
-                    turn.get("completed_at")
-                    or turn.get("updated_at")
-                    or turn.get("opened_at")
-                ),
-                "status": turn.get("status"),
-                "answer_state": turn.get("answer_state"),
-                "support_basis": turn.get("support_basis"),
-                "question_domain": turn.get("question_domain"),
-                "version_context": turn.get("version_context"),
+                **{
+                    "conversation_id": payload["conversation_id"],
+                    "turn_id": turn["turn_id"],
+                    "run_id": turn.get("committed_run_id"),
+                    "recorded_at": (
+                        turn.get("completed_at")
+                        or turn.get("updated_at")
+                        or turn.get("opened_at")
+                    ),
+                    "status": turn.get("status"),
+                    "answer_state": turn.get("answer_state"),
+                    "support_basis": turn.get("support_basis"),
+                    "question_domain": turn.get("question_domain"),
+                    "version_context": turn.get("version_context"),
+                    "execution_cost_profile": turn.get("execution_cost_profile"),
+                },
+                "canonical_support": resolve_canonical_turn_support(paths, turn=turn),
             }
             for payload in _load_log_payloads(paths.conversations_dir)
             if isinstance(payload.get("conversation_id"), str)
@@ -905,7 +1060,15 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
         unit_counter.update(f"{source_id}:{unit_id}" for source_id, unit_id in pairs)
 
     no_result_queries = [
-        payload for payload in real_query_sessions if payload.get("status") == "no-results"
+        payload
+        for payload in real_query_sessions
+        if payload.get("status") == "no-results"
+        and not _payload_is_noncanonical_leftover(
+            payload,
+            committed_turn_lookup=committed_turn_lookup,
+            owned_session_ids=owned_session_ids,
+            owned_trace_ids=owned_trace_ids,
+        )
     ]
     degraded_answer_runs = [
         payload
@@ -913,6 +1076,12 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
         if payload.get("final_answer")
         and payload.get("status") != "ready"
         and not _is_external_verified_success(payload)
+        and not _payload_is_noncanonical_leftover(
+            payload,
+            committed_turn_lookup=committed_turn_lookup,
+            owned_session_ids=owned_session_ids,
+            owned_trace_ids=owned_trace_ids,
+        )
     ]
 
     failure_pattern_counter: Counter[str] = Counter()
@@ -928,6 +1097,13 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
             str(payload.get("session_id"))
         )
     for payload in real_retrieval_traces:
+        if _payload_is_noncanonical_leftover(
+            payload,
+            committed_turn_lookup=committed_turn_lookup,
+            owned_session_ids=owned_session_ids,
+            owned_trace_ids=owned_trace_ids,
+        ):
+            continue
         if payload.get("trace_mode") != "answer-first":
             continue
         if _is_external_verified_success(payload):
@@ -955,6 +1131,13 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
             }
         )
     for payload in real_retrieval_traces:
+        if _payload_is_noncanonical_leftover(
+            payload,
+            committed_turn_lookup=committed_turn_lookup,
+            owned_session_ids=owned_session_ids,
+            owned_trace_ids=owned_trace_ids,
+        ):
+            continue
         if payload.get("trace_mode") != "answer-first":
             continue
         if _is_external_verified_success(payload):
@@ -1180,16 +1363,6 @@ def _external_urls_from_turn(paths: WorkspacePaths, turn: dict[str, Any]) -> lis
 
 def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
     """Build an answer-history index for evidence warm-start and review analysis."""
-    session_lookup = {
-        path.stem: read_json(path)
-        for path in sorted(paths.query_sessions_dir.glob("*.json"))
-        if path.is_file()
-    }
-    trace_lookup = {
-        path.stem: read_json(path)
-        for path in sorted(paths.retrieval_traces_dir.glob("*.json"))
-        if path.is_file()
-    }
     records: list[dict[str, Any]] = []
     for path in sorted(paths.conversations_dir.glob("*.json")):
         conversation = read_json(path)
@@ -1232,41 +1405,7 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
                 version_context.get("published_source_signature")
                 or version_context.get("corpus_signature")
             )
-            session_ids = [
-                value for value in turn.get("session_ids", []) if isinstance(value, str) and value
-            ]
-            trace_ids = [
-                value for value in turn.get("trace_ids", []) if isinstance(value, str) and value
-            ]
-            kb_source_ids: list[str] = []
-            for session_id in session_ids:
-                payload = session_lookup.get(session_id, {})
-                consulted_results = payload.get("consulted_results", [])
-                if not isinstance(consulted_results, list):
-                    continue
-                for item in consulted_results:
-                    if not isinstance(item, dict):
-                        continue
-                    source_id = item.get("source_id")
-                    if isinstance(source_id, str) and source_id:
-                        kb_source_ids.append(source_id)
-                    results = item.get("results", [])
-                    if isinstance(results, list):
-                        kb_source_ids.extend(
-                            [
-                                str(result.get("source_id"))
-                                for result in results
-                                if isinstance(result, dict)
-                                and isinstance(result.get("source_id"), str)
-                            ]
-                        )
-            for trace_id in trace_ids:
-                payload = trace_lookup.get(trace_id, {})
-                source_ids = payload.get("supporting_source_ids", [])
-                if isinstance(source_ids, list):
-                    kb_source_ids.extend(
-                        value for value in source_ids if isinstance(value, str) and value
-                    )
+            canonical_support = resolve_canonical_turn_support(paths, turn=turn)
             records.append(
                 {
                     "conversation_id": conversation_id,
@@ -1288,10 +1427,12 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
                     "support_basis": turn.get("support_basis"),
                     "answer_state": turn.get("answer_state"),
                     "answer_file_path": answer_file_path,
-                    "kb_source_ids": list(dict.fromkeys(kb_source_ids)),
+                    "kb_source_ids": canonical_support["supporting_source_ids"],
+                    "kb_unit_ids": canonical_support["supporting_unit_ids"],
+                    "kb_artifact_ids": canonical_support["supporting_artifact_ids"],
                     "external_urls": _external_urls_from_turn(paths, turn),
-                    "session_ids": session_ids,
-                    "trace_ids": trace_ids,
+                    "session_ids": canonical_support["session_ids"],
+                    "trace_ids": canonical_support["trace_ids"],
                     "recorded_at": turn.get("completed_at")
                     or turn.get("updated_at")
                     or turn.get("opened_at"),
@@ -1310,6 +1451,8 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
 
 def refresh_log_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
     """Rebuild and persist the runtime log-review summary."""
-    from .projections import refresh_runtime_projections
+    from .projections import ensure_runtime_projections_fresh
 
-    return refresh_runtime_projections(paths)
+    result = ensure_runtime_projections_fresh(paths, consumer="runtime-log-review")
+    summary = result.get("summary")
+    return summary if isinstance(summary, dict) else {}

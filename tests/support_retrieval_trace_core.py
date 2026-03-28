@@ -20,6 +20,7 @@ from docmason.commands import (
 )
 from docmason.knowledge import update_source_index
 from docmason.project import WorkspacePaths, read_json, write_json
+from docmason.review import refresh_log_review_summary
 from docmason.semantic_overlays import write_semantic_overlay
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
@@ -420,6 +421,28 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.assertEqual(coverage_manifest["sources"][0]["change_classification"], "unchanged")
         catalog = read_json(workspace.current_catalog_path)
         self.assertEqual(catalog["sources"][0]["change_classification"], "unchanged")
+
+    def test_zero_delta_sync_skips_publish_and_reports_phase_costs(self) -> None:
+        from docmason.commands import sync_workspace
+        from docmason.projections import run_projection_refresh_worker
+
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+        run_projection_refresh_worker(workspace)
+
+        second = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(second.payload["sync_status"], "valid")
+        self.assertTrue(second.payload["publish_skipped"])
+        self.assertIn("publish_skip_reason", second.payload)
+        self.assertIn("phase_costs", second.payload)
+        self.assertIn("detect", second.payload["phase_costs"])
+        self.assertIn("stage", second.payload["phase_costs"])
+        self.assertIn("publish", second.payload["phase_costs"])
+        self.assertIn("projection_state", second.payload)
+        self.assertFalse(second.payload["projection_state"]["dirty"])
 
     def test_modified_source_preserves_semantic_files_but_marks_them_stale(self) -> None:
         from docmason.commands import sync_workspace
@@ -981,6 +1004,34 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.assertTrue(reused.payload["supporting_unit_ids"])
         self.assertTrue(reused.payload["reused_session"])
 
+    def test_answer_trace_budget_uses_single_retrieval_load_and_caps_segments(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        answer_file = workspace.root / "long-answer.txt"
+        answer_file.write_text(
+            "\n\n".join(
+                [
+                    (
+                        "The architecture strategy connects the operating model to implementation "
+                        f"and paragraph {index:02d} repeats the same supported point."
+                    )
+                    for index in range(30)
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        report = trace_knowledge(answer_file=str(answer_file), top=2, paths=workspace)
+        self.assertIn("cost_profile", report.payload)
+        self.assertEqual(report.payload["retrieval_data_load_count"], 1)
+        self.assertLessEqual(report.payload["unique_segment_query_count"], 24)
+        self.assertLessEqual(report.payload["segment_count_after_budget"], 24)
+        self.assertTrue(report.payload["segment_budget_applied"])
+
     def test_lexically_overlapping_but_unsupported_answer_does_not_trace_as_grounded(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -1032,7 +1083,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         trace = trace_knowledge(answer_file=str(answer_file), top=2, paths=workspace)
         self.assertEqual(trace.exit_code, 2)
 
-        summary = read_json(workspace.review_summary_path)
+        summary = refresh_log_review_summary(workspace)
         self.assertEqual(summary["query_sessions"]["total"], 2)
         self.assertEqual(summary["retrieval_traces"]["total"], 1)
         self.assertEqual(len(summary["query_sessions"]["no_results"]), 1)

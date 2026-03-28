@@ -36,6 +36,7 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 1. Treat one ordinary user message as one canonical `ask` turn.
    - keep one live user question mapped to one canonical turn
    - reuse the live turn when the same question is continuing
+   - when the same live turn and the same active run are re-entered, reuse the existing governed preanswer result instead of restarting preanswer governance
    - return in the user's language unless they ask for another language
 2. Use the repository helpers in `docmason.ask`, `docmason.front_controller`, and `docmason.conversation` to:
    - reconcile any active native thread
@@ -62,11 +63,14 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - if the environment is ready but no published knowledge base exists yet, route to `knowledge-base-sync` instead of bluffing a workspace-grounded answer
    - if the published knowledge base is stale but still usable, answer from the published corpus with one concise freshness notice
    - if fresh workspace state is genuinely needed, let the ask helper govern prepare or sync rather than improvising it in the workflow
+   - do not turn simple exact-source asks into answer-critical sync just because pending interaction promotion backlog exists
+   - when the user has already narrowed to one exact source or unit, treat pending interaction backlog as an advisory notice unless the current turn truly depends on interaction-derived evidence
    - when workspace freshness depends on live local files, use repo-side live corpus discovery for `original_doc/` rather than git-tracked repo search
    - if prepare or sync becomes a confirmation-required shared job, pause the same turn in `awaiting-confirmation`
      - accept short same-session `yes` or `no` replies as approve or decline
      - `yes` continues the same task
      - `no` commits the same turn as `abstained + governed-boundary`
+   - if the same-session turn is already `prepared`, `awaiting-confirmation`, or `waiting-shared-job`, prefer reusing that governed state over rerunning shared-state mutation
    - while a turn is in `waiting-shared-job` or `awaiting-confirmation`, do not bypass the governed path by answering from `original_doc/`, `knowledge_base/staging/`, or `.staging-build`
 5. Route to the narrowest inner workflow that matches the ask.
    - direct supported answer -> `grounded-answer`

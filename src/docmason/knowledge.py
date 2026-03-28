@@ -19,6 +19,7 @@ from contextlib import redirect_stderr
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -29,6 +30,7 @@ from .affordances import (
     validate_derived_affordances,
 )
 from .artifacts import validate_artifact_index, validate_pdf_document
+from .control_plane import repair_stale_shared_jobs
 from .coordination import workspace_lease
 from .email_sources import parse_email_source
 from .evidence_artifacts import (
@@ -64,7 +66,7 @@ from .project import (
     sync_state,
     write_json,
 )
-from .projections import refresh_runtime_projections
+from .projections import projection_state_summary, queue_projection_refresh
 from .retrieval import (
     build_retrieval_artifacts,
     build_trace_artifacts,
@@ -5740,6 +5742,16 @@ def update_sync_state(
 def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[str, Any]:
     """Run the staged sync workflow and, by default, close the loop to final publish."""
     autonomous_steps: list[dict[str, Any]] = []
+    phase_costs = {
+        "detect": 0.0,
+        "stage": 0.0,
+        "repair": 0.0,
+        "author": 0.0,
+        "validate": 0.0,
+        "publish": 0.0,
+        "projection_enqueue": 0.0,
+    }
+    repair_actions: list[dict[str, Any]] = []
 
     pdf_snapshot = pdf_renderer_snapshot()
     if (
@@ -5762,6 +5774,11 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 }
             ],
             "required_capabilities": ["pdf-rendering"],
+            "phase_costs": phase_costs,
+            "publish_skipped": False,
+            "publish_skip_reason": None,
+            "repair_actions": repair_actions,
+            "projection_state": projection_state_summary(paths),
         }
 
     office_snapshot = office_renderer_snapshot(paths)
@@ -5782,8 +5799,25 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 }
             ],
             "required_capabilities": ["office-rendering"],
+            "phase_costs": phase_costs,
+            "publish_skipped": False,
+            "publish_skip_reason": None,
+            "repair_actions": repair_actions,
+            "projection_state": projection_state_summary(paths),
         }
     with workspace_lease(paths, "sync", timeout_seconds=600.0):
+        if paths.knowledge_base_dir.joinpath(".staging-build").exists():
+            shutil.rmtree(paths.knowledge_base_dir / ".staging-build")
+            repair_actions.append(
+                {
+                    "kind": "removed-stale-staging-build",
+                    "path": str(
+                        (paths.knowledge_base_dir / ".staging-build").relative_to(paths.root)
+                    ),
+                }
+            )
+        repair_actions.extend(repair_stale_shared_jobs(paths))
+        detect_started = perf_counter()
         current_signature = source_inventory_signature(paths)
         state = sync_state(paths)
         index_payload, active_sources, ambiguous_match, change_set = update_source_index(paths)
@@ -5808,6 +5842,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 ),
             }
         )
+        phase_costs["detect"] = perf_counter() - detect_started
         rebuild_required = (
             not paths.knowledge_base_staging_dir.exists()
             or state.get("staging_source_signature") != current_signature
@@ -5820,6 +5855,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
         )
         build_stats = {"reused_sources": 0, "rebuilt_sources": 0}
 
+        stage_started = perf_counter()
         if rebuild_required:
             _catalog_sources, _source_summaries, _ambiguous, build_stats = build_staging_artifacts(
                 paths,
@@ -5844,7 +5880,9 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 ),
             }
         )
+        phase_costs["stage"] = perf_counter() - stage_started
 
+        repair_started = perf_counter()
         interaction_manifest = build_promoted_interaction_memories(
             paths,
             target="staging",
@@ -5867,6 +5905,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 ),
             }
         )
+        phase_costs["repair"] = perf_counter() - repair_started
 
         pending_sources = collect_pending_synthesis(paths)
         auto_authoring = {
@@ -5875,6 +5914,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             "authored_count": 0,
             "mode": "disabled" if not autonomous else "conservative-in-repo",
         }
+        author_started = perf_counter()
         if pending_sources and autonomous:
             auto_authoring = auto_author_pending_semantics(
                 paths,
@@ -5908,6 +5948,7 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                     "detail": "No staged semantic authoring was required.",
                 }
             )
+        phase_costs["author"] = perf_counter() - author_started
 
         hybrid_enrichment = hybrid_enrichment_status(paths, target="staging")
         autonomous_steps.append(
@@ -5964,6 +6005,11 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 },
                 "change_set": change_set,
                 "source_index": index_payload,
+                "phase_costs": phase_costs,
+                "publish_skipped": False,
+                "publish_skip_reason": None,
+                "repair_actions": repair_actions,
+                "projection_state": projection_state_summary(paths),
             }
         if pending_sources:
             update_sync_state(
@@ -6007,9 +6053,16 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 },
                 "change_set": change_set,
                 "source_index": index_payload,
+                "phase_costs": phase_costs,
+                "publish_skipped": False,
+                "publish_skip_reason": None,
+                "repair_actions": repair_actions,
+                "projection_state": projection_state_summary(paths),
             }
 
+        validate_started = perf_counter()
         validation_report = validate_target(paths, target="staging")
+        phase_costs["validate"] = perf_counter() - validate_started
         autonomous_steps.append(
             {
                 "step": "validate",
@@ -6026,37 +6079,69 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             }
         )
         published = False
+        publish_skipped = False
+        publish_skip_reason: str | None = None
         published_manifest: dict[str, Any] | None = None
         published_signature: str | None = state.get("published_source_signature")
         if validation_report["status"] in {"valid", "warnings"}:
-            published_manifest = publish_staging(paths, validation_report)
-            published = True
-            published_signature = current_signature
-            promoted_result = mark_promoted_interaction_entries(paths, target="current")
-            interaction_snapshot = {
-                **interaction_snapshot,
-                "last_overlay_at": promoted_result["pending_overlay"].get("generated_at"),
-                "pending_capture_count": promoted_result["pending_overlay"].get(
-                    "pending_entry_count", 0
-                ),
-                "pending_promotion_count": promoted_result["pending_overlay"].get(
-                    "pending_entry_count",
-                    0,
-                ),
-                "sync_recommended": bool(
-                    promoted_result["pending_overlay"].get("pending_entry_count", 0)
-                ),
-            }
-            autonomous_steps.append(
-                {
-                    "step": "publish",
-                    "status": "completed",
-                    "detail": (
-                        "Published an immutable snapshot and activated `knowledge_base/current`."
+            if (
+                not rebuild_required
+                and int(auto_repairs.get("repair_count", 0) or 0) == 0
+                and int(interaction_snapshot.get("pending_promotion_count", 0) or 0) == 0
+                and state.get("published_source_signature") == current_signature
+            ):
+                publish_skipped = True
+                publish_skip_reason = (
+                    "Published truth already matches the current source signature and no "
+                    "interaction promotion or repair changed publishable state."
+                )
+                autonomous_steps.append(
+                    {
+                        "step": "publish",
+                        "status": "completed",
+                        "detail": (
+                            "Skipped publication because the current snapshot "
+                            "is already current."
+                        ),
+                    }
+                )
+            else:
+                publish_started = perf_counter()
+                published_manifest = publish_staging(paths, validation_report)
+                phase_costs["publish"] = perf_counter() - publish_started
+                published = True
+                published_signature = current_signature
+                promoted_result = mark_promoted_interaction_entries(paths, target="current")
+                interaction_snapshot = {
+                    **interaction_snapshot,
+                    "last_overlay_at": promoted_result["pending_overlay"].get("generated_at"),
+                    "pending_capture_count": promoted_result["pending_overlay"].get(
+                        "pending_entry_count", 0
+                    ),
+                    "pending_promotion_count": promoted_result["pending_overlay"].get(
+                        "pending_entry_count",
+                        0,
+                    ),
+                    "sync_recommended": bool(
+                        promoted_result["pending_overlay"].get("pending_entry_count", 0)
                     ),
                 }
-            )
-            refresh_runtime_projections(paths)
+                autonomous_steps.append(
+                    {
+                        "step": "publish",
+                        "status": "completed",
+                        "detail": (
+                            "Published an immutable snapshot and activated "
+                            "`knowledge_base/current`."
+                        ),
+                    }
+                )
+                projection_started = perf_counter()
+                queue_projection_refresh(
+                    paths,
+                    reason="A knowledge-base publish activated new canonical runtime truth.",
+                )
+                phase_costs["projection_enqueue"] = perf_counter() - projection_started
         else:
             autonomous_steps.append(
                 {
@@ -6092,9 +6177,15 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
 
         return {
             "status": validation_report["status"],
-            "detail": "Published the staged knowledge base."
-            if published
-            else "Validation blocked publication.",
+            "detail": (
+                "Published the staged knowledge base."
+                if published
+                else (
+                    "Published truth was already current, so final publication was skipped."
+                    if publish_skipped
+                    else "Validation blocked publication."
+                )
+            ),
             "pending_sources": [],
             "validation": validation_report,
             "published": published,
@@ -6112,6 +6203,11 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             },
             "change_set": change_set,
             "source_index": index_payload,
+            "phase_costs": phase_costs,
+            "publish_skipped": publish_skipped,
+            "publish_skip_reason": publish_skip_reason,
+            "repair_actions": repair_actions,
+            "projection_state": projection_state_summary(paths),
         }
 
 

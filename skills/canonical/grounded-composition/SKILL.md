@@ -58,6 +58,11 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - inspect direct source files or rerender only when the published-artifact plan says the knowledge base is insufficient for style, visual structure, or low-level detail
    - bring in external verification or stable model knowledge only when the composition task genuinely needs it, and keep the support basis explicit
 3. Start complex work with a visible method or plan summary before diving into the deeper evidence loop.
+   - when the workflow enters repository-owned drafting work, record the phase honestly through the hidden run-phase helpers:
+     - first drafting pass -> `draft`
+     - answer text changed before a follow-on trace -> `rewrite`
+     - a later trace over the updated draft -> `retrace`
+     - shared confirmation or shared-job waiting -> `retry_wait`
 4. Keep the work evidence-backed rather than speculative.
 5. For compare or synthesis tasks, keep an explicit support ledger while drafting:
    - which source or unit supports each major claim
@@ -71,6 +76,7 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - keep at least one research-notes artifact
    - add draft artifacts when needed
 9. Run final provenance tracing over the answer file when the result makes source-grounded claims.
+   - do not keep retracing the same unchanged answer text; if the answer-file digest did not change and no new trace or session is needed, stop or reuse the existing final trace instead of silently looping
 10. Return the main result plus any relevant bundle paths, support boundary, overall support basis, and next steps to the main agent.
 
 ## Escalation Rules

@@ -1066,7 +1066,10 @@ def _ask_turn_result_payload(paths: WorkspacePaths, *, turn: dict[str, Any]) -> 
 
 def _ask_turn_artifact_paths(paths: WorkspacePaths, *, turn: dict[str, Any]) -> dict[str, str]:
     """Collect the runtime artifact chain produced by one ask-turn replay."""
+    from .projections import ensure_runtime_projections_fresh
+
     artifacts: dict[str, str] = {}
+    ensure_runtime_projections_fresh(paths, consumer="evaluation-artifact-capture")
     conversation_id = (
         str(turn.get("conversation_id"))
         if isinstance(turn.get("conversation_id"), str) and turn.get("conversation_id")
@@ -1276,7 +1279,57 @@ def _ask_turn_structural_checks(
         if isinstance(run_id, str) and run_id
         else []
     )
+    invalidation_indexes = [
+        index
+        for index, payload in enumerate(journal_entries)
+        if payload.get("event_type") == "preanswer-governance-invalidated"
+    ]
+    preanswer_started_indexes = [
+        index
+        for index, payload in enumerate(journal_entries)
+        if payload.get("event_type") == "preanswer-governance-started"
+    ]
+    ask_prepared_indexes = [
+        index
+        for index, payload in enumerate(journal_entries)
+        if payload.get("event_type") == "ask-prepared"
+    ]
+    answer_critical_sync_job_ids: list[str] = []
+    for payload in journal_entries:
+        if payload.get("event_type") != "shared-job-attached":
+            continue
+        event_payload = payload.get("payload")
+        job_id = (
+            event_payload.get("job_id")
+            if isinstance(event_payload, dict) and isinstance(event_payload.get("job_id"), str)
+            else None
+        )
+        if not isinstance(job_id, str) or not job_id:
+            continue
+        manifest = load_shared_job(paths, job_id)
+        if not manifest:
+            continue
+        if manifest.get("criticality") != "answer-critical":
+            continue
+        if manifest.get("job_family") != "sync":
+            continue
+        answer_critical_sync_job_ids.append(job_id)
+    allowed_replays = len(invalidation_indexes) + 1
+    repeated_governance_without_invalidation = max(
+        len(preanswer_started_indexes) - allowed_replays,
+        0,
+    )
+    repeated_prepare_without_invalidation = max(
+        len(ask_prepared_indexes) - allowed_replays,
+        0,
+    )
+    repeated_sync_jobs_without_invalidation = max(
+        len(set(answer_critical_sync_job_ids)) - allowed_replays,
+        0,
+    )
     unresolved_answer_critical_jobs: list[str] = []
+    duplicate_answer_critical_settlements: list[str] = []
+    late_answer_critical_settlements: list[str] = []
     if commit_index is not None:
         for job_id in attached_job_ids:
             manifest = load_shared_job(paths, job_id)
@@ -1287,6 +1340,18 @@ def _ask_turn_structural_checks(
                 continue
             if not shared_job_is_settled(manifest):
                 unresolved_answer_critical_jobs.append(job_id)
+                continue
+            settled_indexes = [
+                index
+                for index, payload in enumerate(journal_entries)
+                if payload.get("event_type") == "shared-job-settled"
+                and isinstance(payload.get("payload"), dict)
+                and payload["payload"].get("job_id") == job_id
+            ]
+            if len(settled_indexes) > 1:
+                duplicate_answer_critical_settlements.append(job_id)
+            if any(index > commit_index for index in settled_indexes):
+                late_answer_critical_settlements.append(job_id)
     return [
         {
             "name": "shared_job_wait_closure",
@@ -1295,10 +1360,40 @@ def _ask_turn_structural_checks(
             "passed": not waiting_jobs_missing_settlement,
         },
         {
+            "name": "same_run_preanswer_governance_reentry",
+            "expected": 0,
+            "actual": repeated_governance_without_invalidation,
+            "passed": repeated_governance_without_invalidation == 0,
+        },
+        {
+            "name": "same_run_ask_prepared_reentry",
+            "expected": 0,
+            "actual": repeated_prepare_without_invalidation,
+            "passed": repeated_prepare_without_invalidation == 0,
+        },
+        {
+            "name": "same_run_answer_critical_sync_job_reentry",
+            "expected": 0,
+            "actual": repeated_sync_jobs_without_invalidation,
+            "passed": repeated_sync_jobs_without_invalidation == 0,
+        },
+        {
             "name": "answer_critical_shared_jobs_settled",
             "expected": [],
             "actual": unresolved_answer_critical_jobs,
             "passed": not unresolved_answer_critical_jobs,
+        },
+        {
+            "name": "answer_critical_shared_jobs_settled_once",
+            "expected": [],
+            "actual": duplicate_answer_critical_settlements,
+            "passed": not duplicate_answer_critical_settlements,
+        },
+        {
+            "name": "post_commit_answer_critical_settlement_mutation",
+            "expected": [],
+            "actual": late_answer_critical_settlements,
+            "passed": not late_answer_critical_settlements,
         },
     ]
 

@@ -12,16 +12,18 @@ from unittest import mock
 
 from docmason.ask import complete_ask_turn, prepare_ask_turn
 from docmason.commands import CommandReport
+from docmason.control_plane import ensure_shared_job, workspace_state_snapshot
 from docmason.conversation import open_conversation_turn, update_conversation_turn
 from docmason.coordination import workspace_lease
 from docmason.project import WorkspacePaths, read_json, source_inventory_signature, write_json
 from docmason.retrieval import retrieve_corpus, trace_answer_file
+from docmason.review import refresh_log_review_summary
+from docmason.workflows import load_workflow_metadata_file, render_workflow_routing_markdown
 from tests.support_ready_workspace import (
     seed_degraded_broken_venv_bootstrap_state,
     seed_mixed_external_venv_bootstrap_state,
     seed_self_contained_bootstrap_state,
 )
-from docmason.workflows import load_workflow_metadata_file, render_workflow_routing_markdown
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -438,7 +440,10 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.publish_seeded_corpus(workspace)
 
         with (
-            mock.patch("docmason.ask.prepare_workspace", side_effect=AssertionError("prepare should not run")),
+            mock.patch(
+                "docmason.ask.prepare_workspace",
+                side_effect=AssertionError("prepare should not run"),
+            ),
             mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-cached-ready"}, clear=False),
         ):
             turn = prepare_ask_turn(
@@ -522,7 +527,10 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             )
 
         with (
-            mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare) as mocked_prepare,
+            mock.patch(
+                "docmason.ask.prepare_workspace",
+                side_effect=fake_prepare,
+            ) as mocked_prepare,
             mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
             mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-legacy-sync"}, clear=False),
         ):
@@ -691,7 +699,11 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         with (
             mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare),
             mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
-            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-auto-sync-version"}, clear=False),
+            mock.patch.dict(
+                os.environ,
+                {"CODEX_THREAD_ID": "thread-auto-sync-version"},
+                clear=False,
+            ),
         ):
             turn = prepare_ask_turn(
                 workspace,
@@ -715,6 +727,63 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             run_state["version_context"]["published_snapshot_id"],
             "snapshot-auto-sync",
         )
+
+    def test_workspace_state_snapshot_repairs_stale_answer_critical_owner_run(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        job = ensure_shared_job(
+            workspace,
+            job_key="sync:stale-owner-run",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={"workspace_root": str(workspace.root)},
+            input_signature="sync:stale-owner-run",
+            owner={"kind": "run", "id": "run-missing"},
+            run_id="run-missing",
+        )
+        snapshot = workspace_state_snapshot(workspace)
+        self.assertFalse(snapshot["active_answer_critical_jobs"])
+        self.assertTrue(snapshot["repair_actions"])
+        self.assertEqual(
+            snapshot["repair_actions"][0]["kind"],
+            "blocked-missing-owner-run",
+        )
+        settled = read_json(
+            workspace.shared_jobs_dir / job["manifest"]["job_id"] / "result.json"
+        )
+        self.assertEqual(settled["status"], "blocked")
+
+    def test_workspace_state_snapshot_repairs_stale_command_owner_process(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        job = ensure_shared_job(
+            workspace,
+            job_key="sync:stale-command-owner",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={"workspace_root": str(workspace.root)},
+            input_signature="sync:stale-command-owner",
+            owner={"kind": "command", "id": "sync-command:stale", "pid": 999999},
+        )
+        snapshot = workspace_state_snapshot(workspace)
+        self.assertFalse(snapshot["active_answer_critical_jobs"])
+        self.assertTrue(snapshot["repair_actions"])
+        self.assertEqual(
+            snapshot["repair_actions"][0]["kind"],
+            "blocked-inactive-owner-process",
+        )
+        settled = read_json(
+            workspace.shared_jobs_dir / job["manifest"]["job_id"] / "result.json"
+        )
+        self.assertEqual(settled["status"], "blocked")
 
     def test_prepare_ask_turn_reports_bootstrap_blocker_when_auto_prepare_fails(self) -> None:
         workspace = self.make_workspace()
@@ -881,6 +950,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 status="answered",
             )
 
+        refresh_log_review_summary(workspace)
         candidates = read_json(workspace.benchmark_candidates_path)
         self.assertTrue(candidates["candidates"])
         first = candidates["candidates"][0]
@@ -893,6 +963,89 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             first["suggested_benchmark_family"],
             {"render-required-visual-evidence", "degraded-grounded-answer"},
         )
+        self.assertEqual(first["supporting_source_ids"], trace["supporting_source_ids"])
+
+    def test_answer_history_and_review_summary_anchor_to_final_trace_support(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-history-anchor"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does Campaign Planning Brief say about the architecture strategy?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The architecture strategy connects the operating model to implementation.\n",
+            encoding="utf-8",
+        )
+        first_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        first_trace_path = workspace.retrieval_traces_dir / f"{first_trace['trace_id']}.json"
+        first_trace_payload = read_json(first_trace_path)
+        first_trace_payload["supporting_source_ids"] = [source_ids[0], source_ids[1]]
+        write_json(first_trace_path, first_trace_payload)
+
+        answer_path.write_text(
+            "The delivery timeline complements the architecture strategy.\n",
+            encoding="utf-8",
+        )
+        second_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        second_trace_path = workspace.retrieval_traces_dir / f"{second_trace['trace_id']}.json"
+        second_trace_payload = read_json(second_trace_path)
+        second_trace_payload["supporting_source_ids"] = [source_ids[1]]
+        second_trace_payload["supporting_unit_ids"] = ["unit-final"]
+        second_trace_payload["supporting_artifact_ids"] = ["artifact:final"]
+        write_json(second_trace_path, second_trace_payload)
+
+        complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            session_ids=[str(first_trace["session_id"]), str(second_trace["session_id"])],
+            trace_ids=[str(second_trace["trace_id"])],
+            answer_state="grounded",
+            render_inspection_required=second_trace["render_inspection_required"],
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="Anchored to final trace.",
+            status="answered",
+        )
+
+        summary = refresh_log_review_summary(workspace)
+        answer_history = read_json(workspace.answer_history_index_path)
+        record = answer_history["records"][0]
+        self.assertEqual(record["kb_source_ids"], [source_ids[1]])
+        self.assertEqual(record["session_ids"], [second_trace["session_id"]])
+        self.assertEqual(record["trace_ids"], [second_trace["trace_id"]])
+        committed_turn = summary["committed_turns"]["recent"][0]
+        self.assertEqual(
+            committed_turn["canonical_support"]["supporting_source_ids"],
+            [source_ids[1]],
+        )
+        candidates = read_json(workspace.benchmark_candidates_path)
+        if candidates["candidate_count"]:
+            self.assertNotIn(
+                source_ids[0],
+                candidates["candidates"][0].get("supporting_source_ids", []),
+            )
 
     def test_open_conversation_turn_waits_for_conversation_lease(self) -> None:
         workspace = self.make_workspace()

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,127 @@ _RUN_ORIGIN_PRIORITY = {
     RUN_ORIGIN_NATIVE_RECONCILIATION: 1,
     RUN_ORIGIN_ASK_FRONT_DOOR: 2,
 }
+EXECUTION_PHASES = frozenset(
+    {
+        "preanswer_governance",
+        "draft",
+        "rewrite",
+        "retrace",
+        "retry_wait",
+        "commit",
+    }
+)
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def _execution_cost_profile(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    raw_phase_seconds = value.get("phase_seconds")
+    raw_phase_counts = value.get("phase_counts")
+    profile = {
+        "phase_seconds": {},
+        "phase_counts": {},
+        "active_phase": (
+            value.get("active_phase")
+            if value.get("active_phase") in EXECUTION_PHASES
+            else None
+        ),
+        "active_phase_started_at": value.get("active_phase_started_at"),
+        "last_phase_event_at": value.get("last_phase_event_at"),
+        "last_phase_event_type": value.get("last_phase_event_type"),
+    }
+    if isinstance(raw_phase_seconds, dict):
+        profile["phase_seconds"] = {
+            str(name): float(duration)
+            for name, duration in raw_phase_seconds.items()
+            if str(name) in EXECUTION_PHASES and isinstance(duration, (int, float))
+        }
+    if isinstance(raw_phase_counts, dict):
+        profile["phase_counts"] = {
+            str(name): int(count)
+            for name, count in raw_phase_counts.items()
+            if str(name) in EXECUTION_PHASES and isinstance(count, (int, float))
+        }
+    return profile
+
+
+def _preanswer_governance_state(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    raw_response_payload = value.get("response_payload")
+    response_payload = (
+        raw_response_payload.copy()
+        if isinstance(raw_response_payload, dict)
+        else None
+    )
+    attached_shared_job_ids = value.get("attached_shared_job_ids")
+    return {
+        "schema_version": 1,
+        "question_digest": (
+            str(value.get("question_digest"))
+            if isinstance(value.get("question_digest"), str) and value.get("question_digest")
+            else None
+        ),
+        "profile_digest": (
+            str(value.get("profile_digest"))
+            if isinstance(value.get("profile_digest"), str) and value.get("profile_digest")
+            else None
+        ),
+        "published_snapshot_id": (
+            str(value.get("published_snapshot_id"))
+            if isinstance(value.get("published_snapshot_id"), str)
+            and value.get("published_snapshot_id")
+            else None
+        ),
+        "published_source_signature": (
+            str(value.get("published_source_signature"))
+            if isinstance(value.get("published_source_signature"), str)
+            and value.get("published_source_signature")
+            else None
+        ),
+        "turn_status": (
+            str(value.get("turn_status"))
+            if isinstance(value.get("turn_status"), str) and value.get("turn_status")
+            else None
+        ),
+        "attached_shared_job_ids": [
+            job_id
+            for job_id in attached_shared_job_ids
+            if isinstance(job_id, str) and job_id
+        ]
+        if isinstance(attached_shared_job_ids, list)
+        else [],
+        "confirmation_kind": (
+            str(value.get("confirmation_kind"))
+            if isinstance(value.get("confirmation_kind"), str)
+            and value.get("confirmation_kind")
+            else None
+        ),
+        "confirmation_reason": (
+            str(value.get("confirmation_reason"))
+            if isinstance(value.get("confirmation_reason"), str)
+            and value.get("confirmation_reason")
+            else None
+        ),
+        "response_payload": response_payload,
+    }
+
+
+def _phase_duration_seconds(*, started_at: str | None, finished_at: str | None) -> float | None:
+    started = _parse_timestamp(started_at)
+    finished = _parse_timestamp(finished_at)
+    if started is None or finished is None:
+        return None
+    return max((finished - started).total_seconds(), 0.0)
 
 
 def run_dir(paths: WorkspacePaths, run_id: str) -> Path:
@@ -42,6 +165,12 @@ def load_run_state(paths: WorkspacePaths, run_id: str) -> dict[str, Any]:
     if not payload:
         return {}
     payload.setdefault("log_origin", None)
+    payload["execution_cost_profile"] = _execution_cost_profile(
+        payload.get("execution_cost_profile")
+    )
+    payload["preanswer_governance_state"] = _preanswer_governance_state(
+        payload.get("preanswer_governance_state")
+    )
     return payload
 
 
@@ -159,8 +288,147 @@ def update_run_state(
     if not state:
         raise FileNotFoundError(run_state_path(paths, run_id))
     state.update(updates)
+    state["execution_cost_profile"] = _execution_cost_profile(state.get("execution_cost_profile"))
+    state["preanswer_governance_state"] = _preanswer_governance_state(
+        state.get("preanswer_governance_state")
+    )
     write_json(run_state_path(paths, run_id), state)
     return state
+
+
+def begin_run_phase(
+    paths: WorkspacePaths,
+    *,
+    run_id: str | None,
+    phase: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Record the start of one internal execution phase."""
+    if not isinstance(run_id, str) or not run_id or phase not in EXECUTION_PHASES:
+        return None
+    state = load_run_state(paths, run_id)
+    if not state:
+        return None
+    event = record_run_event(
+        paths,
+        run_id=run_id,
+        stage="execution",
+        event_type="phase-start",
+        payload={"phase": phase, **(payload or {})},
+    )
+    profile = _execution_cost_profile(state.get("execution_cost_profile"))
+    profile["active_phase"] = phase
+    profile["active_phase_started_at"] = event["recorded_at"]
+    profile["last_phase_event_at"] = event["recorded_at"]
+    profile["last_phase_event_type"] = "phase-start"
+    update_run_state(paths, run_id=run_id, updates={"execution_cost_profile": profile})
+    return event
+
+
+def finish_run_phase(
+    paths: WorkspacePaths,
+    *,
+    run_id: str | None,
+    phase: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Record the completion of one internal execution phase."""
+    if not isinstance(run_id, str) or not run_id or phase not in EXECUTION_PHASES:
+        return None
+    state = load_run_state(paths, run_id)
+    if not state:
+        return None
+    profile = _execution_cost_profile(state.get("execution_cost_profile"))
+    started_at = (
+        str(profile.get("active_phase_started_at"))
+        if profile.get("active_phase") == phase
+        and isinstance(profile.get("active_phase_started_at"), str)
+        else None
+    )
+    event = record_run_event(
+        paths,
+        run_id=run_id,
+        stage="execution",
+        event_type="phase-finish",
+        payload={"phase": phase, **(payload or {})},
+    )
+    phase_seconds = dict(profile.get("phase_seconds", {}))
+    duration = _phase_duration_seconds(started_at=started_at, finished_at=event["recorded_at"])
+    if duration is not None:
+        phase_seconds[phase] = round(float(phase_seconds.get(phase, 0.0)) + duration, 6)
+    phase_counts = dict(profile.get("phase_counts", {}))
+    phase_counts[phase] = int(phase_counts.get(phase, 0) or 0) + 1
+    updated_profile = {
+        **profile,
+        "phase_seconds": phase_seconds,
+        "phase_counts": phase_counts,
+        "active_phase": (
+            None if profile.get("active_phase") == phase else profile.get("active_phase")
+        ),
+        "active_phase_started_at": (
+            None
+            if profile.get("active_phase") == phase
+            else profile.get("active_phase_started_at")
+        ),
+        "last_phase_event_at": event["recorded_at"],
+        "last_phase_event_type": "phase-finish",
+    }
+    update_run_state(paths, run_id=run_id, updates={"execution_cost_profile": updated_profile})
+    return event
+
+
+def record_shared_job_settled_once(
+    paths: WorkspacePaths,
+    *,
+    run_ids: list[str] | None,
+    job_id: str,
+    status: str,
+) -> None:
+    """Record one shared-job settlement event once per run and settled status."""
+    if not isinstance(run_ids, list):
+        return
+    for run_id in run_ids:
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        run_state = load_run_state(paths, run_id)
+        if not run_state:
+            continue
+        if (
+            isinstance(run_state.get("execution_cost_profile"), dict)
+            and run_state["execution_cost_profile"].get("active_phase") == "retry_wait"
+        ):
+            finish_run_phase(
+                paths,
+                run_id=run_id,
+                phase="retry_wait",
+                payload={"job_id": job_id, "status": status},
+            )
+        journal_path = run_journal_path(paths, run_id)
+        if journal_path.exists():
+            duplicate = False
+            for line in journal_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                if payload.get("event_type") != "shared-job-settled":
+                    continue
+                event_payload = payload.get("payload")
+                if (
+                    isinstance(event_payload, dict)
+                    and event_payload.get("job_id") == job_id
+                    and event_payload.get("status") == status
+                ):
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+        record_run_event(
+            paths,
+            run_id=run_id,
+            stage="control-plane",
+            event_type="shared-job-settled",
+            payload={"job_id": job_id, "status": status},
+        )
 
 
 def normalize_run_origin(value: Any) -> str | None:
@@ -230,7 +498,7 @@ def refresh_turn_run_version_truth(
             run_id=run_id,
             updates={
                 "version_context": refreshed_context,
-                "workspace_state_ref": workspace_state_ref(paths),
+                "workspace_state_ref": workspace_state_ref(paths, force_refresh=True),
             },
         )
     update_conversation_turn(
@@ -299,6 +567,8 @@ def ensure_run_for_turn(
         "published_source_signature_used": None,
         "run_origin": normalize_run_origin(run_origin),
         "log_origin": None,
+        "execution_cost_profile": _execution_cost_profile(None),
+        "preanswer_governance_state": None,
     }
     run_dir(paths, run_id).mkdir(parents=True, exist_ok=True)
     write_json(run_state_path(paths, run_id), payload)
@@ -402,6 +672,9 @@ def commit_run(
         "response_excerpt": derived_excerpt,
         "version_context": effective_version_context,
         "admissibility_gate_result": admissibility_gate_result,
+        "execution_cost_profile": _execution_cost_profile(
+            run_payload.get("execution_cost_profile")
+        ),
     }
     write_json(run_commit_path(paths, run_id), commit_payload)
     run_payload.update(
@@ -417,6 +690,7 @@ def commit_run(
                 effective_version_context.get("published_source_signature")
                 or effective_version_context.get("corpus_signature")
             ),
+            "execution_cost_profile": commit_payload["execution_cost_profile"],
         }
     )
     write_json(run_state_path(paths, run_id), run_payload)
@@ -448,6 +722,7 @@ def commit_run(
             "answer_file_path": effective_answer_file,
             "response_excerpt": derived_excerpt,
             "status": status,
+            "execution_cost_profile": commit_payload["execution_cost_profile"],
         },
     )
     return updated

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -139,11 +140,15 @@ def resolved_attached_shared_job_ids(
     return list(dict.fromkeys(item for item in values if isinstance(item, str) and item))
 
 
-def _normalize_owner(owner: dict[str, Any] | None = None) -> dict[str, str]:
+def _normalize_owner(owner: dict[str, Any] | None = None) -> dict[str, Any]:
     raw_owner = owner if isinstance(owner, dict) else {}
     kind = str(raw_owner.get("kind") or "command")
     owner_id = str(raw_owner.get("id") or "unknown-owner")
-    return {"kind": kind, "id": owner_id}
+    normalized: dict[str, Any] = {"kind": kind, "id": owner_id}
+    owner_pid = raw_owner.get("pid")
+    if isinstance(owner_pid, int) and owner_pid > 0:
+        normalized["pid"] = owner_pid
+    return normalized
 
 
 def _append_shared_job_event(
@@ -430,6 +435,17 @@ def _create_shared_job(
 def _shared_job_stale(manifest: dict[str, Any]) -> bool:
     if not shared_job_is_active(manifest):
         return False
+    owner = manifest.get("owner", {})
+    owner_pid = owner.get("pid") if isinstance(owner, dict) else None
+    if isinstance(owner_pid, int) and owner_pid > 0:
+        try:
+            os.kill(owner_pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        except OSError:
+            return True
     updated_at = _parse_timestamp(manifest.get("updated_at"))
     if updated_at is None:
         return True
@@ -574,6 +590,18 @@ def _settle_shared_job(
     job_key = str(manifest["job_key"])
     with workspace_lease(paths, f"shared-job:{job_key}", timeout_seconds=30.0):
         manifest = load_shared_job(paths, job_id)
+        existing_result = load_shared_job_result(paths, job_id)
+        incoming_result = result or {}
+        if shared_job_is_settled(manifest):
+            existing_status = str(manifest.get("status") or "")
+            existing_result_digest = _stable_json_digest(existing_result.get("result", {}))
+            incoming_result_digest = _stable_json_digest(incoming_result)
+            if existing_status == status and existing_result_digest == incoming_result_digest:
+                return manifest
+            raise ValueError(
+                f"Shared job `{job_id}` is already settled as `{existing_status}` "
+                "and may not be mutated."
+            )
         manifest["status"] = status
         manifest["updated_at"] = _utc_now()
         write_json(shared_job_manifest_path(paths, job_id), manifest)
@@ -584,7 +612,7 @@ def _settle_shared_job(
                 "job_key": job_key,
                 "status": status,
                 "recorded_at": manifest["updated_at"],
-                "result": result or {},
+                "result": incoming_result,
             },
         )
         index = load_shared_jobs_index(paths)
@@ -723,11 +751,116 @@ def find_conversation_confirmation_job(
     }
 
 
+def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
+    """Settle or clear active shared jobs whose owners no longer exist legally."""
+    from .run_control import load_run_state
+
+    repairs: list[dict[str, Any]] = []
+    index = load_shared_jobs_index(paths)
+    for job_key, job_id in list(index["active_by_key"].items()):
+        if not isinstance(job_id, str) or not job_id:
+            continue
+        manifest = load_shared_job(paths, job_id)
+        if not manifest:
+            active_by_key = dict(load_shared_jobs_index(paths)["active_by_key"])
+            latest_settled_by_key = dict(load_shared_jobs_index(paths)["latest_settled_by_key"])
+            active_by_key.pop(job_key, None)
+            _write_shared_jobs_index(
+                paths,
+                active_by_key=active_by_key,
+                latest_settled_by_key=latest_settled_by_key,
+            )
+            repairs.append(
+                {
+                    "kind": "dropped-missing-shared-job",
+                    "job_id": job_id,
+                    "job_key": job_key,
+                }
+            )
+            continue
+        if not shared_job_is_active(manifest):
+            active_by_key = dict(load_shared_jobs_index(paths)["active_by_key"])
+            latest_settled_by_key = dict(load_shared_jobs_index(paths)["latest_settled_by_key"])
+            active_by_key.pop(job_key, None)
+            _write_shared_jobs_index(
+                paths,
+                active_by_key=active_by_key,
+                latest_settled_by_key=latest_settled_by_key,
+            )
+            repairs.append(
+                {
+                    "kind": "cleared-nonactive-shared-job",
+                    "job_id": job_id,
+                    "job_key": job_key,
+                }
+            )
+            continue
+        owner = manifest.get("owner", {})
+        owner_pid = owner.get("pid") if isinstance(owner, dict) else None
+        if isinstance(owner_pid, int) and owner_pid > 0 and _shared_job_stale(manifest):
+            block_shared_job(
+                paths,
+                job_id,
+                result={"reason": "The shared job owner process is no longer active."},
+            )
+            repairs.append(
+                {
+                    "kind": "blocked-inactive-owner-process",
+                    "job_id": job_id,
+                    "job_key": job_key,
+                    "owner_kind": owner.get("kind") if isinstance(owner, dict) else None,
+                    "owner_id": owner.get("id") if isinstance(owner, dict) else None,
+                    "owner_pid": owner_pid,
+                }
+            )
+            continue
+        if manifest.get("criticality") != "answer-critical":
+            continue
+        if not isinstance(owner, dict) or owner.get("kind") != "run":
+            continue
+        owner_run_id = owner.get("id")
+        if not isinstance(owner_run_id, str) or not owner_run_id:
+            continue
+        run_state = load_run_state(paths, owner_run_id)
+        if not run_state:
+            block_shared_job(
+                paths,
+                job_id,
+                result={"reason": "The shared job owner run no longer exists."},
+            )
+            repairs.append(
+                {
+                    "kind": "blocked-missing-owner-run",
+                    "job_id": job_id,
+                    "job_key": job_key,
+                    "owner_run_id": owner_run_id,
+                }
+            )
+            continue
+        if run_state.get("status") != "active":
+            block_shared_job(
+                paths,
+                job_id,
+                result={"reason": "The shared job owner run is no longer active."},
+            )
+            repairs.append(
+                {
+                    "kind": "blocked-inactive-owner-run",
+                    "job_id": job_id,
+                    "job_key": job_key,
+                    "owner_run_id": owner_run_id,
+                    "run_status": run_state.get("status"),
+                }
+            )
+    return repairs
+
+
 def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     from .interaction import interaction_ingest_snapshot
     from .project import cached_bootstrap_readiness, knowledge_base_snapshot
     from .workspace_probe import preview_source_changes
 
+    repair_actions = repair_stale_shared_jobs(paths)
     environment_state = cached_bootstrap_readiness(paths, require_sync_capability=False)
     sync_environment_state = cached_bootstrap_readiness(paths, require_sync_capability=True)
     ready = bool(environment_state.get("ready"))
@@ -816,13 +949,20 @@ def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
             job for job in active_jobs if job.get("criticality") == "answer-critical"
         ],
         "next_legal_actions": list(dict.fromkeys(next_legal_actions)),
+        "repair_actions": repair_actions,
     }
     write_json(paths.workspace_state_path, payload)
     return payload
 
 
-def workspace_state_ref(paths: WorkspacePaths) -> dict[str, Any]:
-    snapshot = workspace_state_snapshot(paths)
+def workspace_state_ref(paths: WorkspacePaths, *, force_refresh: bool = False) -> dict[str, Any]:
+    snapshot = (
+        workspace_state_snapshot(paths)
+        if force_refresh
+        else read_json(paths.workspace_state_path)
+    )
+    if not snapshot:
+        snapshot = workspace_state_snapshot(paths)
     return {
         "path": str(paths.workspace_state_path.relative_to(paths.root)),
         "updated_at": snapshot.get("updated_at"),
@@ -833,6 +973,7 @@ def workspace_state_ref(paths: WorkspacePaths) -> dict[str, Any]:
             "corpus_delta": snapshot.get("corpus_delta"),
             "interaction_state": snapshot.get("interaction_state"),
             "active_answer_critical_jobs": snapshot.get("active_answer_critical_jobs"),
+            "repair_actions": snapshot.get("repair_actions", []),
         },
     }
 

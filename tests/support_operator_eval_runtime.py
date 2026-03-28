@@ -21,6 +21,7 @@ from docmason.evaluation import (
 from docmason.operator_eval import load_operator_request
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import trace_answer_file
+from docmason.review import refresh_log_review_summary
 from docmason.workflows import load_workflow_metadata
 from tests.support_public_corpus import materialize_public_markdown_subset
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
@@ -411,7 +412,7 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
                                     "ask-prepared",
                                     "trace-completed",
                                     "admissibility-passed",
-                                    "projection-refreshed",
+                                    "projection-enqueued",
                                 ],
                             },
                         },
@@ -619,7 +620,6 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
         self.assertIn("answer_file", case["artifact_paths"])
         self.assertIn("query_session_01", case["artifact_paths"])
         self.assertIn("retrieval_trace_01", case["artifact_paths"])
-        self.assertIn("conversation_projection", case["artifact_paths"])
         self.assertIn("review_summary", case["artifact_paths"])
         self.assertIn("answer_history_index", case["artifact_paths"])
         self.assertIn("projection_state", case["artifact_paths"])
@@ -628,7 +628,7 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
             / f"{case['execution']['result']['conversation_id']}.json"
         )
         self.assertEqual(conversation["turns"][0]["log_origin"], "evaluation-suite")
-        summary = read_json(workspace.review_summary_path)
+        summary = refresh_log_review_summary(workspace)
         self.assertEqual(summary["query_sessions"]["real_total"], 0)
         self.assertEqual(summary["query_sessions"]["synthetic_total"], 1)
         self.assertEqual(summary["retrieval_traces"]["real_total"], 0)
@@ -747,6 +747,7 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
         self.create_pdf(workspace.source_dir / "b.pdf")
         self.publish_seeded_corpus(workspace)
         candidate_id = self.create_candidate_turn(workspace)
+        refresh_log_review_summary(workspace)
         candidates_payload = read_json(workspace.benchmark_candidates_path)
         matching = [
             item
@@ -766,6 +767,7 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
         self.write_broad_eval_assets(workspace)
 
         candidate_id, manifest_relative = self.create_mixed_support_candidate_turn(workspace)
+        refresh_log_review_summary(workspace)
         candidates_payload = read_json(workspace.benchmark_candidates_path)
         matching = [
             item

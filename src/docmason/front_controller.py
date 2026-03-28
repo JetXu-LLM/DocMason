@@ -218,8 +218,9 @@ def warm_start_evidence(
 ) -> dict[str, Any]:
     """Return evidence pointers from similar historical answers without reusing answer text."""
     from .conversation import current_corpus_signature
+    from .projections import load_answer_history_snapshot
 
-    history = read_json(paths.answer_history_index_path).get("records", [])
+    history = load_answer_history_snapshot(paths).get("records", [])
     if not isinstance(history, list):
         return {"matched_records": [], "session_ids": [], "trace_ids": [], "external_urls": []}
     current_signature = current_corpus_signature(paths)

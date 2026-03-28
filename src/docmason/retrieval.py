@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import uuid
 from collections import Counter, defaultdict, deque
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from .affordances import (
@@ -32,8 +34,14 @@ from .front_controller import load_support_manifest
 from .hybrid import current_hybrid_work
 from .interaction import load_interaction_overlay
 from .project import WorkspacePaths, append_jsonl, read_json, write_json
-from .projections import refresh_runtime_projections
+from .projections import queue_projection_refresh
 from .routing import infer_memory_query_profile, normalize_memory_semantics
+from .run_control import begin_run_phase, finish_run_phase
+from .runtime_log_index import (
+    discover_turn_artifact_candidates,
+    sanitize_canonical_log_payload,
+    update_turn_artifact_index,
+)
 from .semantic_overlays import (
     collect_semantic_overlay_assets,
     load_semantic_overlays,
@@ -69,6 +77,10 @@ MEMORY_RANK_PRIOR_BONUS = {"high": 1.2, "medium": 0.5, "low": 0.0}
 CHANNEL_PREFERENCE_BONUS = {"source": 0.35, "unit": 0.25}
 RETRIEVAL_STRATEGY_ID = "phase4b-lexical-plus-graph-v1"
 ANSWER_WORKFLOW_ID = "phase4b-grounded-answer-v1"
+TRACE_SEGMENT_TARGET_CHARS = 720
+TRACE_SEGMENT_MAX_CHARS = 960
+TRACE_SEGMENT_MAX_PARAGRAPHS = 3
+TRACE_SEGMENT_MAX_COUNT = 24
 ABSTENTION_MARKERS = (
     "i cannot answer",
     "i can't answer",
@@ -1699,6 +1711,7 @@ def _turn_record_from_answer_file(
         return {}
     enriched = dict(enriched)
     enriched.setdefault("conversation_id", conversation_id)
+    enriched.setdefault("turn_id", turn_id)
     return enriched
 
 
@@ -1710,7 +1723,12 @@ def _turn_record_from_log_payload(
 
     conversation_id = payload.get("conversation_id")
     turn_id = payload.get("turn_id")
-    if isinstance(conversation_id, str) and conversation_id and isinstance(turn_id, str) and turn_id:
+    if (
+        isinstance(conversation_id, str)
+        and conversation_id
+        and isinstance(turn_id, str)
+        and turn_id
+    ):
         try:
             return load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
         except KeyError:
@@ -2933,7 +2951,9 @@ def log_query_session(
     """Persist a query-session log and append a usage history event."""
     ensure_log_directories(paths)
     session_path = paths.query_sessions_dir / f"{session_id}.json"
-    write_json(session_path, payload)
+    sanitized_payload = sanitize_canonical_log_payload(paths, payload)
+    write_json(session_path, sanitized_payload)
+    update_turn_artifact_index(paths, payload=sanitized_payload)
     append_jsonl(
         paths.usage_history_path,
         {
@@ -2941,10 +2961,13 @@ def log_query_session(
             "event_type": "query-session",
             "command": command,
             "session_id": session_id,
-            "status": payload.get("status"),
+            "status": sanitized_payload.get("status"),
         },
     )
-    refresh_runtime_projections(paths)
+    queue_projection_refresh(
+        paths,
+        reason="A query-session log was written.",
+    )
 
 
 def log_trace_record(
@@ -2956,18 +2979,23 @@ def log_trace_record(
     """Persist a trace log and append a usage history event."""
     ensure_log_directories(paths)
     trace_path = paths.retrieval_traces_dir / f"{trace_id}.json"
-    write_json(trace_path, payload)
+    sanitized_payload = sanitize_canonical_log_payload(paths, payload)
+    write_json(trace_path, sanitized_payload)
+    update_turn_artifact_index(paths, payload=sanitized_payload)
     append_jsonl(
         paths.usage_history_path,
         {
             "recorded_at": utc_now(),
             "event_type": "retrieval-trace",
             "trace_id": trace_id,
-            "status": payload.get("status"),
-            "trace_mode": payload.get("trace_mode"),
+            "status": sanitized_payload.get("status"),
+            "trace_mode": sanitized_payload.get("trace_mode"),
         },
     )
-    refresh_runtime_projections(paths)
+    queue_projection_refresh(
+        paths,
+        reason="A retrieval-trace log was written.",
+    )
 
 
 def _enrich_log_payload(
@@ -3502,18 +3530,76 @@ def supporting_ids_from_segments(
     )
 
 
-def segment_answer_text(answer_text: str) -> list[str]:
-    """Split answer text into compact grounding segments."""
-    segments: list[str] = []
-    for paragraph in [value.strip() for value in answer_text.split("\n\n") if value.strip()]:
-        if len(paragraph) <= 320:
-            segments.append(paragraph)
+def _split_long_paragraph(paragraph: str) -> list[str]:
+    if len(paragraph) <= TRACE_SEGMENT_MAX_CHARS:
+        return [paragraph]
+    sentences = [
+        value.strip() for value in SENTENCE_SPLIT_PATTERN.split(paragraph) if value.strip()
+    ]
+    if not sentences:
+        return [paragraph]
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) <= TRACE_SEGMENT_MAX_CHARS:
+            current = candidate
             continue
-        for sentence in [
-            value.strip() for value in SENTENCE_SPLIT_PATTERN.split(paragraph) if value.strip()
-        ]:
-            segments.append(sentence)
-    return segments
+        if current:
+            chunks.append(current)
+        if len(sentence) <= TRACE_SEGMENT_MAX_CHARS:
+            current = sentence
+            continue
+        for index in range(0, len(sentence), TRACE_SEGMENT_MAX_CHARS):
+            chunks.append(sentence[index : index + TRACE_SEGMENT_MAX_CHARS].strip())
+        current = ""
+    if current:
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk]
+
+
+def _answer_segments_with_budget(answer_text: str) -> dict[str, Any]:
+    raw_paragraphs = [value.strip() for value in answer_text.split("\n\n") if value.strip()]
+    if not raw_paragraphs:
+        return {
+            "segments": [],
+            "segment_budget_applied": False,
+            "segment_count_before_budget": 0,
+            "segment_count_after_budget": 0,
+        }
+    initial_segments: list[str] = []
+    for paragraph in raw_paragraphs:
+        initial_segments.extend(_split_long_paragraph(paragraph))
+    windows = list(initial_segments)
+    budget_applied = False
+    while len(windows) > TRACE_SEGMENT_MAX_COUNT:
+        merge_index = None
+        merge_length = None
+        for index in range(len(windows) - 1):
+            candidate_length = len(windows[index]) + len(windows[index + 1]) + 2
+            if candidate_length <= TRACE_SEGMENT_MAX_CHARS:
+                if merge_length is None or candidate_length < merge_length:
+                    merge_index = index
+                    merge_length = candidate_length
+        if merge_index is None:
+            merge_index = min(
+                range(len(windows) - 1),
+                key=lambda index: len(windows[index]) + len(windows[index + 1]),
+            )
+        windows[merge_index] = f"{windows[merge_index]}\n\n{windows[merge_index + 1]}".strip()
+        del windows[merge_index + 1]
+        budget_applied = True
+    return {
+        "segments": windows,
+        "segment_budget_applied": budget_applied,
+        "segment_count_before_budget": len(initial_segments),
+        "segment_count_after_budget": len(windows),
+    }
+
+
+def segment_answer_text(answer_text: str) -> list[str]:
+    """Split answer text into budgeted grounding segments."""
+    return list(_answer_segments_with_budget(answer_text)["segments"])
 
 
 def trace_source(
@@ -3651,34 +3737,89 @@ def trace_answer_text(
     )
 
     recorded_at = utc_now()
+    segment_budget = _answer_segments_with_budget(answer_text)
+    effective_segments = [
+        segment
+        for segment in segment_budget["segments"]
+        if isinstance(segment, str) and segment.strip()
+    ]
+    retrieval_data_load_started = perf_counter()
+    retrieval_data_load_count = 0
+    try:
+        retrieval_data = load_retrieval_data(paths, target=target)
+        target_root = paths.knowledge_target_dir(target)
+        retrieval_data["graph_edges"] = read_json(target_root / "graph_edges.json").get("edges", [])
+        retrieval_data["manifest"]["target_root"] = str(target_root)
+        if target == "current" and should_merge_pending_interaction(
+            effective_question_domain,
+            memory_profile=infer_memory_query_profile(
+                answer_text,
+                question_domain=effective_question_domain,
+            ),
+        ):
+            retrieval_data = merge_pending_interaction_overlay(paths, retrieval_data)
+        retrieval_data_load_count = 1
+    except FileNotFoundError:
+        if effective_support_basis not in {
+            "external-source-verified",
+            "model-knowledge",
+            "mixed",
+        }:
+            raise
+        retrieval_data = None
+    retrieval_data_load_seconds = perf_counter() - retrieval_data_load_started
+
     segment_traces: list[dict[str, Any]] = []
     consulted_results: list[dict[str, Any]] = []
-    for index, segment in enumerate(segment_answer_text(answer_text), start=1):
-        try:
-            retrieval_payload = retrieve_corpus(
-                paths,
-                query=segment,
-                top=top,
-                graph_hops=1,
-                document_types=None,
-                source_ids=None,
-                include_renders=True,
-                target=target,
-                write_logs=False,
-                log_context=effective_log_context,
-                log_origin=effective_log_origin,
-                question_domain=effective_question_domain,
-                evidence_requirements=effective_evidence_requirements,
+    retrieval_scoring_seconds = 0.0
+    unique_segment_query_count = 0
+    segment_cache_hit_count = 0
+    segment_query_cache: dict[tuple[str, str, int, str, str], list[dict[str, Any]]] = {}
+    for index, segment in enumerate(effective_segments, start=1):
+        normalized_segment = " ".join(segment.split())
+        cache_key = (
+            normalized_segment,
+            target,
+            top,
+            str(effective_question_domain or ""),
+            json.dumps(effective_evidence_requirements, sort_keys=True),
+        )
+        if cache_key in segment_query_cache:
+            results = segment_query_cache[cache_key]
+            segment_cache_hit_count += 1
+        else:
+            unique_segment_query_count += 1
+            reference_resolution_for_segment = (
+                resolve_reference_query(
+                    segment,
+                    source_records=retrieval_data["source_records"],
+                    unit_records=retrieval_data["unit_records"],
+                )
+                if isinstance(retrieval_data, dict)
+                else None
             )
-            results = retrieval_payload["results"]
-        except FileNotFoundError:
-            if effective_support_basis not in {
-                "external-source-verified",
-                "model-knowledge",
-                "mixed",
-            }:
-                raise
-            results = []
+            retrieval_started = perf_counter()
+            if isinstance(retrieval_data, dict):
+                retrieval_payload = run_retrieval_query(
+                    retrieval_data,
+                    query=segment,
+                    top=top,
+                    graph_hops=1,
+                    document_types=None,
+                    source_ids=_effective_source_ids_from_reference(
+                        None,
+                        reference_resolution_for_segment,
+                    ),
+                    include_renders=True,
+                    question_domain=effective_question_domain,
+                    evidence_requirements=effective_evidence_requirements,
+                    reference_resolution=reference_resolution_for_segment,
+                )
+                results = retrieval_payload["results"]
+            else:
+                results = []
+            retrieval_scoring_seconds += perf_counter() - retrieval_started
+            segment_query_cache[cache_key] = results
         top_result = results[0] if results else None
         supports = build_segment_supports_from_results(results[:top])
         artifact_supports = [
@@ -3843,6 +3984,21 @@ def trace_answer_text(
         "answer_text": answer_text,
         "segments": segment_traces,
         "segment_count": len(segment_traces),
+        "segment_budget_applied": bool(segment_budget["segment_budget_applied"]),
+        "segment_count_before_budget": int(segment_budget["segment_count_before_budget"]),
+        "segment_count_after_budget": int(segment_budget["segment_count_after_budget"]),
+        "unique_segment_query_count": unique_segment_query_count,
+        "retrieval_data_load_count": retrieval_data_load_count,
+        "segment_cache_hit_count": segment_cache_hit_count,
+        "cost_profile": {
+            "retrieval_data_load_seconds": round(retrieval_data_load_seconds, 6),
+            "retrieval_scoring_seconds": round(retrieval_scoring_seconds, 6),
+            "segment_count_before_budget": int(segment_budget["segment_count_before_budget"]),
+            "segment_count_after_budget": int(segment_budget["segment_count_after_budget"]),
+            "unique_segment_query_count": unique_segment_query_count,
+            "retrieval_data_load_count": retrieval_data_load_count,
+            "segment_cache_hit_count": segment_cache_hit_count,
+        },
         "grounding_summary": {
             "grounded": sum(
                 1 for segment in segment_traces if segment["grounding_status"] == "grounded"
@@ -3909,6 +4065,25 @@ def trace_answer_text(
                 "final_answer": answer_text,
                 "segment_traces": segment_traces,
                 "consulted_results": consulted_results,
+                "segment_budget_applied": bool(segment_budget["segment_budget_applied"]),
+                "segment_count_before_budget": int(segment_budget["segment_count_before_budget"]),
+                "segment_count_after_budget": int(segment_budget["segment_count_after_budget"]),
+                "unique_segment_query_count": unique_segment_query_count,
+                "retrieval_data_load_count": retrieval_data_load_count,
+                "segment_cache_hit_count": segment_cache_hit_count,
+                "cost_profile": {
+                    "retrieval_data_load_seconds": round(retrieval_data_load_seconds, 6),
+                    "retrieval_scoring_seconds": round(retrieval_scoring_seconds, 6),
+                    "segment_count_before_budget": int(
+                        segment_budget["segment_count_before_budget"]
+                    ),
+                    "segment_count_after_budget": int(
+                        segment_budget["segment_count_after_budget"]
+                    ),
+                    "unique_segment_query_count": unique_segment_query_count,
+                    "retrieval_data_load_count": retrieval_data_load_count,
+                    "segment_cache_hit_count": segment_cache_hit_count,
+                },
             },
             log_context=effective_log_context,
             answer_file_path=answer_file_path,
@@ -3935,55 +4110,182 @@ def trace_answer_file(
     except ValueError:
         answer_file_reference = str(answer_file)
     turn_record = _turn_record_from_answer_file(paths, answer_file_path=answer_file_reference)
+    answer_text = answer_file.read_text(encoding="utf-8")
+    answer_digest = hashlib.sha256(answer_text.strip().encode("utf-8")).hexdigest()
+    run_id = (
+        str(turn_record.get("active_run_id") or turn_record.get("committed_run_id"))
+        if isinstance(turn_record.get("active_run_id") or turn_record.get("committed_run_id"), str)
+        and (turn_record.get("active_run_id") or turn_record.get("committed_run_id"))
+        else None
+    )
+    question_class = (
+        str(turn_record.get("question_class"))
+        if isinstance(turn_record.get("question_class"), str)
+        else None
+    )
+    existing_trace_ids = [
+        value for value in turn_record.get("trace_ids", []) if isinstance(value, str) and value
+    ]
+    conversation_id = (
+        str(turn_record.get("conversation_id"))
+        if isinstance(turn_record.get("conversation_id"), str)
+        else None
+    )
+    turn_id = (
+        str(turn_record.get("turn_id"))
+        if isinstance(turn_record.get("turn_id"), str)
+        else None
+    )
+    inner_workflow_id = (
+        str(turn_record.get("inner_workflow_id"))
+        if isinstance(turn_record.get("inner_workflow_id"), str)
+        else None
+    )
+    if (
+        not existing_trace_ids
+        and isinstance(conversation_id, str)
+        and isinstance(turn_id, str)
+        and isinstance(inner_workflow_id, str)
+    ):
+        _candidate_session_ids, candidate_trace_ids = discover_turn_artifact_candidates(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            run_id=run_id,
+            inner_workflow_id=inner_workflow_id,
+            answer_file_path=answer_file_reference,
+        )
+        existing_trace_ids = [
+            value for value in candidate_trace_ids if isinstance(value, str) and value
+        ]
+    latest_trace_payload = (
+        read_json(paths.retrieval_traces_dir / f"{existing_trace_ids[-1]}.json")
+        if existing_trace_ids
+        else {}
+    )
+    latest_answer_text = (
+        str(latest_trace_payload.get("answer_text"))
+        if isinstance(latest_trace_payload.get("answer_text"), str)
+        else None
+    )
+    latest_answer_digest = (
+        hashlib.sha256(latest_answer_text.strip().encode("utf-8")).hexdigest()
+        if isinstance(latest_answer_text, str)
+        else None
+    )
+    may_reuse_trace = (
+        question_class == "composition"
+        and not isinstance(turn_record.get("committed_run_id"), str)
+        and not [
+            value
+            for value in turn_record.get("attached_shared_job_ids", [])
+            if isinstance(value, str) and value
+        ]
+    )
+    if (
+        may_reuse_trace
+        and existing_trace_ids
+        and latest_trace_payload
+        and latest_answer_digest == answer_digest
+        and latest_trace_payload.get("answer_file_path") == answer_file_reference
+    ):
+        begin_run_phase(
+            paths,
+            run_id=run_id,
+            phase="retrace",
+            payload={"mode": "reused-unchanged-answer"},
+        )
+        finish_run_phase(
+            paths,
+            run_id=run_id,
+            phase="retrace",
+            payload={"mode": "reused-unchanged-answer", "skipped": True},
+        )
+        return {**latest_trace_payload, "reused_trace": True}
+    if question_class == "composition":
+        if existing_trace_ids and latest_answer_digest and latest_answer_digest != answer_digest:
+            begin_run_phase(
+                paths,
+                run_id=run_id,
+                phase="rewrite",
+                payload={"reason": "answer-file-changed-before-trace"},
+            )
+            finish_run_phase(
+                paths,
+                run_id=run_id,
+                phase="rewrite",
+                payload={"reason": "answer-file-changed-before-trace"},
+            )
+            phase_name = "retrace"
+        elif existing_trace_ids:
+            phase_name = "retrace"
+        else:
+            phase_name = "draft"
+        begin_run_phase(
+            paths,
+            run_id=run_id,
+            phase=phase_name,
+            payload={"top": top, "target": target},
+        )
     effective_log_context = _merge_log_context(
         explicit_log_context=log_context,
         fallback_record=turn_record,
     )
-    return trace_answer_text(
-        paths,
-        answer_text=answer_file.read_text(encoding="utf-8"),
-        top=top,
-        target=target,
-        log_context=effective_log_context,
-        answer_file_path=answer_file_reference,
-        log_origin=log_origin,
-        question_domain=turn_record.get("question_domain")
-        if isinstance(turn_record.get("question_domain"), str)
-        else None,
-        support_basis=turn_record.get("support_basis")
-        if isinstance(turn_record.get("support_basis"), str)
-        else None,
-        support_manifest_path=turn_record.get("support_manifest_path")
-        if isinstance(turn_record.get("support_manifest_path"), str)
-        else None,
-        evidence_requirements=(
-            turn_record.get("semantic_analysis", {}).get("evidence_requirements")
-            if isinstance(turn_record.get("semantic_analysis"), dict)
-            else None
-        ),
-        preferred_channels=(
-            turn_record.get("preferred_channels")
-            if isinstance(turn_record.get("preferred_channels"), list)
-            else None
-        ),
-        inspection_scope=turn_record.get("inspection_scope")
-        if isinstance(turn_record.get("inspection_scope"), str)
-        else None,
-        reference_resolution=turn_record.get("reference_resolution")
-        if isinstance(turn_record.get("reference_resolution"), dict)
-        else None,
-        declared_answer_state=declared_answer_state
-        or (
-            turn_record.get("answer_state")
-            if isinstance(turn_record.get("answer_state"), str)
-            else None
-        ),
-        version_context=(
-            turn_record.get("version_context")
-            if isinstance(turn_record.get("version_context"), dict)
-            else None
-        ),
-    )
+    try:
+        result = trace_answer_text(
+            paths,
+            answer_text=answer_text,
+            top=top,
+            target=target,
+            log_context=effective_log_context,
+            answer_file_path=answer_file_reference,
+            log_origin=log_origin,
+            question_domain=turn_record.get("question_domain")
+            if isinstance(turn_record.get("question_domain"), str)
+            else None,
+            support_basis=turn_record.get("support_basis")
+            if isinstance(turn_record.get("support_basis"), str)
+            else None,
+            support_manifest_path=turn_record.get("support_manifest_path")
+            if isinstance(turn_record.get("support_manifest_path"), str)
+            else None,
+            evidence_requirements=(
+                turn_record.get("semantic_analysis", {}).get("evidence_requirements")
+                if isinstance(turn_record.get("semantic_analysis"), dict)
+                else None
+            ),
+            preferred_channels=(
+                turn_record.get("preferred_channels")
+                if isinstance(turn_record.get("preferred_channels"), list)
+                else None
+            ),
+            inspection_scope=turn_record.get("inspection_scope")
+            if isinstance(turn_record.get("inspection_scope"), str)
+            else None,
+            reference_resolution=turn_record.get("reference_resolution")
+            if isinstance(turn_record.get("reference_resolution"), dict)
+            else None,
+            declared_answer_state=declared_answer_state
+            or (
+                turn_record.get("answer_state")
+                if isinstance(turn_record.get("answer_state"), str)
+                else None
+            ),
+            version_context=(
+                turn_record.get("version_context")
+                if isinstance(turn_record.get("version_context"), dict)
+                else None
+            ),
+        )
+    finally:
+        if question_class == "composition":
+            finish_run_phase(
+                paths,
+                run_id=run_id,
+                phase=phase_name,
+                payload={"top": top, "target": target},
+            )
+    return result
 
 
 def trace_session(

@@ -32,7 +32,13 @@ from docmason.conversation import load_turn_record, update_conversation_turn
 from docmason.front_controller import write_hybrid_refresh_work
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import retrieve_corpus, trace_answer_file, trace_session
-from docmason.run_control import run_journal_path, update_run_state
+from docmason.review import refresh_log_review_summary
+from docmason.run_control import (
+    load_run_state,
+    record_shared_job_settled_once,
+    run_journal_path,
+    update_run_state,
+)
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -302,7 +308,7 @@ class AskHardeningTests(unittest.TestCase):
             status="answered",
         )
 
-        summary = read_json(workspace.review_summary_path)
+        summary = refresh_log_review_summary(workspace)
         recent_conversations = summary.get("conversations", {}).get("recent", [])
         self.assertEqual(len(recent_conversations), 1)
         review_report = review_runtime_logs(workspace)
@@ -495,7 +501,7 @@ class AskHardeningTests(unittest.TestCase):
         ]
         self.assertIn("trace-completed", journal_events)
         self.assertIn("admissibility-passed", journal_events)
-        self.assertIn("projection-refreshed", journal_events)
+        self.assertIn("projection-enqueued", journal_events)
 
     def test_write_hybrid_refresh_work_persists_narrowed_source_packet(self) -> None:
         workspace = self.make_workspace()
@@ -1065,6 +1071,19 @@ class AskHardeningTests(unittest.TestCase):
             inner_workflow_id="grounded-answer",
             answer_file_path=turn["answer_file_path"],
             response_excerpt="The planning brief connects strategy to implementation.",
+            support_basis="external-source-verified",
+            support_manifest_sources=[
+                {
+                    "url": "https://example.com/planning-brief",
+                    "title": "Campaign Planning Brief",
+                    "source_type": "official-doc",
+                    "support_snippet": "The planning brief connects strategy to implementation.",
+                }
+            ],
+            support_manifest_key_assertions=[
+                "The planning brief connects strategy to implementation."
+            ],
+            support_manifest_notes="Wrong-run trace must not be rebound to the canonical turn.",
             status="answered",
         )
 
@@ -1152,6 +1171,133 @@ class AskHardeningTests(unittest.TestCase):
 
         self.assertEqual(completed["session_ids"], [])
         self.assertEqual(completed["trace_ids"], [])
+
+    def test_runtime_logs_with_wrong_run_id_are_demoted_from_canonical_binding(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-wrong-run"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the campaign planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The planning brief connects strategy to implementation.",
+            encoding="utf-8",
+        )
+        wrong_log_context = {**turn["log_context"], "run_id": "run-does-not-exist"}
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=wrong_log_context,
+        )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="The planning brief connects strategy to implementation.",
+            support_basis="external-source-verified",
+            support_manifest_sources=[
+                {
+                    "url": "https://example.com/planning-brief",
+                    "title": "Campaign Planning Brief",
+                    "source_type": "official-doc",
+                    "support_snippet": "The planning brief connects strategy to implementation.",
+                }
+            ],
+            support_manifest_key_assertions=[
+                "The planning brief connects strategy to implementation."
+            ],
+            support_manifest_notes="Wrong-run trace must be demoted instead of rebound.",
+            status="answered",
+        )
+
+        self.assertEqual(completed["session_ids"], [])
+        self.assertEqual(completed["trace_ids"], [])
+        query_session = read_json(workspace.query_sessions_dir / f"{trace['session_id']}.json")
+        trace_payload = read_json(workspace.retrieval_traces_dir / f"{trace['trace_id']}.json")
+        self.assertEqual(query_session["canonical_binding_status"], "demoted")
+        self.assertEqual(trace_payload["canonical_binding_status"], "demoted")
+        self.assertNotIn("conversation_id", query_session)
+        self.assertNotIn("turn_id", query_session)
+        self.assertNotIn("run_id", query_session)
+        self.assertNotIn("conversation_id", trace_payload)
+        self.assertNotIn("turn_id", trace_payload)
+        self.assertNotIn("run_id", trace_payload)
+
+    def test_post_commit_trace_replay_is_demoted_from_canonical_binding(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-post-commit"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the campaign planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The planning brief connects strategy to implementation.",
+            encoding="utf-8",
+        )
+        first_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            session_ids=[first_trace["session_id"]],
+            trace_ids=[first_trace["trace_id"]],
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="The planning brief connects strategy to implementation.",
+            status="answered",
+        )
+
+        replay_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        replay_query_session = read_json(
+            workspace.query_sessions_dir / f"{replay_trace['session_id']}.json"
+        )
+        replay_trace_payload = read_json(
+            workspace.retrieval_traces_dir / f"{replay_trace['trace_id']}.json"
+        )
+        self.assertEqual(replay_query_session["canonical_binding_status"], "demoted")
+        self.assertEqual(replay_trace_payload["canonical_binding_status"], "demoted")
+        self.assertNotIn("conversation_id", replay_query_session)
+        self.assertNotIn("turn_id", replay_query_session)
+        self.assertNotIn("run_id", replay_query_session)
+        self.assertNotIn("conversation_id", replay_trace_payload)
+        self.assertNotIn("turn_id", replay_trace_payload)
+        self.assertNotIn("run_id", replay_trace_payload)
 
     def test_commit_run_prefers_refreshed_run_version_truth(self) -> None:
         workspace = self.make_workspace()
@@ -1622,6 +1768,282 @@ class AskHardeningTests(unittest.TestCase):
         )
         self.assertEqual(len(conversation["turns"]), 1)
 
+    def test_prepare_ask_turn_reuses_same_run_preanswer_governance_after_auto_sync(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+        self.create_pdf(workspace.source_dir / "fresh.pdf")
+
+        def fake_sync(*args: object, **kwargs: object) -> CommandReport:
+            return sync_workspace(
+                workspace,
+                assume_yes=True,
+                owner=kwargs.get("owner"),
+                run_id=kwargs.get("run_id"),
+            )
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-governance-reuse"}, clear=False),
+            mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
+        ):
+            first = prepare_ask_turn(
+                workspace,
+                question="What do the latest workspace documents say about the architecture strategy?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    needs_latest_workspace_state=True,
+                ),
+            )
+            second = prepare_ask_turn(
+                workspace,
+                question="What do the latest workspace documents say about the architecture strategy?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    needs_latest_workspace_state=True,
+                ),
+            )
+
+        self.assertEqual(first["conversation_id"], second["conversation_id"])
+        self.assertEqual(first["turn_id"], second["turn_id"])
+        self.assertEqual(first["run_id"], second["run_id"])
+        journal_entries = [
+            json.loads(line)
+            for line in run_journal_path(workspace, first["run_id"]).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        event_types = [entry["event_type"] for entry in journal_entries]
+        self.assertEqual(event_types.count("preanswer-governance-started"), 1)
+        self.assertEqual(event_types.count("ask-prepared"), 1)
+        self.assertIn("preanswer-governance-reused", event_types)
+        sync_job_ids = [
+            entry["payload"]["job_id"]
+            for entry in journal_entries
+            if entry["event_type"] == "shared-job-attached"
+            and isinstance(entry.get("payload"), dict)
+            and isinstance(entry["payload"].get("job_id"), str)
+        ]
+        self.assertEqual(len(set(sync_job_ids)), 1)
+        run_state = load_run_state(workspace, first["run_id"])
+        self.assertEqual(
+            run_state["execution_cost_profile"]["phase_counts"].get("preanswer_governance"),
+            1,
+        )
+        self.assertEqual(run_state["preanswer_governance_state"]["turn_status"], "prepared")
+        self.assertTrue(second["auto_sync_triggered"])
+
+    def test_prepare_ask_turn_reuses_awaiting_confirmation_without_restarting_governance(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+
+        sync_report = CommandReport(
+            1,
+            {
+                "status": ACTION_REQUIRED,
+                "sync_status": "awaiting-confirmation",
+                "detail": "Material sync confirmation is required.",
+                "published": False,
+                "control_plane": {
+                    "state": "awaiting-confirmation",
+                    "shared_job_id": "job-sync-001",
+                    "shared_job_key": "sync:test",
+                    "job_family": "sync",
+                    "confirmation_kind": "material-sync",
+                    "confirmation_prompt": (
+                        "A large unpublished workspace change set was detected. "
+                        "Build or refresh the knowledge base now before continuing this question?"
+                    ),
+                    "confirmation_reason": "changed_total=12 >= 12",
+                    "attached_run_count": 1,
+                    "next_command": "docmason sync --yes",
+                },
+            },
+            [],
+        )
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-confirm-reuse"}, clear=False),
+            mock.patch("docmason.ask.run_sync_command", return_value=sync_report) as sync_mock,
+        ):
+            first = prepare_ask_turn(
+                workspace,
+                question="What does the workspace corpus say about the proposal?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    needs_latest_workspace_state=True,
+                ),
+            )
+            second = prepare_ask_turn(
+                workspace,
+                question="What does the workspace corpus say about the proposal?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    needs_latest_workspace_state=True,
+                ),
+            )
+
+        self.assertEqual(sync_mock.call_count, 1)
+        self.assertEqual(first["status"], "awaiting-confirmation")
+        self.assertEqual(second["status"], "awaiting-confirmation")
+        self.assertEqual(first["run_id"], second["run_id"])
+        journal_events = [
+            json.loads(line)["event_type"]
+            for line in run_journal_path(workspace, first["run_id"]).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(journal_events.count("preanswer-governance-started"), 1)
+        self.assertIn("preanswer-governance-reused", journal_events)
+
+    def test_prepare_ask_turn_reuses_waiting_shared_job_without_restarting_governance(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+
+        sync_report = CommandReport(
+            0,
+            {
+                "status": "degraded",
+                "sync_status": "waiting-shared-job",
+                "detail": "A matching shared sync job is already running.",
+                "published": False,
+                "control_plane": {
+                    "state": "waiting-shared-job",
+                    "shared_job_id": "job-sync-waiting-001",
+                    "shared_job_key": "sync:test:waiting",
+                    "job_family": "sync",
+                    "attached_run_count": 1,
+                },
+            },
+            [],
+        )
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-waiting-reuse"}, clear=False),
+            mock.patch("docmason.ask.run_sync_command", return_value=sync_report) as sync_mock,
+        ):
+            first = prepare_ask_turn(
+                workspace,
+                question="What does the workspace corpus say about the proposal?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    needs_latest_workspace_state=True,
+                ),
+            )
+            second = prepare_ask_turn(
+                workspace,
+                question="What does the workspace corpus say about the proposal?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    needs_latest_workspace_state=True,
+                ),
+            )
+
+        self.assertEqual(sync_mock.call_count, 1)
+        self.assertEqual(first["status"], "waiting-shared-job")
+        self.assertEqual(second["status"], "waiting-shared-job")
+        journal_events = [
+            json.loads(line)["event_type"]
+            for line in run_journal_path(workspace, first["run_id"]).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(journal_events.count("preanswer-governance-started"), 1)
+        self.assertIn("preanswer-governance-reused", journal_events)
+
+    def test_prepare_ask_turn_invalidates_same_run_governance_when_semantic_profile_changes(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-governance-invalidate-semantic"}, clear=False):
+            first = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="external-factual",
+                    route_reason="First routing decision.",
+                ),
+            )
+            second = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="general-stable",
+                    route_reason="Second routing decision.",
+                ),
+            )
+
+        self.assertEqual(first["conversation_id"], second["conversation_id"])
+        self.assertEqual(first["turn_id"], second["turn_id"])
+        self.assertEqual(first["run_id"], second["run_id"])
+        journal_entries = [
+            json.loads(line)
+            for line in run_journal_path(workspace, first["run_id"]).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        event_types = [entry["event_type"] for entry in journal_entries]
+        self.assertEqual(event_types.count("preanswer-governance-started"), 2)
+        self.assertIn("preanswer-governance-invalidated", event_types)
+        invalidation_payload = next(
+            entry["payload"]
+            for entry in journal_entries
+            if entry["event_type"] == "preanswer-governance-invalidated"
+        )
+        self.assertIn("profile-changed", invalidation_payload["reasons"])
+
+    def test_prepare_ask_turn_invalidates_same_run_governance_when_publish_truth_changes(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-governance-invalidate-publish"}, clear=False):
+            first = prepare_ask_turn(
+                workspace,
+                question="What does the campaign planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+            write_json(
+                workspace.current_publish_manifest_path,
+                {
+                    "snapshot_id": "snapshot-updated-for-invalidation",
+                    "published_at": "2026-03-29T00:00:00Z",
+                },
+            )
+            second = prepare_ask_turn(
+                workspace,
+                question="What does the campaign planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        self.assertEqual(first["run_id"], second["run_id"])
+        journal_entries = [
+            json.loads(line)
+            for line in run_journal_path(workspace, first["run_id"]).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        invalidation_payload = next(
+            entry["payload"]
+            for entry in journal_entries
+            if entry["event_type"] == "preanswer-governance-invalidated"
+        )
+        self.assertIn("published-snapshot-changed", invalidation_payload["reasons"])
+
     def test_prepare_ask_turn_surfaces_shared_sync_confirmation_state(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -1749,7 +2171,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertIn("preanswer-governance-started", journal_events)
         self.assertIn("shared-job-declined", journal_events)
         self.assertIn("shared-job-settled", journal_events)
-        self.assertIn("projection-refreshed", journal_events)
+        self.assertIn("projection-enqueued", journal_events)
 
     def test_same_session_confirmation_approve_reuses_same_turn(self) -> None:
         workspace = self.make_workspace()
@@ -2058,6 +2480,7 @@ class AskHardeningTests(unittest.TestCase):
             first_completion["support_manifest_path"],
         )
 
+        refresh_log_review_summary(workspace)
         benchmark_candidates = read_json(workspace.benchmark_candidates_path)
         self.assertEqual(benchmark_candidates["candidate_count"], 0)
         answer_history = read_json(workspace.answer_history_index_path)
@@ -2073,7 +2496,7 @@ class AskHardeningTests(unittest.TestCase):
             ["https://help.aliyun.com/zh/sms/getting-started/use-sms-api"],
         )
         self.assertNotIn("answer_text", record)
-        summary = read_json(workspace.review_summary_path)
+        summary = refresh_log_review_summary(workspace)
         self.assertEqual(summary["query_sessions"]["recent"][0]["question_class"], "answer")
         self.assertEqual(summary["query_sessions"]["recent"][0]["support_strategy"], "web-first")
         self.assertEqual(
@@ -2138,6 +2561,242 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(reused_trace["question_class"], "answer")
         self.assertEqual(reused_trace["support_strategy"], "kb-first")
         self.assertEqual(reused_trace["analysis_origin"], "agent-supplied")
+
+    def test_composition_trace_records_phase_costs_and_reuses_unchanged_answer(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-compose-phase"},
+            clear=False,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="Help me draft an executive summary for the current deck.",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="composition",
+                    question_domain="composition",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text("Draft summary one.\n", encoding="utf-8")
+        first_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        update_conversation_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            updates={
+                "session_ids": [str(first_trace["session_id"])],
+                "trace_ids": [str(first_trace["trace_id"])],
+            },
+        )
+        trace_files_before = sorted(workspace.retrieval_traces_dir.glob("*.json"))
+        original_glob = Path.glob
+
+        def guarded_glob(path: Path, pattern: str):  # type: ignore[override]
+            if path == workspace.retrieval_traces_dir:
+                raise AssertionError("composition trace reuse must not full-scan retrieval traces")
+            return original_glob(path, pattern)
+
+        with mock.patch("pathlib.Path.glob", side_effect=guarded_glob):
+            reused_trace = trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=turn["log_context"],
+            )
+        trace_files_after = sorted(workspace.retrieval_traces_dir.glob("*.json"))
+        self.assertTrue(reused_trace["reused_trace"])
+        self.assertEqual(first_trace["trace_id"], reused_trace["trace_id"])
+        self.assertEqual(len(trace_files_before), len(trace_files_after))
+
+        answer_path.write_text("Draft summary two.\n", encoding="utf-8")
+        second_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-composition",
+            session_ids=[str(second_trace["session_id"])],
+            trace_ids=[str(second_trace["trace_id"])],
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="Draft summary two.",
+            evidence_mode=turn["evidence_mode"],
+            research_depth=turn["research_depth"],
+            bundle_paths=turn["bundle_paths"],
+            status="answered",
+        )
+
+        run_state = load_run_state(workspace, str(turn["run_id"]))
+        profile = run_state["execution_cost_profile"]
+        self.assertGreaterEqual(profile["phase_counts"].get("draft", 0), 1)
+        self.assertGreaterEqual(profile["phase_counts"].get("retrace", 0), 1)
+        self.assertGreaterEqual(profile["phase_counts"].get("rewrite", 0), 1)
+
+    def test_composition_trace_without_candidates_fresh_traces_without_full_scan(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-compose-no-full-scan"},
+            clear=False,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="Help me draft an executive summary for the current deck.",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="composition",
+                    question_domain="composition",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text("Draft summary one.\n", encoding="utf-8")
+        original_glob = Path.glob
+
+        def guarded_glob(path: Path, pattern: str):  # type: ignore[override]
+            if path == workspace.retrieval_traces_dir:
+                raise AssertionError("composition fresh trace must not full-scan retrieval traces")
+            return original_glob(path, pattern)
+
+        with mock.patch("pathlib.Path.glob", side_effect=guarded_glob):
+            first_trace = trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=turn["log_context"],
+            )
+
+        self.assertFalse(bool(first_trace.get("reused_trace")))
+        journal_entries = [
+            json.loads(line)
+            for line in run_journal_path(workspace, str(turn["run_id"])).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        phase_events = [
+            entry["event_type"]
+            for entry in journal_entries
+            if entry.get("stage") == "execution"
+        ]
+        self.assertIn("phase-start", phase_events)
+        self.assertIn("phase-finish", phase_events)
+        run_state = load_run_state(workspace, str(turn["run_id"]))
+        self.assertIn("execution_cost_profile", run_state)
+        self.assertGreaterEqual(
+            run_state["execution_cost_profile"]["phase_counts"].get("draft", 0),
+            1,
+        )
+
+    def test_shared_job_settlement_is_idempotent_and_run_journal_once_only(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-shared-job"},
+            clear=False,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="Does Aliyun SMS support HTTPS API?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="external-factual",
+                ),
+            )
+
+        job = ensure_shared_job(
+            workspace,
+            job_key="sync:test:idempotent",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={"workspace_root": str(workspace.root)},
+            input_signature="sync:test:idempotent",
+            owner={"kind": "command", "id": "sync-command"},
+            run_id=str(turn["run_id"]),
+        )["manifest"]
+        settled = complete_control_plane_job(
+            workspace,
+            str(job["job_id"]),
+            result={"status": "valid", "detail": "Settled once."},
+        )
+        settled_again = complete_control_plane_job(
+            workspace,
+            str(job["job_id"]),
+            result={"status": "valid", "detail": "Settled once."},
+        )
+        self.assertEqual(settled["updated_at"], settled_again["updated_at"])
+        with self.assertRaises(ValueError):
+            complete_control_plane_job(
+                workspace,
+                str(job["job_id"]),
+                result={"status": "valid", "detail": "Mutated later."},
+            )
+        record_shared_job_settled_once(
+            workspace,
+            run_ids=[str(turn["run_id"])],
+            job_id=str(job["job_id"]),
+            status="completed",
+        )
+        record_shared_job_settled_once(
+            workspace,
+            run_ids=[str(turn["run_id"])],
+            job_id=str(job["job_id"]),
+            status="completed",
+        )
+        journal_entries = [
+            json.loads(line)
+            for line in run_journal_path(workspace, str(turn["run_id"]))
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        settled_events = [
+            entry
+            for entry in journal_entries
+            if entry.get("event_type") == "shared-job-settled"
+            and isinstance(entry.get("payload"), dict)
+            and entry["payload"].get("job_id") == str(job["job_id"])
+        ]
+        self.assertEqual(len(settled_events), 1)
+        job_journal_entries = [
+            json.loads(line)
+            for line in (
+                workspace.shared_jobs_dir / str(job["job_id"]) / "journal.jsonl"
+            )
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            len(
+                [
+                    entry
+                    for entry in job_journal_entries
+                    if entry.get("event_type") == "job-settled"
+                ]
+            ),
+            1,
+        )
 
     def test_agent_semantic_analysis_routes_non_english_questions(self) -> None:
         workspace = self.make_workspace()

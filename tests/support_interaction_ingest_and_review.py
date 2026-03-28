@@ -14,10 +14,11 @@ from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
+from docmason.affordances import DEFAULT_AFFORDANCE_FILENAME
 from docmason.ask import prepare_ask_turn
 from docmason.commands import sync_workspace
-from docmason.coordination import workspace_lease
 from docmason.conversation import host_identity_key, update_conversation_turn
+from docmason.coordination import workspace_lease
 from docmason.interaction import (
     _persist_interaction_entry,
     build_promoted_interaction_memories,
@@ -264,12 +265,14 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             "title": "Interaction Memory for sponsor constraint updates",
             "source_language": "mixed-or-non-en",
             "summary_en": (
-                "The interaction memory captures a response-time requirement, concept-style guidance, "
-                "and screenshot-backed expectations from a real business follow-up."
+                "The interaction memory captures a response-time requirement, "
+                "concept-style guidance, and screenshot-backed expectations "
+                "from a real business follow-up."
             ),
             "summary_source": (
-                "The interaction memory captures a response-time requirement, concept-style guidance, "
-                "and screenshot-backed expectations from a real business follow-up."
+                "The interaction memory captures a response-time requirement, "
+                "concept-style guidance, and screenshot-backed expectations "
+                "from a real business follow-up."
             ),
             "document_type": "interaction",
             "key_points": [
@@ -420,7 +423,10 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "content": [
                         {
                             "type": "input_text",
-                            "text": "How should I draft the campaign planning brief for the programme lead?",
+                            "text": (
+                                "How should I draft the campaign planning brief "
+                                "for the programme lead?"
+                            ),
                         }
                     ],
                 },
@@ -490,8 +496,9 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                             "type": "input_text",
                             "text": (
                                 "How should I frame the next architecture review response? "
-                                "The programme lead added a response-time requirement, and this screenshot "
-                                "shows the concept style we must follow."
+                                "The programme lead added a response-time "
+                                "requirement, and this screenshot shows the "
+                                "concept style we must follow."
                             ),
                         },
                         {"type": "input_image", "image_url": self.fake_png_data_url()},
@@ -1017,7 +1024,113 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
 
         self.assertTrue(turn["auto_sync_triggered"])
         self.assertEqual(turn["auto_sync_summary"]["status"], "valid")
-        self.assertEqual(turn["auto_sync_reason"], "Relevant pending interaction-derived knowledge still awaits sync-time promotion.")
+        self.assertEqual(
+            turn["auto_sync_reason"],
+            (
+                "Relevant pending interaction-derived knowledge still awaits "
+                "sync-time promotion."
+            ),
+        )
+
+    def test_prepare_ask_turn_keeps_exact_source_pending_interaction_advisory(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        thread_id = "thread-exact-source-overlay"
+        state_db, sessions_root = self.write_fake_codex_storage(
+            workspace,
+            thread_id=thread_id,
+            source_ids=source_ids,
+        )
+
+        with (
+            self.patch_codex_storage(state_db, sessions_root),
+            self.patch_interaction_storage(state_db, sessions_root),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": thread_id}, clear=False),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question=(
+                    "Using only the document 'Campaign Planning Brief', "
+                    "how should I handle the response-time requirement from the screenshot?"
+                ),
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    memory_mode="strong",
+                    relevant_memory_kinds=[
+                        "constraint",
+                        "clarification",
+                        "preference",
+                        "working-note",
+                    ],
+                    evidence_requirements={"inspection_scope": "source"},
+                ),
+            )
+
+        self.assertEqual(turn["reference_resolution_summary"], "exact-reference")
+        self.assertFalse(turn["auto_sync_triggered"])
+        self.assertTrue(turn["interaction_sync_suggested"])
+        self.assertIn(
+            "Pending interaction-derived knowledge appears relevant",
+            turn["freshness_notice"],
+        )
+
+    def test_prepare_ask_turn_keeps_source_exact_approximate_locator_advisory(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        thread_id = "thread-source-exact-approx"
+        state_db, sessions_root = self.write_fake_codex_storage(
+            workspace,
+            thread_id=thread_id,
+            source_ids=source_ids,
+        )
+
+        approximate_source_exact = {
+            "detected": True,
+            "status": "approximate",
+            "source_match_status": "exact",
+            "unit_match_status": "approximate",
+            "resolved_source_id": source_ids[0],
+            "source_narrowing_allowed": True,
+        }
+
+        with (
+            self.patch_codex_storage(state_db, sessions_root),
+            self.patch_interaction_storage(state_db, sessions_root),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": thread_id}, clear=False),
+            mock.patch(
+                "docmason.ask.resolve_workspace_reference",
+                return_value=approximate_source_exact,
+            ),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question=(
+                    "Using only the document 'Campaign Planning Brief', "
+                    "how should I handle the response-time requirement?"
+                ),
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    memory_mode="strong",
+                    relevant_memory_kinds=[
+                        "constraint",
+                        "clarification",
+                        "preference",
+                        "working-note",
+                    ],
+                    evidence_requirements={"inspection_scope": "source"},
+                ),
+            )
+
+        self.assertFalse(turn["auto_sync_triggered"])
+        self.assertTrue(turn["interaction_sync_suggested"])
 
     def test_sync_promotes_pending_interactions_into_current_kb_and_trace(self) -> None:
         workspace = self.make_workspace()
@@ -1091,6 +1204,56 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         )
         self.assertTrue(corpus_first["results"])
         self.assertEqual(corpus_first["results"][0]["source_family"], "corpus")
+
+    def test_build_promoted_interaction_memories_reuses_complete_unchanged_group(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        _persist_interaction_entry(
+            workspace,
+            conversation_id="thread-reuse",
+            turn_id="turn-001",
+            native_turn_id="native-turn-001",
+            recorded_at="2026-03-17T00:00:00Z",
+            user_text="The programme lead added a 24-hour response-time requirement.",
+            assistant_excerpt="Keep the concept style and mention the response-time constraint.",
+            attachment_refs=[],
+            continuation_type="constraint-update",
+            related_source_ids=source_ids[:1],
+            tool_use_audit={
+                "consulted_source_ids": source_ids[:1],
+                "docmason_commands": [],
+                "direct_knowledge_base_access": False,
+                "direct_original_doc_access": False,
+                "render_inspection_used": False,
+            },
+        )
+
+        build_promoted_interaction_memories(
+            workspace,
+            target="staging",
+            active_source_ids=set(source_ids),
+        )
+        memory_id = self.seed_interaction_memory(workspace)
+        memory_dir = workspace.interaction_memories_dir("staging") / memory_id
+        self.assertTrue((memory_dir / DEFAULT_AFFORDANCE_FILENAME).exists())
+
+        sentinel_path = memory_dir / "sentinel.keep"
+        sentinel_path.write_text("preserve me\n", encoding="utf-8")
+
+        rebuilt_manifest = build_promoted_interaction_memories(
+            workspace,
+            target="staging",
+            active_source_ids=set(source_ids),
+        )
+
+        self.assertTrue(sentinel_path.exists())
+        self.assertEqual(rebuilt_manifest["memory_count"], 1)
+        source_manifest = read_json(memory_dir / "source_manifest.json")
+        self.assertIn("interaction_input_digest", source_manifest)
 
     def test_legacy_interaction_memories_get_semantic_defaults_backfilled(self) -> None:
         workspace = self.make_workspace()
@@ -1276,7 +1439,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                 "docmason.interaction.load_claude_code_transcript",
                 return_value={**transcript, "fidelity": {"capture_method": "hook-mirror"}},
             ),
-            mock.patch("docmason.interaction.refresh_runtime_projections", return_value={}),
+            mock.patch("docmason.interaction.queue_projection_refresh", return_value={}),
         ):
             codex_result = reconcile_codex_thread(workspace, thread_id="codex-thread")
             claude_result = reconcile_claude_code_thread(workspace, session_id="claude-session")
@@ -1312,7 +1475,10 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "opened_at": "2026-03-17T00:00:00Z",
                     "completed_at": "2026-03-17T00:01:00Z",
                     "user_text": "Summarize the proposal.",
-                    "assistant_final_text": "The Claude host SDK failed before canonical completion.",
+                    "assistant_final_text": (
+                        "The Claude host SDK failed before canonical "
+                        "completion."
+                    ),
                     "attachments": [],
                     "function_calls": [],
                     "closure": {
@@ -1320,13 +1486,19 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                         "source": "hook-stop",
                         "stop_reason": "sdk-error",
                         "diagnostics": {
-                            "host_error_text": "Cannot read properties of undefined (reading 'input_tokens')."
+                            "host_error_text": (
+                                "Cannot read properties of undefined "
+                                "(reading 'input_tokens')."
+                            )
                         },
                     },
                     "operator_evidence": {
                         "status": "degraded",
                         "classification": "host-runtime-failure",
-                        "detail": "Claude session captured an explicit host/runtime failure signal.",
+                        "detail": (
+                            "Claude session captured an explicit host/runtime "
+                            "failure signal."
+                        ),
                     },
                 }
             ],
@@ -1341,7 +1513,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                 "docmason.interaction.load_claude_code_transcript",
                 return_value=transcript,
             ),
-            mock.patch("docmason.interaction.refresh_runtime_projections", return_value={}),
+            mock.patch("docmason.interaction.queue_projection_refresh", return_value={}),
         ):
             reconciled = reconcile_claude_code_thread(workspace, session_id="claude-failed-session")
 
@@ -1367,7 +1539,9 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertEqual(read_json(workspace.answer_history_index_path)["record_count"], 0)
         self.assertEqual(len(summary["native_reconciliation"]["host_runtime_failures_recent"]), 1)
 
-    def test_reconcile_claude_parser_e2e_preserves_early_failure_and_nested_image_evidence(self) -> None:
+    def test_reconcile_claude_parser_e2e_preserves_early_failure_and_nested_image_evidence(
+        self,
+    ) -> None:
         workspace = self.make_workspace()
         session_id = "claude-e2e-session"
         image_payload = base64.b64encode(b"fake-png-bytes").decode("ascii")
@@ -1528,7 +1702,10 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "recorded_at": "2026-03-17T00:00:15Z",
                     "last_assistant_message": "The host SDK failed during the first attempt.",
                     "stop_reason": "sdk-error",
-                    "host_error_text": "Cannot read properties of undefined (reading 'input_tokens').",
+                    "host_error_text": (
+                        "Cannot read properties of undefined "
+                        "(reading 'input_tokens')."
+                    ),
                 },
                 {
                     "record_type": "prompt-submit",
@@ -1602,7 +1779,10 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "record_type": "stop",
                     "session_id": session_id,
                     "recorded_at": "2026-03-17T00:00:20Z",
-                    "last_assistant_message": "The SDK documentation recommends sequential image reads to reduce context pressure.",
+                    "last_assistant_message": (
+                        "The SDK documentation recommends sequential image "
+                        "reads to reduce context pressure."
+                    ),
                     "stop_reason": "end_turn",
                 },
             ],
@@ -1715,10 +1895,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                         "render_inspection_used": False,
                     },
                 ),
-                mock.patch(
-                    "docmason.interaction.refresh_runtime_projections",
-                    return_value={},
-                ),
+                mock.patch("docmason.interaction.queue_projection_refresh", return_value={}),
             ):
                 thread = threading.Thread(target=run_reconcile)
                 thread.start()

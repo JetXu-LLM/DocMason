@@ -23,9 +23,8 @@ from .conversation import (
     update_conversation_turn,
 )
 from .coordination import workspace_lease
-from .front_controller import question_execution_profile
 from .project import WorkspacePaths, ensure_json_parent, read_json, write_json
-from .projections import refresh_runtime_projections
+from .projections import queue_projection_refresh
 from .routing import (
     infer_entry_semantics,
     infer_memory_query_profile,
@@ -1581,11 +1580,16 @@ def _reconcile_native_transcript(
             },
         )
         overlay_manifest = refresh_interaction_overlay(paths)
-        refresh_runtime_projections(paths)
+        queue_projection_refresh(
+            paths,
+            reason="Interaction reconciliation updated runtime-native audit state.",
+        )
     return {
         "status": "reconciled",
         "native_ledger_id": native_ledger_id,
-        "native_ledger_path": str(_native_ledger_path(paths, native_ledger_id).relative_to(paths.root)),
+        "native_ledger_path": str(
+            _native_ledger_path(paths, native_ledger_id).relative_to(paths.root)
+        ),
         "canonical_conversation_id": canonical_conversation_id,
         "captured_interaction_ids": captured_interaction_ids,
         "turn_count": len(transcript.get("turns", [])),
@@ -1984,10 +1988,12 @@ def _existing_interaction_memory_lookup(
 
 
 def _existing_interaction_memory_dir_lookup(
-    paths: WorkspacePaths, *, target: str
+    paths: WorkspacePaths,
+    *,
+    targets: tuple[str, ...],
 ) -> dict[str, Path]:
     lookup: dict[str, Path] = {}
-    for candidate_target in ("current",):
+    for candidate_target in targets:
         memories_dir = paths.interaction_memories_dir(candidate_target)
         if not memories_dir.exists():
             continue
@@ -2019,6 +2025,132 @@ def _preserve_interaction_semantic_outputs(
 ) -> None:
     for filename, data in previous_payload.items():
         (memory_dir / filename).write_bytes(data)
+
+
+def _interaction_memory_contract_complete(memory_dir: Path) -> bool:
+    required_paths = (
+        memory_dir / "source_manifest.json",
+        memory_dir / "evidence_manifest.json",
+        memory_dir / "interaction_context.json",
+        memory_dir / "work_item.json",
+        memory_dir / "knowledge.json",
+        memory_dir / "summary.md",
+        memory_dir / DEFAULT_AFFORDANCE_FILENAME,
+    )
+    return all(path.exists() for path in required_paths)
+
+
+def _interaction_memory_input_digest(
+    *,
+    conversation_id: str,
+    grouped_entries: list[dict[str, Any]],
+    related_source_ids: list[str],
+) -> str:
+    normalized_entries: list[dict[str, Any]] = []
+    for entry in grouped_entries:
+        if not isinstance(entry, dict):
+            continue
+        attachment_refs = entry.get("attachment_refs", [])
+        relation_hints = entry.get("relation_hints", [])
+        normalized_entries.append(
+            {
+                "interaction_id": entry.get("interaction_id"),
+                "recorded_at": entry.get("recorded_at"),
+                "conversation_id": entry.get("conversation_id"),
+                "turn_id": entry.get("turn_id"),
+                "native_turn_id": entry.get("native_turn_id"),
+                "continuation_type": entry.get("continuation_type"),
+                "user_text": entry.get("user_text"),
+                "assistant_excerpt": entry.get("assistant_excerpt"),
+                "memory_kind": entry.get("memory_kind"),
+                "durability": entry.get("durability"),
+                "uncertainty": entry.get("uncertainty"),
+                "answer_use_policy": entry.get("answer_use_policy"),
+                "retrieval_rank_prior": entry.get("retrieval_rank_prior"),
+                "related_source_ids": [
+                    value
+                    for value in entry.get("related_source_ids", [])
+                    if isinstance(value, str) and value
+                ],
+                "attachment_refs": [
+                    {
+                        "attachment_id": attachment.get("attachment_id"),
+                        "stored_path": attachment.get("stored_path"),
+                        "sha256": attachment.get("sha256"),
+                        "mime_type": attachment.get("mime_type"),
+                    }
+                    for attachment in attachment_refs
+                    if isinstance(attachment, dict)
+                ],
+                "relation_hints": [
+                    {
+                        "related_source_id": hint.get("related_source_id"),
+                        "relation_type": hint.get("relation_type"),
+                    }
+                    for hint in relation_hints
+                    if isinstance(hint, dict)
+                ],
+            }
+        )
+    return _sha256_text(
+        json.dumps(
+            {
+                "conversation_id": conversation_id,
+                "related_source_ids": related_source_ids,
+                "entries": normalized_entries,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
+def _interaction_memory_manifest_record(
+    memory_dir: Path,
+    *,
+    memory_id: str,
+    interaction_input_digest: str | None = None,
+) -> dict[str, Any]:
+    source_manifest = read_json(memory_dir / "source_manifest.json")
+    interaction_context = read_json(memory_dir / "interaction_context.json")
+    conversation_ids = source_manifest.get("conversation_ids", [])
+    if not isinstance(conversation_ids, list):
+        conversation_ids = []
+    interaction_ids = source_manifest.get("interaction_ids", [])
+    if not isinstance(interaction_ids, list):
+        interaction_ids = []
+    related_sources = interaction_context.get("related_sources", [])
+    if not isinstance(related_sources, list):
+        related_sources = []
+    related_source_ids = _deduplicate_strings(
+        [
+            str(item.get("source_id"))
+            for item in related_sources
+            if isinstance(item, dict) and isinstance(item.get("source_id"), str)
+        ]
+    )
+    return {
+        "memory_id": memory_id,
+        "conversation_id": conversation_ids[0] if conversation_ids else None,
+        "entry_count": len(
+            [
+                interaction_id
+                for interaction_id in interaction_ids
+                if isinstance(interaction_id, str)
+            ]
+        ),
+        "interaction_ids": interaction_ids,
+        "related_source_ids": related_source_ids,
+        "memory_kind": source_manifest.get("memory_kind"),
+        "durability": source_manifest.get("durability"),
+        "uncertainty": source_manifest.get("uncertainty"),
+        "has_semantic_outputs": _interaction_memory_contract_complete(memory_dir),
+        "interaction_input_digest": (
+            interaction_input_digest
+            if isinstance(interaction_input_digest, str) and interaction_input_digest
+            else source_manifest.get("interaction_input_digest")
+        ),
+    }
 
 
 def _filter_related_source_records(
@@ -2119,15 +2251,9 @@ def build_promoted_interaction_memories(
     interaction_dir = paths.interaction_target_dir(target)
     memories_dir = paths.interaction_memories_dir(target)
     previous_lookup = _existing_interaction_memory_lookup(paths, target=target)
-    previous_dir_lookup = _existing_interaction_memory_dir_lookup(paths, target=target)
-    if interaction_dir.exists():
-        for child in interaction_dir.iterdir():
-            if child.is_dir():
-                import shutil
-
-                shutil.rmtree(child)
-            else:
-                child.unlink()
+    target_dir_lookup = _existing_interaction_memory_dir_lookup(paths, targets=(target,))
+    current_dir_lookup = _existing_interaction_memory_dir_lookup(paths, targets=("current",))
+    interaction_dir.mkdir(parents=True, exist_ok=True)
     memories_dir.mkdir(parents=True, exist_ok=True)
 
     entries = pending_interaction_entries(paths)
@@ -2158,6 +2284,44 @@ def build_promoted_interaction_memories(
             all_related_source_ids = [
                 source_id for source_id in all_related_source_ids if source_id in active_source_ids
             ]
+        interaction_input_digest = _interaction_memory_input_digest(
+            conversation_id=conversation_id,
+            grouped_entries=grouped_entries,
+            related_source_ids=all_related_source_ids,
+        )
+        reusable_dir = target_dir_lookup.get(memory_id) or current_dir_lookup.get(memory_id)
+        reusable_source_manifest = (
+            read_json(reusable_dir / "source_manifest.json")
+            if isinstance(reusable_dir, Path)
+            else {}
+        )
+        if (
+            isinstance(reusable_dir, Path)
+            and reusable_dir.exists()
+            and reusable_source_manifest.get("interaction_input_digest") == interaction_input_digest
+            and _interaction_memory_contract_complete(reusable_dir)
+        ):
+            if reusable_dir != memory_dir:
+                import shutil
+
+                if memory_dir.exists():
+                    shutil.rmtree(memory_dir)
+                shutil.copytree(reusable_dir, memory_dir)
+            memories.append(
+                _interaction_memory_manifest_record(
+                    memory_dir,
+                    memory_id=memory_id,
+                    interaction_input_digest=interaction_input_digest,
+                )
+            )
+            built_memory_ids.add(memory_id)
+            continue
+        if memory_dir.exists():
+            import shutil
+
+            shutil.rmtree(memory_dir)
+        extracted_dir = memory_dir / "extracted"
+        extracted_dir.mkdir(parents=True, exist_ok=True)
         title = _memory_title(grouped_entries, conversation_id)
         summary_md = _memory_summary(grouped_entries)
         source_language = _memory_language(grouped_entries)
@@ -2262,6 +2426,7 @@ def build_promoted_interaction_memories(
             "retrieval_rank_prior": semantics["retrieval_rank_prior"],
             "conversation_ids": [conversation_id],
             "interaction_ids": [entry.get("interaction_id") for entry in grouped_entries],
+            "interaction_input_digest": interaction_input_digest,
         }
         evidence_manifest = {
             "source_id": memory_id,
@@ -2338,35 +2503,24 @@ def build_promoted_interaction_memories(
         _apply_memory_semantics_to_directory(memory_dir, semantics=semantics)
         _write_interaction_memory_affordances(memory_dir)
         memories.append(
-            {
-                "memory_id": memory_id,
-                "conversation_id": conversation_id,
-                "entry_count": len(grouped_entries),
-                "interaction_ids": [entry.get("interaction_id") for entry in grouped_entries],
-                "related_source_ids": all_related_source_ids,
-                "memory_kind": semantics["memory_kind"],
-                "durability": semantics["durability"],
-                "uncertainty": semantics["uncertainty"],
-                "has_semantic_outputs": (memory_dir / "knowledge.json").exists()
-                and (memory_dir / "summary.md").exists(),
-            }
+            _interaction_memory_manifest_record(
+                memory_dir,
+                memory_id=memory_id,
+                interaction_input_digest=interaction_input_digest,
+            )
         )
         built_memory_ids.add(memory_id)
 
-    for memory_id, previous_dir in previous_dir_lookup.items():
+    for memory_id, previous_dir in current_dir_lookup.items():
         if memory_id in built_memory_ids:
             continue
         target_dir = memories_dir / memory_id
         import shutil
 
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
         shutil.copytree(previous_dir, target_dir)
         source_manifest = read_json(target_dir / "source_manifest.json")
-        conversation_ids = source_manifest.get("conversation_ids", [])
-        if not isinstance(conversation_ids, list):
-            conversation_ids = []
-        interaction_ids = source_manifest.get("interaction_ids", [])
-        if not isinstance(interaction_ids, list):
-            interaction_ids = []
         interaction_context = read_json(target_dir / "interaction_context.json")
         knowledge = read_json(target_dir / "knowledge.json")
         summary_path = target_dir / "summary.md"
@@ -2377,16 +2531,6 @@ def build_promoted_interaction_memories(
         )
         interaction_context = read_json(target_dir / "interaction_context.json")
         knowledge = read_json(target_dir / "knowledge.json")
-        related_sources = interaction_context.get("related_sources", [])
-        if not isinstance(related_sources, list):
-            related_sources = []
-        related_source_ids = _deduplicate_strings(
-            [
-                str(item.get("source_id"))
-                for item in related_sources
-                if isinstance(item, dict) and isinstance(item.get("source_id"), str)
-            ]
-        )
         semantics = normalize_memory_semantics(
             interaction_context.get("semantics"),
             fallback_text=_memory_semantics_fallback_text(
@@ -2402,26 +2546,15 @@ def build_promoted_interaction_memories(
         )
         _apply_memory_semantics_to_directory(target_dir, semantics=semantics)
         _write_interaction_memory_affordances(target_dir)
-        memories.append(
-            {
-                "memory_id": memory_id,
-                "conversation_id": conversation_ids[0] if conversation_ids else None,
-                "entry_count": len(
-                    [
-                        interaction_id
-                        for interaction_id in interaction_ids
-                        if isinstance(interaction_id, str)
-                    ]
-                ),
-                "interaction_ids": interaction_ids,
-                "related_source_ids": related_source_ids,
-                "memory_kind": semantics["memory_kind"],
-                "durability": semantics["durability"],
-                "uncertainty": semantics["uncertainty"],
-                "has_semantic_outputs": (target_dir / "knowledge.json").exists()
-                and (target_dir / "summary.md").exists(),
-            }
-        )
+        memories.append(_interaction_memory_manifest_record(target_dir, memory_id=memory_id))
+        built_memory_ids.add(memory_id)
+
+    for memory_id, target_dir in target_dir_lookup.items():
+        if memory_id in built_memory_ids:
+            continue
+        import shutil
+
+        shutil.rmtree(target_dir)
 
     manifest = {
         "generated_at": utc_now(),

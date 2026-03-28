@@ -14,7 +14,7 @@ from .evaluation import (
     run_evaluation_suite,
 )
 from .project import WorkspacePaths, read_json, write_json
-from .projections import refresh_runtime_projections
+from .projections import ensure_runtime_projections_fresh
 from .retrieval import utc_now
 
 OPERATOR_REQUEST_SCHEMA_VERSION = 1
@@ -126,7 +126,12 @@ def _load_run_payloads(paths: WorkspacePaths, *, suite: str) -> list[dict[str, A
     return run_payloads
 
 
-def _select_run_payload(paths: WorkspacePaths, *, suite: str, target_ids: list[str]) -> dict[str, Any]:
+def _select_run_payload(
+    paths: WorkspacePaths,
+    *,
+    suite: str,
+    target_ids: list[str],
+) -> dict[str, Any]:
     run_payloads = _load_run_payloads(paths, suite=suite)
     if not run_payloads:
         raise OperatorEvalRequestError(f"No evaluation runs exist yet for suite `{suite}`.")
@@ -140,7 +145,7 @@ def _select_run_payload(paths: WorkspacePaths, *, suite: str, target_ids: list[s
 
 
 def _candidate_lookup(paths: WorkspacePaths) -> dict[str, dict[str, Any]]:
-    refresh_runtime_projections(paths)
+    ensure_runtime_projections_fresh(paths, consumer="operator-eval")
     payload = read_json(paths.benchmark_candidates_path)
     candidates = payload.get("candidates", [])
     if not isinstance(candidates, list):
@@ -179,7 +184,9 @@ def _ensure_regression_scaffold(paths: WorkspacePaths) -> None:
     if not rubric_path.exists():
         broad_rubric = read_json(paths.eval_rubric_path("broad"))
         if not broad_rubric:
-            raise OperatorEvalRequestError("Cannot scaffold regression rubric without a broad rubric.")
+            raise OperatorEvalRequestError(
+                "Cannot scaffold regression rubric without a broad rubric."
+            )
         write_json(rubric_path, broad_rubric)
     if not judge_trials_path.exists():
         broad_trials = read_json(paths.eval_judge_trials_path("broad"))
@@ -374,7 +381,11 @@ def _run_suite_action(paths: WorkspacePaths, request: dict[str, Any]) -> dict[st
 
 
 def _review_regressions_action(paths: WorkspacePaths, request: dict[str, Any]) -> dict[str, Any]:
-    latest_run = _select_run_payload(paths, suite=request["suite"], target_ids=request["target_ids"])
+    latest_run = _select_run_payload(
+        paths,
+        suite=request["suite"],
+        target_ids=request["target_ids"],
+    )
     candidates = _candidate_lookup(paths)
     top_candidates = list(candidates.values())[:10]
     review_payload = {
@@ -467,7 +478,11 @@ def _promote_candidate_action(paths: WorkspacePaths, request: dict[str, Any]) ->
 
 
 def _freeze_baseline_action(paths: WorkspacePaths, request: dict[str, Any]) -> dict[str, Any]:
-    run_payload = _select_run_payload(paths, suite=request["suite"], target_ids=request["target_ids"])
+    run_payload = _select_run_payload(
+        paths,
+        suite=request["suite"],
+        target_ids=request["target_ids"],
+    )
     baseline_path = paths.eval_baseline_path(request["suite"])
     baseline_payload = freeze_baseline_from_run(run_payload, baseline_path=baseline_path)
     return {
@@ -481,7 +496,11 @@ def _freeze_baseline_action(paths: WorkspacePaths, request: dict[str, Any]) -> d
     }
 
 
-def run_operator_eval(paths: WorkspacePaths, *, request_path: Path | None = None) -> tuple[dict[str, Any], list[str]]:
+def run_operator_eval(
+    paths: WorkspacePaths,
+    *,
+    request_path: Path | None = None,
+) -> tuple[dict[str, Any], list[str]]:
     """Execute the operator-only evaluation workflow from its request file."""
     ensure_eval_layout(paths)
     resolved_request_path = request_path or paths.eval_request_path
