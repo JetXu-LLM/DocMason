@@ -6,8 +6,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .conversation import normalize_front_door_state, semantic_log_context_from_record
-from .control_plane import load_shared_jobs_index, load_shared_job
+from .control_plane import load_shared_job, load_shared_jobs_index
+from .conversation import (
+    LOG_ORIGIN_EVALUATION_SUITE,
+    LOG_ORIGIN_INTERACTIVE_ASK,
+    normalize_front_door_state,
+    normalize_log_origin,
+    semantic_log_context_from_record,
+)
 from .project import WorkspacePaths, read_json
 
 RECENT_LIMIT = 10
@@ -39,7 +45,32 @@ def _conversation_has_canonical_truth(payload: dict[str, Any]) -> bool:
     turns = payload.get("turns", [])
     if not isinstance(turns, list):
         return False
-    return any(_record_has_canonical_ask_ownership(turn) for turn in turns if isinstance(turn, dict))
+    return any(
+        _record_has_canonical_ask_ownership(turn)
+        for turn in turns
+        if isinstance(turn, dict)
+    )
+
+
+def _record_log_origin(record: dict[str, Any] | None) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    return normalize_log_origin(record.get("log_origin"))
+
+
+def _is_synthetic_turn(turn: dict[str, Any] | None) -> bool:
+    return _record_log_origin(turn) == LOG_ORIGIN_EVALUATION_SUITE
+
+
+def _conversation_has_real_canonical_truth(payload: dict[str, Any]) -> bool:
+    turns = payload.get("turns", [])
+    if not isinstance(turns, list):
+        return False
+    return any(
+        _record_has_canonical_ask_ownership(turn) and not _is_synthetic_turn(turn)
+        for turn in turns
+        if isinstance(turn, dict)
+    )
 
 
 def _effective_log_origin(
@@ -47,16 +78,27 @@ def _effective_log_origin(
     *,
     linked_turn: dict[str, Any] | None = None,
 ) -> str | None:
-    explicit = payload.get("log_origin")
-    if isinstance(explicit, str) and explicit:
+    explicit = _record_log_origin(payload)
+    if explicit is not None:
         return explicit
+    linked_turn_origin = _record_log_origin(linked_turn)
+    if linked_turn_origin is not None:
+        return linked_turn_origin
     if _record_has_canonical_ask_ownership(payload) or _record_has_canonical_ask_ownership(
         linked_turn
     ):
-        return "interactive-ask"
+        return LOG_ORIGIN_INTERACTIVE_ASK
     if isinstance(payload.get("conversation_id"), str):
         return "workflow-linked"
     return None
+
+
+def _is_synthetic_runtime_record(
+    payload: dict[str, Any],
+    *,
+    linked_turn: dict[str, Any] | None = None,
+) -> bool:
+    return _effective_log_origin(payload, linked_turn=linked_turn) == LOG_ORIGIN_EVALUATION_SUITE
 
 
 def _merged_semantic_context(*records: dict[str, Any] | None) -> dict[str, str]:
@@ -139,7 +181,7 @@ def _projection_conversations(paths: WorkspacePaths) -> list[dict[str, Any]]:
         [
             payload
             for payload in _load_log_payloads(paths.conversation_projections_dir)
-            if _conversation_has_canonical_truth(payload)
+            if _conversation_has_real_canonical_truth(payload)
         ],
         key=lambda payload: str(payload.get("updated_at") or ""),
         reverse=True,
@@ -159,6 +201,8 @@ def _load_conversations(paths: WorkspacePaths) -> dict[tuple[str, str], dict[str
             if not isinstance(turn, dict):
                 continue
             if not _record_has_canonical_ask_ownership(turn):
+                continue
+            if _is_synthetic_turn(turn):
                 continue
             turn_id = turn.get("turn_id")
             if isinstance(turn_id, str) and turn_id:
@@ -498,19 +542,13 @@ def build_benchmark_candidates(
 
     grouped: dict[tuple[str | None, str | None, str | None], dict[str, Any]] = {}
     for payload in [*query_sessions, *retrieval_traces]:
-        if payload.get("log_origin") == "evaluation-suite":
-            continue
-        if _is_external_verified_success(payload):
-            continue
-        status = payload.get("status")
-        trace_mode = payload.get("trace_mode")
-        if status not in {"no-results", "degraded"} and not payload.get("render_inspection_required"):
-            continue
-        if trace_mode == "citation-first" and status == "ready":
-            continue
         conversation_id = payload.get("conversation_id")
         turn_id = payload.get("turn_id")
-        session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
+        session_id = (
+            payload.get("session_id")
+            if isinstance(payload.get("session_id"), str)
+            else None
+        )
         trace_id = payload.get("trace_id") if isinstance(payload.get("trace_id"), str) else None
         conversation_record = None
         if isinstance(conversation_id, str) and isinstance(turn_id, str):
@@ -523,6 +561,25 @@ def build_benchmark_candidates(
                 )
             ):
                 continue
+        effective_log_origin = _effective_log_origin(
+            payload,
+            linked_turn=(
+                conversation_record["turn"] if isinstance(conversation_record, dict) else None
+            ),
+        )
+        if effective_log_origin == LOG_ORIGIN_EVALUATION_SUITE:
+            continue
+        if _is_external_verified_success(payload):
+            continue
+        status = payload.get("status")
+        trace_mode = payload.get("trace_mode")
+        if (
+            status not in {"no-results", "degraded"}
+            and not payload.get("render_inspection_required")
+        ):
+            continue
+        if trace_mode == "citation-first" and status == "ready":
+            continue
         question = payload.get("query")
         if not isinstance(question, str) or not question:
             question = (
@@ -573,12 +630,7 @@ def build_benchmark_candidates(
                 "routed_workflow": payload.get("entry_workflow_id") or payload.get("command"),
                 "inner_workflow_id": payload.get("inner_workflow_id"),
                 "requires_render_inspection": False,
-                "log_origin": _effective_log_origin(
-                    payload,
-                    linked_turn=(
-                        conversation_record["turn"] if isinstance(conversation_record, dict) else None
-                    ),
-                ),
+                "log_origin": effective_log_origin,
                 "candidate_source": candidate_source,
                 "support_basis": payload.get("support_basis"),
                 "question_context": _merged_semantic_context(
@@ -644,10 +696,18 @@ def build_benchmark_candidates(
 
     candidates: list[dict[str, Any]] = []
     for group in grouped.values():
-        session_ids = list(dict.fromkeys(item for item in group["session_ids"] if isinstance(item, str)))
-        trace_ids = list(dict.fromkeys(item for item in group["trace_ids"] if isinstance(item, str)))
+        session_ids = list(
+            dict.fromkeys(item for item in group["session_ids"] if isinstance(item, str))
+        )
+        trace_ids = list(
+            dict.fromkeys(item for item in group["trace_ids"] if isinstance(item, str))
+        )
         candidate_priority = _candidate_priority(
-            conversation_id=group["conversation_id"] if isinstance(group["conversation_id"], str) else None,
+            conversation_id=(
+                group["conversation_id"]
+                if isinstance(group["conversation_id"], str)
+                else None
+            ),
             log_origin=group["log_origin"] if isinstance(group["log_origin"], str) else None,
             feedback_match_count=int(group["feedback_match_count"]),
         )
@@ -688,7 +748,11 @@ def build_benchmark_candidates(
         if isinstance(group.get("bundle_paths"), list):
             candidate["bundle_paths"] = group["bundle_paths"]
         candidates.append(candidate)
-    candidates = sorted(candidates, key=lambda item: str(item.get("recorded_at") or ""), reverse=True)
+    candidates = sorted(
+        candidates,
+        key=lambda item: str(item.get("recorded_at") or ""),
+        reverse=True,
+    )
     candidates = sorted(
         candidates,
         key=lambda item: PRIORITY_ORDER.get(str(item.get("candidate_priority")), 3),
@@ -770,16 +834,16 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
         reverse=True,
     )
     real_query_sessions = [
-        payload for payload in query_sessions if payload.get("log_origin") != "evaluation-suite"
+        payload for payload in query_sessions if not _is_synthetic_runtime_record(payload)
     ]
     synthetic_query_sessions = [
-        payload for payload in query_sessions if payload.get("log_origin") == "evaluation-suite"
+        payload for payload in query_sessions if _is_synthetic_runtime_record(payload)
     ]
     real_retrieval_traces = [
-        payload for payload in retrieval_traces if payload.get("log_origin") != "evaluation-suite"
+        payload for payload in retrieval_traces if not _is_synthetic_runtime_record(payload)
     ]
     synthetic_retrieval_traces = [
-        payload for payload in retrieval_traces if payload.get("log_origin") == "evaluation-suite"
+        payload for payload in retrieval_traces if _is_synthetic_runtime_record(payload)
     ]
     orphaned_query_sessions = [
         payload
@@ -805,7 +869,11 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
                 "conversation_id": payload["conversation_id"],
                 "turn_id": turn["turn_id"],
                 "run_id": turn.get("committed_run_id"),
-                "recorded_at": turn.get("completed_at") or turn.get("updated_at") or turn.get("opened_at"),
+                "recorded_at": (
+                    turn.get("completed_at")
+                    or turn.get("updated_at")
+                    or turn.get("opened_at")
+                ),
                 "status": turn.get("status"),
                 "answer_state": turn.get("answer_state"),
                 "support_basis": turn.get("support_basis"),
@@ -814,11 +882,16 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
             }
             for payload in _load_log_payloads(paths.conversations_dir)
             if isinstance(payload.get("conversation_id"), str)
-            for turn in (payload.get("turns", []) if isinstance(payload.get("turns", []), list) else [])
+            for turn in (
+                payload.get("turns", [])
+                if isinstance(payload.get("turns", []), list)
+                else []
+            )
             if isinstance(turn, dict)
             and isinstance(turn.get("turn_id"), str)
             and isinstance(turn.get("committed_run_id"), str)
             and _record_has_canonical_ask_ownership(turn)
+            and not _is_synthetic_turn(turn)
         ],
         key=lambda item: str(item.get("recorded_at") or ""),
         reverse=True,
@@ -1024,7 +1097,8 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
                 if manifest and manifest.get("status") == "awaiting-confirmation"
             ][:RECENT_LIMIT],
             "orphaned_query_sessions": [
-                _compact_query_session(payload) for payload in orphaned_query_sessions[:RECENT_LIMIT]
+                _compact_query_session(payload)
+                for payload in orphaned_query_sessions[:RECENT_LIMIT]
             ],
             "orphaned_retrieval_traces": [
                 _compact_trace_record(payload)
@@ -1041,7 +1115,10 @@ def build_review_summary(paths: WorkspacePaths) -> dict[str, Any]:
         },
         "native_reconciliation": {
             "total": len(native_ledgers),
-            "recent": [_compact_native_ledger(payload) for payload in native_ledgers[:RECENT_LIMIT]],
+            "recent": [
+                _compact_native_ledger(payload)
+                for payload in native_ledgers[:RECENT_LIMIT]
+            ],
             "anomalous_recent": [
                 _compact_native_ledger(payload)
                 for payload in native_ledgers
@@ -1126,6 +1203,8 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
             if not isinstance(turn, dict):
                 continue
             if not _record_has_canonical_ask_ownership(turn):
+                continue
+            if _is_synthetic_turn(turn):
                 continue
             turn_id = turn.get("turn_id")
             question_text = turn.get("user_question")

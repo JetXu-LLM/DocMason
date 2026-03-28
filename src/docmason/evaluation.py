@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import statistics
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from .contracts import ANSWER_STATES, SUPPORT_BASIS_VALUES
+from .conversation import LOG_ORIGIN_EVALUATION_SUITE
 from .project import WorkspacePaths, read_json, write_json
 from .retrieval import (
     ANSWER_WORKFLOW_ID,
@@ -45,6 +50,25 @@ FEEDBACK_TAXONOMY = (
     "coverage_gap",
 )
 RUN_STATUS_ORDER = {"passed": 0, "degraded": 1, "failed": 2, "incompatible": 3}
+EVALUATION_EXECUTION_MODES = ("retrieve", "trace-source", "trace-answer", "ask-turn")
+ASK_REPLAY_SOURCE_KINDS = frozenset({"manual-suite"})
+ASK_TURN_COMPLETION_OVERRIDE_FIELDS = frozenset(
+    {"inner_workflow_id", "status", "support_basis", "support_manifest_path"}
+)
+ASK_TURN_HYBRID_COMPLETION_STATUSES = frozenset({"covered", "blocked"})
+ASK_TURN_EXPECTATION_KEYS = frozenset(
+    {
+        "final_turn_status",
+        "reused_turn",
+        "auto_prepare_triggered",
+        "auto_sync_triggered",
+        "hybrid_refresh_triggered",
+        "hybrid_refresh_completion_status",
+        "query_session_count",
+        "trace_count",
+        "required_run_events",
+    }
+)
 
 
 class EvaluationConfigurationError(ValueError):
@@ -126,6 +150,12 @@ def _require_string_mapping(value: Any, field_name: str) -> dict[str, str]:
     return normalized
 
 
+def _require_mapping(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvaluationConfigurationError(f"`{field_name}` must be an object.")
+    return dict(value)
+
+
 def _sha256_file(path: Path) -> str | None:
     if not path.exists() or not path.is_file():
         return None
@@ -155,6 +185,228 @@ def _resolve_required_workspace_path(paths: WorkspacePaths, path: Path) -> Path:
     resolved = _resolve_workspace_path(paths, path)
     assert resolved is not None
     return resolved
+
+
+def _normalize_ask_turn_case(case_id: str, payload: Any) -> dict[str, Any]:
+    """Validate and normalize the ask-turn replay contract for one case."""
+    ask_replay = _require_mapping(payload, f"{case_id}.ask_replay")
+    replay_source = _require_mapping(
+        ask_replay.get("replay_source"),
+        f"{case_id}.ask_replay.replay_source",
+    )
+    replay_source_kind = _require_string(
+        replay_source.get("kind"),
+        f"{case_id}.ask_replay.replay_source.kind",
+    )
+    if replay_source_kind not in ASK_REPLAY_SOURCE_KINDS:
+        raise EvaluationConfigurationError(
+            f"`{case_id}.ask_replay.replay_source.kind` must be one of "
+            f"{', '.join(sorted(ASK_REPLAY_SOURCE_KINDS))}."
+        )
+    normalized_replay_source: dict[str, Any] = {"kind": replay_source_kind}
+    for field_name in ("candidate_id", "conversation_id", "turn_id", "recorded_at"):
+        value = _require_optional_string(
+            replay_source.get(field_name),
+            f"{case_id}.ask_replay.replay_source.{field_name}",
+        )
+        if value is not None:
+            normalized_replay_source[field_name] = value
+
+    semantic_analysis = _require_mapping(
+        ask_replay.get("semantic_analysis"),
+        f"{case_id}.ask_replay.semantic_analysis",
+    )
+    if not semantic_analysis:
+        raise EvaluationConfigurationError(
+            f"`{case_id}.ask_replay.semantic_analysis` must not be empty."
+        )
+
+    host_thread_ref = _require_optional_string(
+        ask_replay.get("host_thread_ref"),
+        f"{case_id}.ask_replay.host_thread_ref",
+    )
+
+    continuations_payload = ask_replay.get("continuations", [])
+    if continuations_payload is None:
+        continuations_payload = []
+    if not isinstance(continuations_payload, list):
+        raise EvaluationConfigurationError(f"`{case_id}.ask_replay.continuations` must be a list.")
+    normalized_continuations: list[dict[str, Any]] = []
+    for index, continuation in enumerate(continuations_payload, start=1):
+        continuation_payload = _require_mapping(
+            continuation,
+            f"{case_id}.ask_replay.continuations[{index}]",
+        )
+        continuation_message = _require_string(
+            continuation_payload.get("message"),
+            f"{case_id}.ask_replay.continuations[{index}].message",
+        )
+        continuation_semantic_analysis = continuation_payload.get("semantic_analysis")
+        normalized_continuation: dict[str, Any] = {"message": continuation_message}
+        if continuation_semantic_analysis is not None:
+            normalized_semantic_analysis = _require_mapping(
+                continuation_semantic_analysis,
+                f"{case_id}.ask_replay.continuations[{index}].semantic_analysis",
+            )
+            if not normalized_semantic_analysis:
+                raise EvaluationConfigurationError(
+                    f"`{case_id}.ask_replay.continuations[{index}].semantic_analysis` "
+                    "must not be empty."
+                )
+            normalized_continuation["semantic_analysis"] = normalized_semantic_analysis
+        normalized_continuations.append(normalized_continuation)
+
+    answer_plan_payload = ask_replay.get("answer_plan")
+    normalized_answer_plan: dict[str, Any] | None = None
+    if answer_plan_payload is not None:
+        answer_plan = _require_mapping(answer_plan_payload, f"{case_id}.ask_replay.answer_plan")
+        completion_overrides_payload = answer_plan.get("completion_overrides", {})
+        if completion_overrides_payload is None:
+            completion_overrides_payload = {}
+        completion_overrides = _require_mapping(
+            completion_overrides_payload,
+            f"{case_id}.ask_replay.answer_plan.completion_overrides",
+        )
+        unknown_completion_override_fields = sorted(
+            set(completion_overrides) - ASK_TURN_COMPLETION_OVERRIDE_FIELDS
+        )
+        if unknown_completion_override_fields:
+            raise EvaluationConfigurationError(
+                f"`{case_id}.ask_replay.answer_plan.completion_overrides` contains unsupported "
+                "fields: " + ", ".join(unknown_completion_override_fields)
+            )
+        normalized_completion_overrides: dict[str, str] = {}
+        if "inner_workflow_id" in completion_overrides:
+            normalized_completion_overrides["inner_workflow_id"] = _require_string(
+                completion_overrides.get("inner_workflow_id"),
+                f"{case_id}.ask_replay.answer_plan.completion_overrides.inner_workflow_id",
+            )
+        if "status" in completion_overrides:
+            normalized_completion_overrides["status"] = _require_string(
+                completion_overrides.get("status"),
+                f"{case_id}.ask_replay.answer_plan.completion_overrides.status",
+            )
+        if "support_basis" in completion_overrides:
+            normalized_completion_overrides["support_basis"] = _require_optional_enum(
+                completion_overrides.get("support_basis"),
+                f"{case_id}.ask_replay.answer_plan.completion_overrides.support_basis",
+                allowed=SUPPORT_BASIS_VALUES,
+            ) or ""
+            if not normalized_completion_overrides["support_basis"]:
+                raise EvaluationConfigurationError(
+                    f"`{case_id}.ask_replay.answer_plan.completion_overrides."
+                    "support_basis` must be set when present."
+                )
+        if "support_manifest_path" in completion_overrides:
+            normalized_completion_overrides["support_manifest_path"] = _require_string(
+                completion_overrides.get("support_manifest_path"),
+                f"{case_id}.ask_replay.answer_plan.completion_overrides.support_manifest_path",
+            )
+        normalized_answer_plan = {
+            "answer_text": _require_string(
+                answer_plan.get("answer_text"),
+                f"{case_id}.ask_replay.answer_plan.answer_text",
+            ),
+            "trace_top": _require_int(
+                answer_plan.get("trace_top", 3),
+                f"{case_id}.ask_replay.answer_plan.trace_top",
+                minimum=1,
+            ),
+            "completion_overrides": normalized_completion_overrides,
+        }
+
+    hybrid_refresh_payload = ask_replay.get("hybrid_refresh")
+    normalized_hybrid_refresh: dict[str, Any] | None = None
+    if hybrid_refresh_payload is not None:
+        hybrid_refresh = _require_mapping(
+            hybrid_refresh_payload,
+            f"{case_id}.ask_replay.hybrid_refresh",
+        )
+        completion_status = _require_string(
+            hybrid_refresh.get("completion_status"),
+            f"{case_id}.ask_replay.hybrid_refresh.completion_status",
+        )
+        if completion_status not in ASK_TURN_HYBRID_COMPLETION_STATUSES:
+            raise EvaluationConfigurationError(
+                f"`{case_id}.ask_replay.hybrid_refresh.completion_status` must be one of "
+                f"{', '.join(sorted(ASK_TURN_HYBRID_COMPLETION_STATUSES))}."
+            )
+        normalized_hybrid_refresh = {
+            "completion_status": completion_status,
+            "summary": _require_mapping(
+                hybrid_refresh.get("summary", {}),
+                f"{case_id}.ask_replay.hybrid_refresh.summary",
+            ),
+        }
+        if completion_status == "covered":
+            normalized_hybrid_refresh["post_refresh_answer_text"] = _require_string(
+                hybrid_refresh.get("post_refresh_answer_text"),
+                f"{case_id}.ask_replay.hybrid_refresh.post_refresh_answer_text",
+            )
+            normalized_hybrid_refresh["post_refresh_trace_top"] = _require_int(
+                hybrid_refresh.get("post_refresh_trace_top", 3),
+                f"{case_id}.ask_replay.hybrid_refresh.post_refresh_trace_top",
+                minimum=1,
+            )
+
+    expectations_payload = ask_replay.get("expectations", {})
+    if expectations_payload is None:
+        expectations_payload = {}
+    expectations = _require_mapping(
+        expectations_payload,
+        f"{case_id}.ask_replay.expectations",
+    )
+    unknown_expectation_keys = sorted(set(expectations) - ASK_TURN_EXPECTATION_KEYS)
+    if unknown_expectation_keys:
+        raise EvaluationConfigurationError(
+            f"`{case_id}.ask_replay.expectations` contains unsupported fields: "
+            + ", ".join(unknown_expectation_keys)
+        )
+    normalized_expectations: dict[str, Any] = {}
+    if "final_turn_status" in expectations:
+        normalized_expectations["final_turn_status"] = _require_string(
+            expectations.get("final_turn_status"),
+            f"{case_id}.ask_replay.expectations.final_turn_status",
+        )
+    for field_name in (
+        "reused_turn",
+        "auto_prepare_triggered",
+        "auto_sync_triggered",
+        "hybrid_refresh_triggered",
+    ):
+        if field_name in expectations:
+            normalized_expectations[field_name] = _require_bool_or_none(
+                expectations.get(field_name),
+                f"{case_id}.ask_replay.expectations.{field_name}",
+            )
+    if "hybrid_refresh_completion_status" in expectations:
+        normalized_expectations["hybrid_refresh_completion_status"] = _require_string(
+            expectations.get("hybrid_refresh_completion_status"),
+            f"{case_id}.ask_replay.expectations.hybrid_refresh_completion_status",
+        )
+    for field_name in ("query_session_count", "trace_count"):
+        if field_name in expectations:
+            normalized_expectations[field_name] = _require_int(
+                expectations.get(field_name),
+                f"{case_id}.ask_replay.expectations.{field_name}",
+                minimum=0,
+            )
+    if "required_run_events" in expectations:
+        normalized_expectations["required_run_events"] = _require_string_list(
+            expectations.get("required_run_events"),
+            f"{case_id}.ask_replay.expectations.required_run_events",
+            allow_empty=False,
+        )
+
+    return {
+        "replay_source": normalized_replay_source,
+        "host_thread_ref": host_thread_ref,
+        "semantic_analysis": semantic_analysis,
+        "continuations": normalized_continuations,
+        "answer_plan": normalized_answer_plan,
+        "hybrid_refresh": normalized_hybrid_refresh,
+        "expectations": normalized_expectations,
+    }
 
 
 def load_rubric_definition(path: Path) -> dict[str, Any]:
@@ -278,11 +530,21 @@ def load_evaluation_suite(path: Path, *, rubric: dict[str, Any]) -> dict[str, An
             raise EvaluationConfigurationError(f"Duplicate evaluation case `{case_id}`.")
         seen_case_ids.add(case_id)
         execution_mode = _require_string(item.get("execution_mode"), "execution_mode")
-        if execution_mode not in {"retrieve", "trace-source", "trace-answer"}:
+        if execution_mode not in EVALUATION_EXECUTION_MODES:
             raise EvaluationConfigurationError(
-                f"`execution_mode` for `{case_id}` must be `retrieve`, `trace-source`, "
-                "or `trace-answer`."
+                f"`execution_mode` for `{case_id}` must be one of "
+                + ", ".join(f"`{mode}`" for mode in EVALUATION_EXECUTION_MODES)
+                + "."
             )
+        if execution_mode == "ask-turn":
+            ask_replay = _normalize_ask_turn_case(case_id, item.get("ask_replay"))
+        else:
+            ask_replay = None
+            if item.get("ask_replay") is not None:
+                raise EvaluationConfigurationError(
+                    f"Case `{case_id}` may define `ask_replay` only when "
+                    "`execution_mode` is `ask-turn`."
+                )
         active_dimensions = _require_string_list(
             item.get("active_rubric_dimensions", []),
             f"{case_id}.active_rubric_dimensions",
@@ -400,6 +662,7 @@ def load_evaluation_suite(path: Path, *, rubric: dict[str, Any]) -> dict[str, An
                     f"{case_id}.execution_support_manifest_path",
                 ),
                 "execution_inner_workflow_id": execution_inner_workflow_id,
+                "ask_replay": ask_replay,
             }
         )
     return {
@@ -549,7 +812,7 @@ def _case_primary_source_ids(case: dict[str, Any], result: dict[str, Any]) -> li
             for item in result.get("results", [])
             if isinstance(item, dict) and isinstance(item.get("source_id"), str)
         ]
-    if case["execution_mode"] == "trace-answer":
+    if case["execution_mode"] in {"trace-answer", "ask-turn"}:
         return _deduplicate_strings(
             [item for item in result.get("supporting_source_ids", []) if isinstance(item, str)]
         )
@@ -563,7 +826,7 @@ def _case_primary_source_ids(case: dict[str, Any], result: dict[str, Any]) -> li
 
 
 def _case_source_ids(case: dict[str, Any], result: dict[str, Any]) -> list[str]:
-    if case["execution_mode"] in {"retrieve", "trace-answer"}:
+    if case["execution_mode"] in {"retrieve", "trace-answer", "ask-turn"}:
         return _case_primary_source_ids(case, result)
     source = result.get("source", {})
     relations = source.get("relations", {})
@@ -589,7 +852,7 @@ def _case_unit_ids(case: dict[str, Any], result: dict[str, Any]) -> list[str]:
                 if isinstance(unit, dict) and isinstance(unit.get("unit_id"), str):
                     unit_ids.append(f"{source_id}:{unit['unit_id']}")
         return _deduplicate_strings(unit_ids)
-    if case["execution_mode"] == "trace-answer":
+    if case["execution_mode"] in {"trace-answer", "ask-turn"}:
         trace_unit_ids = [
             item for item in result.get("supporting_unit_ids", []) if isinstance(item, str)
         ]
@@ -618,7 +881,7 @@ def _case_render_paths(case: dict[str, Any], result: dict[str, Any]) -> list[str
                 if isinstance(reference, str)
             )
         return _deduplicate_strings(render_paths)
-    if case["execution_mode"] == "trace-answer":
+    if case["execution_mode"] in {"trace-answer", "ask-turn"}:
         trace_render_paths: list[str] = []
         for segment in result.get("segments", []):
             if not isinstance(segment, dict):
@@ -638,13 +901,704 @@ def _case_render_paths(case: dict[str, Any], result: dict[str, Any]) -> list[str
     )
 
 
+@contextmanager
+def _temporary_codex_thread(thread_ref: str) -> Iterator[None]:
+    """Bind one stable temporary Codex thread id for ask-turn replay."""
+    previous_thread_ref = os.environ.get("CODEX_THREAD_ID")
+    os.environ["CODEX_THREAD_ID"] = thread_ref
+    try:
+        yield
+    finally:
+        if previous_thread_ref is None:
+            os.environ.pop("CODEX_THREAD_ID", None)
+        else:
+            os.environ["CODEX_THREAD_ID"] = previous_thread_ref
+
+
+def _ask_turn_thread_ref(case: dict[str, Any], *, run_scope_id: str) -> str:
+    """Return the stable host thread ref for one ask-turn evaluation case."""
+    ask_replay = case.get("ask_replay", {})
+    explicit = ask_replay.get("host_thread_ref") if isinstance(ask_replay, dict) else None
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    return f"eval-ask-turn-{run_scope_id}-{case['case_id']}"
+
+
+def _load_latest_runtime_payload(
+    paths: WorkspacePaths,
+    directory: Path,
+    artifact_ids: list[str],
+) -> dict[str, Any]:
+    """Load the latest runtime payload for one ordered artifact-id list."""
+    for artifact_id in reversed([item for item in artifact_ids if isinstance(item, str) and item]):
+        payload = read_json(directory / f"{artifact_id}.json")
+        if payload:
+            return payload
+    return {}
+
+
+def _response_excerpt(text: str, *, limit: int = 200) -> str:
+    """Return a compact single-line response excerpt."""
+    cleaned = " ".join(text.strip().split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _write_answer_text(paths: WorkspacePaths, *, answer_file_path: str, answer_text: str) -> Path:
+    """Write one canonical answer file for ask-turn replay."""
+    answer_path = paths.root / answer_file_path
+    answer_path.parent.mkdir(parents=True, exist_ok=True)
+    answer_path.write_text(answer_text, encoding="utf-8")
+    return answer_path
+
+
+def _turn_is_settled(turn_payload: dict[str, Any]) -> bool:
+    """Return whether one ask turn payload is already settled."""
+    return str(turn_payload.get("status") or "") in {"answered", "completed"}
+
+
+def _ask_turn_result_payload(paths: WorkspacePaths, *, turn: dict[str, Any]) -> dict[str, Any]:
+    """Build one trace-shaped evaluation result from final canonical ask truth."""
+    session_ids = [
+        value for value in turn.get("session_ids", []) if isinstance(value, str) and value
+    ]
+    trace_ids = [
+        value for value in turn.get("trace_ids", []) if isinstance(value, str) and value
+    ]
+    latest_trace = _load_latest_runtime_payload(paths, paths.retrieval_traces_dir, trace_ids)
+    latest_session = _load_latest_runtime_payload(paths, paths.query_sessions_dir, session_ids)
+    answer_state = (
+        str(turn.get("answer_state"))
+        if isinstance(turn.get("answer_state"), str) and turn.get("answer_state")
+        else (
+            str(latest_trace.get("answer_state"))
+            if (
+                isinstance(latest_trace.get("answer_state"), str)
+                and latest_trace.get("answer_state")
+            )
+            else None
+        )
+    )
+    support_basis = (
+        str(turn.get("support_basis"))
+        if isinstance(turn.get("support_basis"), str) and turn.get("support_basis")
+        else (
+            str(latest_trace.get("support_basis"))
+            if (
+                isinstance(latest_trace.get("support_basis"), str)
+                and latest_trace.get("support_basis")
+            )
+            else None
+        )
+    )
+    render_inspection_required = (
+        bool(turn.get("render_inspection_required"))
+        if isinstance(turn.get("render_inspection_required"), bool)
+        else (
+            bool(latest_trace.get("render_inspection_required"))
+            if isinstance(latest_trace.get("render_inspection_required"), bool)
+            else None
+        )
+    )
+    status = latest_trace.get("status") or latest_session.get("status")
+    if isinstance(answer_state, str):
+        from .retrieval import combined_trace_status
+
+        effective_status = combined_trace_status(
+            answer_state=answer_state,
+            support_basis=support_basis,
+            support_manifest_path=(
+                str(turn.get("support_manifest_path"))
+                if isinstance(turn.get("support_manifest_path"), str)
+                else None
+            ),
+        )
+        latest_trace_answer_state = (
+            str(latest_trace.get("answer_state"))
+            if (
+                isinstance(latest_trace.get("answer_state"), str)
+                and latest_trace.get("answer_state")
+            )
+            else None
+        )
+        latest_trace_support_basis = (
+            str(latest_trace.get("support_basis"))
+            if (
+                isinstance(latest_trace.get("support_basis"), str)
+                and latest_trace.get("support_basis")
+            )
+            else None
+        )
+        if (
+            not isinstance(status, str)
+            or not status
+            or latest_trace_answer_state != answer_state
+            or latest_trace_support_basis != support_basis
+        ):
+            status = effective_status
+    elif not isinstance(status, str) or not status:
+        status = "degraded"
+
+    result = dict(latest_trace or latest_session or {})
+    result.update(
+        {
+            "status": status,
+            "answer_state": answer_state,
+            "support_basis": support_basis,
+            "render_inspection_required": render_inspection_required,
+            "conversation_id": turn.get("conversation_id"),
+            "turn_id": turn.get("turn_id"),
+            "run_id": turn.get("active_run_id") or turn.get("committed_run_id"),
+            "turn_status": turn.get("status"),
+            "front_door_state": turn.get("front_door_state"),
+            "session_ids": session_ids,
+            "trace_ids": trace_ids,
+            "auto_prepare_triggered": bool(turn.get("auto_prepare_triggered")),
+            "auto_sync_triggered": bool(turn.get("auto_sync_triggered")),
+            "hybrid_refresh_triggered": bool(turn.get("hybrid_refresh_triggered")),
+            "hybrid_refresh_completion_status": turn.get("hybrid_refresh_completion_status"),
+            "answer_file_path": turn.get("answer_file_path"),
+        }
+    )
+    return result
+
+
+def _ask_turn_artifact_paths(paths: WorkspacePaths, *, turn: dict[str, Any]) -> dict[str, str]:
+    """Collect the runtime artifact chain produced by one ask-turn replay."""
+    artifacts: dict[str, str] = {}
+    conversation_id = (
+        str(turn.get("conversation_id"))
+        if isinstance(turn.get("conversation_id"), str) and turn.get("conversation_id")
+        else None
+    )
+    run_id = (
+        str(turn.get("active_run_id") or turn.get("committed_run_id"))
+        if isinstance(turn.get("active_run_id") or turn.get("committed_run_id"), str)
+        and (turn.get("active_run_id") or turn.get("committed_run_id"))
+        else None
+    )
+    if conversation_id:
+        conversation_path = paths.conversations_dir / f"{conversation_id}.json"
+        if conversation_path.exists():
+            artifacts["canonical_conversation"] = str(conversation_path.relative_to(paths.root))
+        projection_path = paths.conversation_projections_dir / f"{conversation_id}.json"
+        if projection_path.exists():
+            artifacts["conversation_projection"] = str(projection_path.relative_to(paths.root))
+    if run_id:
+        from .run_control import run_commit_path, run_journal_path, run_state_path
+
+        state_path = run_state_path(paths, run_id)
+        journal_path = run_journal_path(paths, run_id)
+        commit_path = run_commit_path(paths, run_id)
+        if state_path.exists():
+            artifacts["run_state"] = str(state_path.relative_to(paths.root))
+        if journal_path.exists():
+            artifacts["run_journal"] = str(journal_path.relative_to(paths.root))
+        if commit_path.exists():
+            artifacts["run_commit"] = str(commit_path.relative_to(paths.root))
+    answer_file_path = (
+        str(turn.get("answer_file_path"))
+        if isinstance(turn.get("answer_file_path"), str) and turn.get("answer_file_path")
+        else None
+    )
+    if answer_file_path and (paths.root / answer_file_path).exists():
+        artifacts["answer_file"] = answer_file_path
+    for index, session_id in enumerate(
+        [value for value in turn.get("session_ids", []) if isinstance(value, str) and value],
+        start=1,
+    ):
+        session_path = paths.query_sessions_dir / f"{session_id}.json"
+        if session_path.exists():
+            artifacts[f"query_session_{index:02d}"] = str(session_path.relative_to(paths.root))
+    for index, trace_id in enumerate(
+        [value for value in turn.get("trace_ids", []) if isinstance(value, str) and value],
+        start=1,
+    ):
+        trace_path = paths.retrieval_traces_dir / f"{trace_id}.json"
+        if trace_path.exists():
+            artifacts[f"retrieval_trace_{index:02d}"] = str(trace_path.relative_to(paths.root))
+    for key, path in (
+        ("review_summary", paths.review_summary_path),
+        ("benchmark_candidates", paths.benchmark_candidates_path),
+        ("answer_history_index", paths.answer_history_index_path),
+        ("projection_state", paths.projection_state_path),
+    ):
+        if path.exists():
+            artifacts[key] = str(path.relative_to(paths.root))
+    raw_hybrid_refresh_summary = turn.get("hybrid_refresh_summary")
+    hybrid_refresh_summary: dict[str, Any] = (
+        dict(raw_hybrid_refresh_summary)
+        if isinstance(raw_hybrid_refresh_summary, dict)
+        else {}
+    )
+    work_path = hybrid_refresh_summary.get("work_path")
+    if isinstance(work_path, str) and work_path and (paths.root / work_path).exists():
+        artifacts["hybrid_refresh_work"] = work_path
+    shared_job_ids = _deduplicate_strings(
+        [
+            *[
+                value
+                for value in turn.get("attached_shared_job_ids", [])
+                if isinstance(value, str) and value
+            ],
+            *[
+                value
+                for value in turn.get("hybrid_refresh_job_ids", [])
+                if isinstance(value, str) and value
+            ],
+        ]
+    )
+    for index, job_id in enumerate(shared_job_ids, start=1):
+        base_dir = paths.shared_jobs_dir / job_id
+        for suffix, filename in (
+            ("manifest", "manifest.json"),
+            ("journal", "journal.jsonl"),
+            ("result", "result.json"),
+        ):
+            candidate = base_dir / filename
+            if candidate.exists():
+                artifacts[f"shared_job_{index:02d}_{suffix}"] = str(
+                    candidate.relative_to(paths.root)
+                )
+    return artifacts
+
+
+def _run_event_types(paths: WorkspacePaths, run_id: str | None) -> list[str]:
+    """Return the ordered event types recorded in one run journal."""
+    return [
+        event_type
+        for payload in _run_journal_entries(paths, run_id)
+        if isinstance((event_type := payload.get("event_type")), str) and event_type
+    ]
+
+
+def _run_journal_entries(paths: WorkspacePaths, run_id: str | None) -> list[dict[str, Any]]:
+    """Return the ordered run-journal entries for one run id."""
+    if not isinstance(run_id, str) or not run_id:
+        return []
+    from .run_control import run_journal_path
+
+    journal_path = run_journal_path(paths, run_id)
+    if not journal_path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in journal_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            entries.append(payload)
+    return entries
+
+
+def _ordered_event_subsequence(expected_events: list[str], actual_events: list[str]) -> list[str]:
+    """Return the ordered subsequence of expected events found in the actual journal."""
+    matched: list[str] = []
+    actual_index = 0
+    for expected_event in expected_events:
+        while actual_index < len(actual_events):
+            if actual_events[actual_index] == expected_event:
+                matched.append(expected_event)
+                actual_index += 1
+                break
+            actual_index += 1
+    return matched
+
+
+def _ask_turn_structural_checks(
+    paths: WorkspacePaths,
+    *,
+    execution: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return non-optional closure checks for ask-turn replay truth."""
+    from .control_plane import (
+        load_shared_job,
+        resolved_attached_shared_job_ids,
+        shared_job_is_settled,
+    )
+    from .run_control import load_run_state
+
+    turn_record = execution.get("turn_record")
+    if not isinstance(turn_record, dict):
+        turn_record = {}
+    run_id = (
+        execution.get("run_id")
+        if isinstance(execution.get("run_id"), str)
+        else (
+            turn_record.get("active_run_id") or turn_record.get("committed_run_id")
+            if isinstance(
+                turn_record.get("active_run_id") or turn_record.get("committed_run_id"),
+                str,
+            )
+            else None
+        )
+    )
+    journal_entries = _run_journal_entries(paths, run_id)
+    commit_index: int | None = None
+    waiting_job_ids: list[tuple[int, str]] = []
+    for index, payload in enumerate(journal_entries):
+        event_type = payload.get("event_type")
+        if commit_index is None and event_type == "turn-committed":
+            commit_index = index
+        if event_type != "shared-job-waiting":
+            continue
+        event_payload = payload.get("payload")
+        job_id = (
+            event_payload.get("job_id")
+            if isinstance(event_payload, dict) and isinstance(event_payload.get("job_id"), str)
+            else None
+        )
+        if isinstance(job_id, str) and job_id:
+            waiting_job_ids.append((index, job_id))
+    waiting_jobs_missing_settlement: list[str] = []
+    if commit_index is not None:
+        for waiting_index, job_id in waiting_job_ids:
+            found_settlement = False
+            for payload in journal_entries[waiting_index + 1 : commit_index]:
+                if payload.get("event_type") != "shared-job-settled":
+                    continue
+                event_payload = payload.get("payload")
+                settled_job_id = (
+                    event_payload.get("job_id")
+                    if isinstance(event_payload, dict)
+                    and isinstance(event_payload.get("job_id"), str)
+                    else None
+                )
+                if settled_job_id == job_id:
+                    found_settlement = True
+                    break
+            if not found_settlement:
+                waiting_jobs_missing_settlement.append(job_id)
+    run_state = load_run_state(paths, run_id) if isinstance(run_id, str) and run_id else {}
+    attached_job_ids = (
+        resolved_attached_shared_job_ids(turn=turn_record, run_state=run_state)
+        if isinstance(run_id, str) and run_id
+        else []
+    )
+    unresolved_answer_critical_jobs: list[str] = []
+    if commit_index is not None:
+        for job_id in attached_job_ids:
+            manifest = load_shared_job(paths, job_id)
+            if not manifest:
+                unresolved_answer_critical_jobs.append(job_id)
+                continue
+            if manifest.get("criticality") != "answer-critical":
+                continue
+            if not shared_job_is_settled(manifest):
+                unresolved_answer_critical_jobs.append(job_id)
+    return [
+        {
+            "name": "shared_job_wait_closure",
+            "expected": [],
+            "actual": waiting_jobs_missing_settlement,
+            "passed": not waiting_jobs_missing_settlement,
+        },
+        {
+            "name": "answer_critical_shared_jobs_settled",
+            "expected": [],
+            "actual": unresolved_answer_critical_jobs,
+            "passed": not unresolved_answer_critical_jobs,
+        },
+    ]
+
+
+def _execute_ask_turn_case(
+    paths: WorkspacePaths,
+    case: dict[str, Any],
+    *,
+    run_scope_id: str,
+    answer_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Replay one manual ask-path case through the canonical ask front door."""
+    from .ask import complete_ask_turn, prepare_ask_turn, settle_lane_c_shared_refresh
+    from .conversation import load_turn_record
+    from .retrieval import trace_answer_file
+
+    ask_replay = dict(case.get("ask_replay") or {})
+    thread_ref = _ask_turn_thread_ref(case, run_scope_id=run_scope_id)
+    initial_response: dict[str, Any] | None = None
+    current_response: dict[str, Any] | None = None
+    reused_turn = False
+    answer_override = answer_overrides.get(case["case_id"]) if answer_overrides else None
+
+    with _temporary_codex_thread(thread_ref):
+        initial_response = prepare_ask_turn(
+            paths,
+            question=case["query_or_prompt"],
+            semantic_analysis=dict(ask_replay["semantic_analysis"]),
+            log_origin=LOG_ORIGIN_EVALUATION_SUITE,
+        )
+        current_response = initial_response
+        initial_turn_key = (
+            str(initial_response.get("conversation_id") or ""),
+            str(initial_response.get("turn_id") or ""),
+        )
+        for continuation in ask_replay.get("continuations", []):
+            current_response = prepare_ask_turn(
+                paths,
+                question=str(continuation["message"]),
+                semantic_analysis=(
+                    dict(continuation["semantic_analysis"])
+                    if isinstance(continuation.get("semantic_analysis"), dict)
+                    else None
+                ),
+                log_origin=LOG_ORIGIN_EVALUATION_SUITE,
+            )
+            current_turn_key = (
+                str(current_response.get("conversation_id") or ""),
+                str(current_response.get("turn_id") or ""),
+            )
+            reused_turn = reused_turn or current_turn_key == initial_turn_key
+
+        assert current_response is not None
+        conversation_id = _require_string(
+            current_response.get("conversation_id"),
+            "conversation_id",
+        )
+        turn_id = _require_string(current_response.get("turn_id"), "turn_id")
+        current_turn = {
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            **load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id),
+        }
+        if _turn_is_settled(current_turn):
+            final_turn = current_turn
+        else:
+            answer_plan = ask_replay.get("answer_plan")
+            current_turn_status = str(current_turn.get("status") or "")
+            if current_turn_status == "awaiting-confirmation":
+                raise EvaluationConfigurationError(
+                    f"Ask-turn case `{case['case_id']}` is still awaiting confirmation. "
+                    "Add an explicit continuation such as `yes` or `no` before answer completion."
+                )
+            if not isinstance(answer_plan, dict):
+                raise EvaluationConfigurationError(
+                    f"Ask-turn case `{case['case_id']}` requires `ask_replay.answer_plan` because "
+                    "the replay path did not settle before canonical answer completion."
+                )
+            completion_overrides = dict(answer_plan.get("completion_overrides") or {})
+            answer_text = str(answer_override or answer_plan["answer_text"])
+            answer_file_path = _require_string(
+                current_turn.get("answer_file_path"),
+                f"{case['case_id']}.answer_file_path",
+            )
+            answer_file = _write_answer_text(
+                paths,
+                answer_file_path=answer_file_path,
+                answer_text=answer_text,
+            )
+            raw_log_context = current_response.get("log_context")
+            log_context = (
+                {
+                    str(key): str(value)
+                    for key, value in raw_log_context.items()
+                    if isinstance(key, str) and key and isinstance(value, str) and value
+                }
+                if isinstance(raw_log_context, dict)
+                else None
+            )
+            trace = trace_answer_file(
+                paths,
+                answer_file=answer_file,
+                top=int(answer_plan["trace_top"]),
+                log_context=log_context,
+                log_origin=LOG_ORIGIN_EVALUATION_SUITE,
+            )
+            completed = complete_ask_turn(
+                paths,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                inner_workflow_id=str(
+                    completion_overrides.get("inner_workflow_id")
+                    or current_response.get("inner_workflow_id")
+                    or "grounded-answer"
+                ),
+                session_ids=[str(trace["session_id"])],
+                trace_ids=[str(trace["trace_id"])],
+                answer_file_path=answer_file_path,
+                response_excerpt=_response_excerpt(answer_text),
+                status=str(completion_overrides.get("status") or "answered"),
+                support_basis=(
+                    str(completion_overrides["support_basis"])
+                    if isinstance(completion_overrides.get("support_basis"), str)
+                    else None
+                ),
+                support_manifest_path=(
+                    str(completion_overrides["support_manifest_path"])
+                    if isinstance(completion_overrides.get("support_manifest_path"), str)
+                    else None
+                ),
+                log_origin=LOG_ORIGIN_EVALUATION_SUITE,
+            )
+            final_turn = {
+                "conversation_id": conversation_id,
+                "turn_id": turn_id,
+                **load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id),
+            }
+            hybrid_refresh = ask_replay.get("hybrid_refresh")
+            if str(completed.get("status") or "") == "waiting-shared-job":
+                if not isinstance(hybrid_refresh, dict):
+                    raise EvaluationConfigurationError(
+                        f"Ask-turn case `{case['case_id']}` entered governed multimodal refresh "
+                        "but does not define `ask_replay.hybrid_refresh`."
+                    )
+                completed_hybrid_summary = completed.get("hybrid_refresh_summary")
+                hybrid_summary: dict[str, Any] = (
+                    dict(completed_hybrid_summary)
+                    if isinstance(completed_hybrid_summary, dict)
+                    else {}
+                )
+                hybrid_summary.update(dict(hybrid_refresh.get("summary") or {}))
+                hybrid_job_ids = [
+                    value
+                    for value in completed.get("hybrid_refresh_job_ids", [])
+                    if isinstance(value, str) and value
+                ]
+                if not hybrid_job_ids:
+                    raise EvaluationConfigurationError(
+                        f"Ask-turn case `{case['case_id']}` entered governed "
+                        "multimodal refresh without a shared job id."
+                    )
+                settle_lane_c_shared_refresh(
+                    paths,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    job_id=hybrid_job_ids[0],
+                    completion_status=str(hybrid_refresh["completion_status"]),
+                    summary=hybrid_summary,
+                )
+                final_turn = {
+                    "conversation_id": conversation_id,
+                    "turn_id": turn_id,
+                    **load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id),
+                }
+                if str(hybrid_refresh["completion_status"]) == "covered":
+                    post_refresh_answer_text = str(
+                        answer_override or hybrid_refresh["post_refresh_answer_text"]
+                    )
+                    post_refresh_trace_top = int(hybrid_refresh["post_refresh_trace_top"])
+                    post_refresh_answer_file_path = _require_string(
+                        final_turn.get("answer_file_path"),
+                        f"{case['case_id']}.post_refresh_answer_file_path",
+                    )
+                    post_refresh_answer_file = _write_answer_text(
+                        paths,
+                        answer_file_path=post_refresh_answer_file_path,
+                        answer_text=post_refresh_answer_text,
+                    )
+                    post_refresh_trace = trace_answer_file(
+                        paths,
+                        answer_file=post_refresh_answer_file,
+                        top=post_refresh_trace_top,
+                        log_context=log_context,
+                        log_origin=LOG_ORIGIN_EVALUATION_SUITE,
+                    )
+                    all_session_ids = _deduplicate_strings(
+                        [
+                            *[
+                                value
+                                for value in final_turn.get("session_ids", [])
+                                if isinstance(value, str) and value
+                            ],
+                            str(post_refresh_trace["session_id"]),
+                        ]
+                    )
+                    all_trace_ids = _deduplicate_strings(
+                        [
+                            *[
+                                value
+                                for value in final_turn.get("trace_ids", [])
+                                if isinstance(value, str) and value
+                            ],
+                            str(post_refresh_trace["trace_id"]),
+                        ]
+                    )
+                    complete_ask_turn(
+                        paths,
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        inner_workflow_id=str(
+                            completion_overrides.get("inner_workflow_id")
+                            or current_response.get("inner_workflow_id")
+                            or "grounded-answer"
+                        ),
+                        session_ids=all_session_ids,
+                        trace_ids=all_trace_ids,
+                        answer_file_path=post_refresh_answer_file_path,
+                        response_excerpt=_response_excerpt(post_refresh_answer_text),
+                        status=str(completion_overrides.get("status") or "answered"),
+                        support_basis=(
+                            str(completion_overrides["support_basis"])
+                            if isinstance(completion_overrides.get("support_basis"), str)
+                            else None
+                        ),
+                        support_manifest_path=(
+                            str(completion_overrides["support_manifest_path"])
+                            if isinstance(completion_overrides.get("support_manifest_path"), str)
+                            else None
+                        ),
+                        log_origin=LOG_ORIGIN_EVALUATION_SUITE,
+                    )
+                    final_turn = {
+                        "conversation_id": conversation_id,
+                        "turn_id": turn_id,
+                        **load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id),
+                    }
+
+    final_answer_file_path: str | None = (
+        str(final_turn.get("answer_file_path"))
+        if (
+            isinstance(final_turn.get("answer_file_path"), str)
+            and final_turn.get("answer_file_path")
+        )
+        else None
+    )
+    final_answer_text: str | None = None
+    if final_answer_file_path and (paths.root / final_answer_file_path).exists():
+        final_answer_text = (paths.root / final_answer_file_path).read_text(encoding="utf-8")
+    run_id = (
+        str(final_turn.get("active_run_id") or final_turn.get("committed_run_id"))
+        if isinstance(final_turn.get("active_run_id") or final_turn.get("committed_run_id"), str)
+        and (final_turn.get("active_run_id") or final_turn.get("committed_run_id"))
+        else None
+    )
+    session_ids = [
+        value for value in final_turn.get("session_ids", []) if isinstance(value, str) and value
+    ]
+    trace_ids = [
+        value for value in final_turn.get("trace_ids", []) if isinstance(value, str) and value
+    ]
+    return {
+        "execution_mode": case["execution_mode"],
+        "result": _ask_turn_result_payload(paths, turn=final_turn),
+        "session_id": session_ids[-1] if session_ids else None,
+        "trace_id": trace_ids[-1] if trace_ids else None,
+        "answer_text": final_answer_text,
+        "answer_file_path": final_answer_file_path,
+        "turn_record": final_turn,
+        "reused_turn": reused_turn,
+        "run_id": run_id,
+        "run_event_types": _run_event_types(paths, run_id),
+        "runtime_artifact_paths": _ask_turn_artifact_paths(paths, turn=final_turn),
+    }
+
+
 def _execute_case(
     paths: WorkspacePaths,
     case: dict[str, Any],
     *,
     answer_overrides: dict[str, str] | None = None,
+    run_scope_id: str,
 ) -> dict[str, Any]:
     target = case.get("target", "current")
+    if case["execution_mode"] == "ask-turn":
+        return _execute_ask_turn_case(
+            paths,
+            case,
+            run_scope_id=run_scope_id,
+            answer_overrides=answer_overrides,
+        )
     log_context: dict[str, str] | None = None
     if case.get("execution_inner_workflow_id") or case.get("execution_support_basis"):
         log_context = {
@@ -734,10 +1688,16 @@ def _execution_artifacts(paths: WorkspacePaths, execution: dict[str, Any]) -> di
         )
     if isinstance(answer_file_path, str) and answer_file_path:
         artifacts["answer_file"] = answer_file_path
+    runtime_artifact_paths = execution.get("runtime_artifact_paths")
+    if isinstance(runtime_artifact_paths, dict):
+        for key, value in runtime_artifact_paths.items():
+            if isinstance(key, str) and key and isinstance(value, str) and value:
+                artifacts[key] = value
     return artifacts
 
 
 def _case_deterministic_checks(
+    paths: WorkspacePaths,
     case: dict[str, Any],
     execution: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -824,6 +1784,112 @@ def _case_deterministic_checks(
                 "passed": not forbidden_hits,
             }
         )
+    if case["execution_mode"] == "ask-turn":
+        ask_replay = case.get("ask_replay", {})
+        expectations_payload = (
+            ask_replay.get("expectations")
+            if isinstance(ask_replay, dict)
+            else None
+        )
+        expectations: dict[str, Any] = (
+            dict(expectations_payload)
+            if isinstance(expectations_payload, dict)
+            else {}
+        )
+        turn_record = execution.get("turn_record")
+        if not isinstance(turn_record, dict):
+            turn_record = {}
+        if "final_turn_status" in expectations:
+            checks.append(
+                {
+                    "name": "final_turn_status",
+                    "expected": expectations["final_turn_status"],
+                    "actual": turn_record.get("status"),
+                    "passed": turn_record.get("status") == expectations["final_turn_status"],
+                }
+            )
+        for field_name in (
+            "reused_turn",
+            "auto_prepare_triggered",
+            "auto_sync_triggered",
+            "hybrid_refresh_triggered",
+        ):
+            if field_name in expectations:
+                if field_name == "reused_turn":
+                    actual = (
+                        execution.get(field_name)
+                        if isinstance(execution.get(field_name), bool)
+                        else None
+                    )
+                else:
+                    actual = (
+                        result.get(field_name)
+                        if isinstance(result.get(field_name), bool)
+                        else None
+                    )
+                checks.append(
+                    {
+                        "name": field_name,
+                        "expected": expectations[field_name],
+                        "actual": actual,
+                        "passed": actual == expectations[field_name],
+                    }
+                )
+        if "hybrid_refresh_completion_status" in expectations:
+            checks.append(
+                {
+                    "name": "hybrid_refresh_completion_status",
+                    "expected": expectations["hybrid_refresh_completion_status"],
+                    "actual": result.get("hybrid_refresh_completion_status"),
+                    "passed": result.get("hybrid_refresh_completion_status")
+                    == expectations["hybrid_refresh_completion_status"],
+                }
+            )
+        if "query_session_count" in expectations:
+            actual_query_session_count = len(
+                [
+                    value
+                    for value in result.get("session_ids", [])
+                    if isinstance(value, str) and value
+                ]
+            )
+            checks.append(
+                {
+                    "name": "query_session_count",
+                    "expected": expectations["query_session_count"],
+                    "actual": actual_query_session_count,
+                    "passed": actual_query_session_count == expectations["query_session_count"],
+                }
+            )
+        if "trace_count" in expectations:
+            actual_trace_count = len(
+                [value for value in result.get("trace_ids", []) if isinstance(value, str) and value]
+            )
+            checks.append(
+                {
+                    "name": "trace_count",
+                    "expected": expectations["trace_count"],
+                    "actual": actual_trace_count,
+                    "passed": actual_trace_count == expectations["trace_count"],
+                }
+            )
+        if "required_run_events" in expectations:
+            actual_events = execution.get("run_event_types", [])
+            if not isinstance(actual_events, list):
+                actual_events = []
+            matched_events = _ordered_event_subsequence(
+                expectations["required_run_events"],
+                actual_events,
+            )
+            checks.append(
+                {
+                    "name": "required_run_events",
+                    "expected": expectations["required_run_events"],
+                    "actual": matched_events,
+                    "passed": len(matched_events) == len(expectations["required_run_events"]),
+                }
+            )
+        checks.extend(_ask_turn_structural_checks(paths, execution=execution))
     return checks
 
 
@@ -909,6 +1975,11 @@ def _build_judge_packet(
 def _artifact_fingerprints(paths: WorkspacePaths) -> dict[str, str | None]:
     relevant_paths = [
         paths.root / "src" / "docmason" / "ask.py",
+        paths.root / "src" / "docmason" / "run_control.py",
+        paths.root / "src" / "docmason" / "control_plane.py",
+        paths.root / "src" / "docmason" / "admissibility.py",
+        paths.root / "src" / "docmason" / "projections.py",
+        paths.root / "src" / "docmason" / "review.py",
         paths.root / "src" / "docmason" / "conversation.py",
         paths.root / "src" / "docmason" / "retrieval.py",
         paths.root / "src" / "docmason" / "evaluation.py",
@@ -1231,8 +2302,13 @@ def run_evaluation_suite(
     run_id = str(uuid.uuid4())
     case_results: list[dict[str, Any]] = []
     for case in suite["cases"]:
-        execution = _execute_case(paths, case, answer_overrides=answer_overrides)
-        checks = _case_deterministic_checks(case, execution)
+        execution = _execute_case(
+            paths,
+            case,
+            answer_overrides=answer_overrides,
+            run_scope_id=run_id,
+        )
+        checks = _case_deterministic_checks(paths, case, execution)
         deterministic_passed = all(check["passed"] for check in checks)
         rubric_result = aggregate_case_rubric(
             case,

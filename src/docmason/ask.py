@@ -5,24 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .commands import ACTION_REQUIRED, prepare_workspace, sync_workspace as run_sync_command
 from .admissibility import evaluate_commit_admissibility
-from .conversation import (
-    FRONT_DOOR_STATE_CANONICAL_ASK,
-    build_log_context,
-    current_host_identity,
-    load_turn_record,
-    load_bound_conversation_record_for_host,
-    normalize_front_door_state,
-    open_conversation_turn,
-    semantic_log_context_fields,
-    semantic_log_context_from_record,
-    utc_now,
-    update_conversation_turn,
-)
+from .commands import ACTION_REQUIRED, prepare_workspace
+from .commands import sync_workspace as run_sync_command
 from .control_plane import (
-    attach_run_to_shared_job,
     approve_shared_job,
+    attach_run_to_shared_job,
     block_shared_job,
     complete_shared_job,
     decline_shared_job,
@@ -31,6 +19,23 @@ from .control_plane import (
     lane_c_job_key,
     load_shared_job,
     normalize_confirmation_reply,
+    resolved_attached_shared_job_ids,
+    shared_job_is_settled,
+)
+from .conversation import (
+    FRONT_DOOR_STATE_CANONICAL_ASK,
+    LOG_ORIGIN_INTERACTIVE_ASK,
+    build_log_context,
+    current_host_identity,
+    load_bound_conversation_record_for_host,
+    load_turn_record,
+    normalize_front_door_state,
+    normalize_log_origin,
+    open_conversation_turn,
+    semantic_log_context_fields,
+    semantic_log_context_from_record,
+    update_conversation_turn,
+    utc_now,
 )
 from .front_controller import (
     question_execution_profile,
@@ -57,9 +62,10 @@ from .run_control import (
     attach_shared_job_to_run,
     commit_run,
     ensure_run_for_turn,
+    load_run_state,
     record_run_event,
-    record_run_event_if_present,
     record_run_event_for_runs,
+    record_run_event_if_present,
     refresh_turn_run_version_truth,
     update_run_state,
 )
@@ -150,6 +156,20 @@ def _normalized_artifact_path(paths: WorkspacePaths, value: Any) -> str | None:
         return str(path.relative_to(paths.root))
     except ValueError:
         return str(path)
+
+
+def _effective_ask_log_origin(
+    explicit: Any,
+    *,
+    turn: dict[str, Any] | None = None,
+    run_state: dict[str, Any] | None = None,
+) -> str:
+    return (
+        normalize_log_origin(explicit)
+        or normalize_log_origin((turn or {}).get("log_origin"))
+        or normalize_log_origin((run_state or {}).get("log_origin"))
+        or LOG_ORIGIN_INTERACTIVE_ASK
+    )
 
 
 def _log_payload_matches_turn(
@@ -253,7 +273,9 @@ def _resolved_log_artifact_ids(
     return []
 
 
-def _preview_source_changes(paths: WorkspacePaths) -> tuple[dict[str, Any], list[dict[str, Any]], bool, dict[str, Any]]:
+def _preview_source_changes(
+    paths: WorkspacePaths,
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool, dict[str, Any]]:
     """Load source-change preview lazily so ask imports stay light."""
     from .workspace_probe import preview_source_changes
 
@@ -286,6 +308,7 @@ def _sync_turn_log_artifacts(
     auto_sync_triggered: bool | None = None,
     auto_sync_reason: str | None = None,
     auto_sync_summary: dict[str, Any] | None = None,
+    log_origin: str | None = None,
     hybrid_refresh_triggered: bool | None = None,
     hybrid_refresh_sources: list[str] | None = None,
     hybrid_refresh_completion_status: str | None = None,
@@ -313,6 +336,7 @@ def _sync_turn_log_artifacts(
         "auto_sync_triggered": auto_sync_triggered,
         "auto_sync_reason": auto_sync_reason,
         "auto_sync_summary": auto_sync_summary,
+        "log_origin": normalize_log_origin(log_origin),
         "hybrid_refresh_triggered": hybrid_refresh_triggered,
         "hybrid_refresh_sources": hybrid_refresh_sources or [],
         "hybrid_refresh_completion_status": hybrid_refresh_completion_status,
@@ -578,7 +602,10 @@ def _apply_control_plane_pause(
     pause_state = str(control_plane["state"])
     job_id = (
         str(control_plane.get("shared_job_id"))
-        if isinstance(control_plane.get("shared_job_id"), str) and control_plane.get("shared_job_id")
+        if (
+            isinstance(control_plane.get("shared_job_id"), str)
+            and control_plane.get("shared_job_id")
+        )
         else None
     )
     if job_id:
@@ -672,7 +699,10 @@ def _maybe_handle_confirmation_reply(
             payload={"job_id": declined_job.get("job_id"), "status": "declined"},
         )
         reason = (
-            str(manifest.get("confirmation_prompt") or "The confirmation-required step was declined.")
+            str(
+                manifest.get("confirmation_prompt")
+                or "The confirmation-required step was declined."
+            )
             + " The current task was not continued."
         )
         return "declined", _commit_governed_boundary_turn(
@@ -719,7 +749,6 @@ def _maybe_handle_confirmation_reply(
                 run_id=run_id,
             )
     if report is not None and report.payload.get("status") == ACTION_REQUIRED:
-        current_turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
         updated = update_conversation_turn(
             paths,
             conversation_id=conversation_id,
@@ -733,6 +762,18 @@ def _maybe_handle_confirmation_reply(
             },
         )
         return "blocked", updated
+    settled_manifest = load_shared_job(paths, str(manifest["job_id"]))
+    if settled_manifest and shared_job_is_settled(settled_manifest):
+        record_run_event_for_runs(
+            paths,
+            run_ids=settled_manifest.get("attached_run_ids"),
+            stage="control-plane",
+            event_type="shared-job-settled",
+            payload={
+                "job_id": settled_manifest.get("job_id"),
+                "status": settled_manifest.get("status"),
+            },
+        )
     original_question = str(turn.get("user_question") or "").strip()
     if not original_question:
         return None
@@ -768,10 +809,16 @@ def begin_lane_c_shared_refresh(
     normalized_targets = [
         item
         for item in recommended_targets
-        if isinstance(item, dict) and isinstance(item.get("source_id"), str) and item.get("source_id")
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("source_id"), str)
+            and item.get("source_id")
+        )
     ]
     if not normalized_targets:
-        raise ValueError("The governed multimodal refresh requires at least one recommended target.")
+        raise ValueError(
+            "The governed multimodal refresh requires at least one recommended target."
+        )
     chosen_target = None
     if isinstance(selected_source_id, str) and selected_source_id:
         for item in normalized_targets:
@@ -885,7 +932,10 @@ def settle_lane_c_shared_refresh(
     scope = manifest.get("scope", {})
     settled_snapshot_id = (
         str(scope.get("published_snapshot_id"))
-        if isinstance(scope.get("published_snapshot_id"), str) and scope.get("published_snapshot_id")
+        if (
+            isinstance(scope.get("published_snapshot_id"), str)
+            and scope.get("published_snapshot_id")
+        )
         else None
     )
     settled_source_id = (
@@ -940,7 +990,8 @@ def settle_lane_c_shared_refresh(
                         "status": "prepared",
                         "turn_state": "prepared",
                         "freshness_notice": (
-                            "The governed multimodal refresh finished. Rerun retrieval and trace before committing the answer."
+                            "The governed multimodal refresh finished. Rerun "
+                            "retrieval and trace before committing the answer."
                         ),
                     },
                 )
@@ -970,6 +1021,8 @@ def _effective_turn_snapshot(
     *,
     session_ids: list[str],
     trace_ids: list[str],
+    attached_shared_job_ids: list[str],
+    log_origin: str,
     question_domain: str | None,
     support_basis: str,
     support_manifest_path: str | None,
@@ -997,6 +1050,8 @@ def _effective_turn_snapshot(
         {
             "session_ids": session_ids,
             "trace_ids": trace_ids,
+            "attached_shared_job_ids": attached_shared_job_ids,
+            "log_origin": log_origin,
             "question_domain": question_domain,
             "support_basis": support_basis,
             "support_manifest_path": support_manifest_path,
@@ -1055,12 +1110,16 @@ def _maybe_begin_lane_c_before_commit(
     ]
     if not recommended_targets:
         raise ValueError(
-            "A governed multimodal refresh is required for this turn, but the trace payload does not include "
+            "A governed multimodal refresh is required for this turn, but the "
+            "trace payload does not include "
             "recommended_hybrid_targets."
         )
     target = (
         str(latest_trace_payload.get("target"))
-        if isinstance(latest_trace_payload.get("target"), str) and latest_trace_payload.get("target")
+        if (
+            isinstance(latest_trace_payload.get("target"), str)
+            and latest_trace_payload.get("target")
+        )
         else "current"
     )
     begin_lane_c_shared_refresh(
@@ -1136,6 +1195,9 @@ def _maybe_begin_lane_c_before_commit(
                 else None,
             ),
         },
+        log_origin=updated_turn.get("log_origin")
+        if isinstance(updated_turn.get("log_origin"), str)
+        else None,
         answer_file_path=updated_turn.get("answer_file_path")
         if isinstance(updated_turn.get("answer_file_path"), str)
         else None,
@@ -1217,10 +1279,12 @@ def _prepared_turn_response(
     prefer_sync_before_answer: bool,
     freshness_notice: str | None,
     status: str,
+    log_origin: str,
 ) -> dict[str, Any]:
     return {
         **opened,
         "run_id": run_id,
+        "log_origin": log_origin,
         "entry_workflow_id": "ask",
         "inner_workflow_id": inner_workflow_id,
         "question_class": question_class,
@@ -1280,6 +1344,7 @@ def _upgrade_turn_to_canonical_ask(
     *,
     opened: dict[str, Any],
     run_id: str,
+    log_origin: str,
 ) -> dict[str, Any]:
     """Upgrade one live turn and run from reconciliation-only to canonical ask ownership."""
     front_door_opened_at = (
@@ -1291,7 +1356,10 @@ def _upgrade_turn_to_canonical_ask(
     update_run_state(
         paths,
         run_id=run_id,
-        updates={"run_origin": RUN_ORIGIN_ASK_FRONT_DOOR},
+        updates={
+            "run_origin": RUN_ORIGIN_ASK_FRONT_DOOR,
+            "log_origin": normalize_log_origin(log_origin),
+        },
     )
     updated_turn = update_conversation_turn(
         paths,
@@ -1302,6 +1370,7 @@ def _upgrade_turn_to_canonical_ask(
             "front_door_state": FRONT_DOOR_STATE_CANONICAL_ASK,
             "front_door_opened_at": front_door_opened_at,
             "front_door_run_id": run_id,
+            "log_origin": normalize_log_origin(log_origin),
         },
     )
     opened["front_door_state"] = updated_turn.get("front_door_state")
@@ -1316,6 +1385,7 @@ def prepare_ask_turn(
     *,
     question: str,
     semantic_analysis: dict[str, Any] | None = None,
+    log_origin: str | None = None,
 ) -> dict[str, Any]:
     """Open or reuse one canonical ask turn.
 
@@ -1345,10 +1415,15 @@ def prepare_ask_turn(
         run_origin=RUN_ORIGIN_ASK_FRONT_DOOR,
     )
     run_id = str(run_payload["run_id"])
+    effective_log_origin = _effective_ask_log_origin(
+        log_origin,
+        run_state=run_payload,
+    )
     _upgrade_turn_to_canonical_ask(
         paths,
         opened=opened,
         run_id=run_id,
+        log_origin=effective_log_origin,
     )
     knowledge_base = opened["workspace_snapshot"]["knowledge_base"]
     interaction_snapshot = interaction_ingest_snapshot(paths)
@@ -1474,7 +1549,12 @@ def prepare_ask_turn(
             or "The workspace environment is not ready for ordinary workspace evidence work."
         )
 
-    if not action_required and not knowledge_base["present"] and workspace_notices_enabled and not environment_ready:
+    if (
+        not action_required
+        and not knowledge_base["present"]
+        and workspace_notices_enabled
+        and not environment_ready
+    ):
         action_required = True
         inner_workflow_id = "workspace-bootstrap"
         route_reason = (
@@ -1748,7 +1828,12 @@ def prepare_ask_turn(
             "front_door_state": FRONT_DOOR_STATE_CANONICAL_ASK,
             "front_door_opened_at": opened.get("front_door_opened_at"),
             "front_door_run_id": run_id,
-            "turn_state": status if status in {"awaiting-confirmation", "waiting-shared-job"} else "prepared",
+            "log_origin": effective_log_origin,
+            "turn_state": (
+                status
+                if status in {"awaiting-confirmation", "waiting-shared-job"}
+                else "prepared"
+            ),
             "status": status,
             "route_reason": route_reason,
             "freshness_notice": freshness_notice,
@@ -1803,6 +1888,7 @@ def prepare_ask_turn(
         prefer_sync_before_answer=prefer_sync_before_answer,
         freshness_notice=freshness_notice,
         status=status,
+        log_origin=effective_log_origin,
     )
     response["attached_shared_job_ids"] = attached_shared_job_ids
     response["confirmation_kind"] = confirmation_kind
@@ -1846,6 +1932,7 @@ def complete_ask_turn(
     hybrid_refresh_summary: dict[str, Any] | None = None,
     hybrid_refresh_snapshot_id: str | None = None,
     hybrid_refresh_job_ids: list[str] | None = None,
+    log_origin: str | None = None,
     status: str = "completed",
 ) -> dict[str, Any]:
     """Commit one canonical ask turn through the shared barrier.
@@ -1864,6 +1951,29 @@ def complete_ask_turn(
         if isinstance(current_turn.get("active_run_id"), str) and current_turn.get("active_run_id")
         else None
     )
+    run_state = load_run_state(paths, run_id) if isinstance(run_id, str) and run_id else {}
+    resolved_log_origin = _effective_ask_log_origin(
+        log_origin,
+        turn=current_turn,
+        run_state=run_state,
+    )
+    if isinstance(run_id, str) and run_id and run_state.get("log_origin") != resolved_log_origin:
+        run_state = update_run_state(
+            paths,
+            run_id=run_id,
+            updates={"log_origin": resolved_log_origin},
+        )
+    if current_turn.get("log_origin") != resolved_log_origin:
+        current_turn = {
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            **update_conversation_turn(
+                paths,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                updates={"log_origin": resolved_log_origin},
+            ),
+        }
     resolved_front_door_state = normalize_front_door_state(current_turn.get("front_door_state"))
     provisional_answer_file_path = answer_file_path or current_turn.get("answer_file_path")
     discovered_session_ids, discovered_trace_ids = _discover_unique_turn_log_artifacts(
@@ -2022,6 +2132,11 @@ def complete_ask_turn(
         current_turn,
         "hybrid_refresh_job_ids",
     )
+    resolved_attached_job_ids = resolved_attached_shared_job_ids(
+        turn=current_turn,
+        run_state=run_state,
+        hybrid_refresh_job_ids=resolved_hybrid_refresh_job_ids,
+    )
     effective_support_basis = (
         resolved_support_basis
         if isinstance(resolved_support_basis, str)
@@ -2078,6 +2193,8 @@ def complete_ask_turn(
         current_turn,
         session_ids=resolved_session_ids,
         trace_ids=effective_trace_ids,
+        attached_shared_job_ids=resolved_attached_job_ids,
+        log_origin=resolved_log_origin,
         question_domain=resolved_question_domain
         if isinstance(resolved_question_domain, str)
         else None,
@@ -2195,6 +2312,8 @@ def complete_ask_turn(
             "auto_sync_triggered": resolved_auto_sync_triggered,
             "auto_sync_reason": resolved_auto_sync_reason,
             "auto_sync_summary": resolved_auto_sync_summary,
+            "log_origin": resolved_log_origin,
+            "attached_shared_job_ids": resolved_attached_job_ids,
             "hybrid_refresh_triggered": resolved_hybrid_refresh_triggered,
             "hybrid_refresh_sources": resolved_hybrid_refresh_sources,
             "hybrid_refresh_completion_status": resolved_hybrid_refresh_completion_status,
@@ -2232,6 +2351,7 @@ def complete_ask_turn(
                 support_manifest_path=resolved_support_manifest_path,
             ),
         },
+        log_origin=resolved_log_origin,
         answer_file_path=(
             resolved_answer_file_path
             if isinstance(resolved_answer_file_path, str)

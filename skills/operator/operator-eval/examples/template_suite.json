@@ -35,6 +35,63 @@
       "declared_answer_state": "abstained",
       "execution_support_basis": "kb-grounded",
       "execution_inner_workflow_id": "grounded-answer"
+    },
+    {
+      "case_id": "example-ask-turn-case",
+      "family": "example-ask-regression",
+      "execution_mode": "ask-turn",
+      "query_or_prompt": "What does the local planning brief say about the architecture model?",
+      "expected_primary_sources": [],
+      "required_sources_or_units": [],
+      "minimum_support_overlap": 0,
+      "forbidden_sources_or_units": [],
+      "expected_status": "ready",
+      "expected_answer_state": "grounded",
+      "expected_support_basis": "kb-grounded",
+      "expected_render_inspection_required": null,
+      "reference_facts": [
+        "Replace with local reference facts for the replayed ask turn."
+      ],
+      "active_rubric_dimensions": [],
+      "feedback_tags": [
+        "coverage_gap"
+      ],
+      "ask_replay": {
+        "replay_source": {
+          "kind": "manual-suite"
+        },
+        "host_thread_ref": "example-local-thread",
+        "semantic_analysis": {
+          "question_class": "answer",
+          "question_domain": "workspace-corpus",
+          "route_reason": "Illustrative manual ask-turn replay example.",
+          "needs_latest_workspace_state": false
+        },
+        "continuations": [
+          {
+            "message": "What does the local planning brief say about the architecture model?"
+          }
+        ],
+        "answer_plan": {
+          "answer_text": "Replace with a locally grounded answer text before running this suite.",
+          "trace_top": 2,
+          "completion_overrides": {
+            "status": "answered"
+          }
+        },
+        "expectations": {
+          "reused_turn": true,
+          "query_session_count": 1,
+          "trace_count": 1,
+          "required_run_events": [
+            "preanswer-governance-started",
+            "ask-prepared",
+            "trace-completed",
+            "admissibility-passed",
+            "projection-refreshed"
+          ]
+        }
+      }
     }
   ]
 }

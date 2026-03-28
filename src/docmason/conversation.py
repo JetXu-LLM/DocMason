@@ -43,11 +43,14 @@ SEMANTIC_LOG_CONTEXT_FIELD_NAMES = (
 LOG_CONTEXT_FIELD_NAMES = LOG_CONTEXT_CORE_FIELD_NAMES + SEMANTIC_LOG_CONTEXT_FIELD_NAMES
 FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY = "native-reconciled-only"
 FRONT_DOOR_STATE_CANONICAL_ASK = "canonical-ask"
+LOG_ORIGIN_INTERACTIVE_ASK = "interactive-ask"
+LOG_ORIGIN_EVALUATION_SUITE = "evaluation-suite"
 _FRONT_DOOR_STATE_PRIORITY = {
     None: 0,
     FRONT_DOOR_STATE_NATIVE_RECONCILED_ONLY: 1,
     FRONT_DOOR_STATE_CANONICAL_ASK: 2,
 }
+_LOG_ORIGIN_VALUES = frozenset({LOG_ORIGIN_INTERACTIVE_ASK, LOG_ORIGIN_EVALUATION_SUITE})
 _BINDABLE_HOST_IDENTITY_SOURCES = frozenset(
     {
         "codex_thread_id",
@@ -116,6 +119,14 @@ def normalize_front_door_state(value: Any) -> str | None:
     return None
 
 
+def normalize_log_origin(value: Any) -> str | None:
+    """Normalize one runtime log origin into a supported private value."""
+    normalized = _nonempty_string(value)
+    if normalized in _LOG_ORIGIN_VALUES:
+        return normalized
+    return None
+
+
 def stronger_front_door_state(current: Any, candidate: Any) -> str | None:
     """Return the stronger of two front-door states without demotion."""
     current_state = normalize_front_door_state(current)
@@ -129,7 +140,10 @@ def turn_has_canonical_ask_ownership(turn: dict[str, Any] | None) -> bool:
     """Return whether one turn is explicitly owned by canonical ask."""
     if not isinstance(turn, dict):
         return False
-    return normalize_front_door_state(turn.get("front_door_state")) == FRONT_DOOR_STATE_CANONICAL_ASK
+    return (
+        normalize_front_door_state(turn.get("front_door_state"))
+        == FRONT_DOOR_STATE_CANONICAL_ASK
+    )
 
 
 def conversation_has_canonical_ask_ownership(conversation: dict[str, Any] | None) -> bool:
@@ -139,11 +153,7 @@ def conversation_has_canonical_ask_ownership(conversation: dict[str, Any] | None
     turns = conversation.get("turns", [])
     if not isinstance(turns, list):
         return False
-    return any(
-        turn_has_canonical_ask_ownership(turn)
-        for turn in turns
-        if isinstance(turn, dict)
-    )
+    return any(turn_has_canonical_ask_ownership(turn) for turn in turns if isinstance(turn, dict))
 
 
 def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
@@ -191,6 +201,10 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["promotion_kind"] = None
     if "promotion_reason" not in turn:
         turn["promotion_reason"] = None
+    if "log_origin" not in turn:
+        turn["log_origin"] = None
+    else:
+        turn["log_origin"] = normalize_log_origin(turn.get("log_origin"))
     return turn
 
 
@@ -594,9 +608,10 @@ def load_bound_conversation_record_for_host(
 
 
 def _conversation_record_exists(paths: WorkspacePaths, conversation_id: str) -> bool:
-    return conversation_path(paths, conversation_id).exists() or legacy_conversation_path(
-        paths, conversation_id
-    ).exists()
+    return (
+        conversation_path(paths, conversation_id).exists()
+        or legacy_conversation_path(paths, conversation_id).exists()
+    )
 
 
 def resolve_conversation_id(paths: WorkspacePaths, *, agent_surface: str) -> tuple[str, str]:
@@ -671,6 +686,7 @@ def base_turn_record(
         "native_ledger_ref": None,
         "promotion_kind": None,
         "promotion_reason": None,
+        "log_origin": None,
         "turn_state": "opened",
         "version_context": None,
         "capability_profile": None,
@@ -754,8 +770,11 @@ def ensure_conversation_record(
             else None,
             host_identity,
         ):
-            conversation["host_identity"] = dict(host_identity)
-            conversation["host_identity_key"] = host_identity_key(host_identity)
+            normalized_host_identity = (
+                dict(host_identity) if isinstance(host_identity, dict) else {}
+            )
+            conversation["host_identity"] = normalized_host_identity
+            conversation["host_identity_key"] = host_identity_key(normalized_host_identity)
             write_json(conversation_path(paths, conversation_id), conversation)
         if host_identity_is_bindable(host_identity):
             bind_host_identity_to_conversation(
@@ -1043,16 +1062,17 @@ def update_conversation_turn(
         conversation["updated_at"] = now
         conversation["workspace_snapshot"] = workspace_snapshot(paths)
         write_json(path, conversation)
+        host_identity_payload = (
+            dict(conversation["host_identity"])
+            if isinstance(conversation.get("host_identity"), dict)
+            else {}
+        )
         write_json(
             paths.active_conversation_path,
             {
                 "conversation_id": conversation_id,
                 "agent_surface": conversation.get("agent_surface", detect_agent_surface()),
-                "host_identity": (
-                    dict(conversation.get("host_identity"))
-                    if isinstance(conversation.get("host_identity"), dict)
-                    else {}
-                ),
+                "host_identity": host_identity_payload,
                 "host_identity_key": conversation.get("host_identity_key"),
                 "updated_at": now,
             },

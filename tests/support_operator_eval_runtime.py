@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Tests for the operator evaluation loop and four-state answer contract."""
 
 from __future__ import annotations
@@ -12,11 +13,16 @@ from unittest import mock
 
 from docmason.ask import complete_ask_turn, prepare_ask_turn
 from docmason.commands import run_workflow, sync_workspace
-from docmason.evaluation import load_evaluation_baseline, load_evaluation_suite, load_rubric_definition
+from docmason.evaluation import (
+    load_evaluation_baseline,
+    load_evaluation_suite,
+    load_rubric_definition,
+)
 from docmason.operator_eval import load_operator_request
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import trace_answer_file
 from docmason.workflows import load_workflow_metadata
+from tests.support_public_corpus import materialize_public_markdown_subset
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -314,6 +320,121 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
             },
         )
 
+    def write_public_ask_turn_assets(self, workspace: WorkspacePaths) -> None:
+        benchmark_dir = workspace.eval_broad_benchmark_dir
+        benchmark_dir.mkdir(parents=True, exist_ok=True)
+        catalog = read_json(workspace.current_catalog_path)
+        oasis_source_id = next(
+            str(item["source_id"])
+            for item in catalog.get("sources", [])
+            if isinstance(item, dict)
+            and item.get("current_path") == "original_doc/gcs/oasis-campaign-planning.md"
+            and isinstance(item.get("source_id"), str)
+        )
+        retrieval_manifest = read_json(workspace.retrieval_manifest_path("current"))
+        write_json(
+            benchmark_dir / "rubric.json",
+            {
+                "schema_version": 1,
+                "rubric_id": "operator-eval-public-ask-rubric",
+                "title": "Operator evaluation public ask rubric",
+                "trial_count": 3,
+                "judge_instructions": ["Score only active dimensions from the supplied evidence."],
+                "acceptance_thresholds": {
+                    "deterministic_pass_rate": 1.0,
+                    "answer_mean_score": 1.5,
+                    "aggregate_rubric_regression_limit": 0.2,
+                },
+                "dimensions": {
+                    name: {
+                        "description": name,
+                        "score_0": "0",
+                        "score_1": "1",
+                        "score_2": "2",
+                    }
+                    for name in (
+                        "factual_alignment",
+                        "coverage",
+                        "source_discipline",
+                        "uncertainty_discipline",
+                        "visual_evidence_handling",
+                    )
+                },
+            },
+        )
+        write_json(
+            benchmark_dir / "suite.json",
+            {
+                "schema_version": 1,
+                "suite_id": "operator-eval-public-ask-suite",
+                "title": "Operator evaluation public ask suite",
+                "description": "A public-fixture ask-turn replay suite for operator-eval tests.",
+                "target": "current",
+                "corpus_signature": retrieval_manifest["source_signature"],
+                "retrieval_strategy_id": "phase4b-lexical-plus-graph-v1",
+                "answer_workflow_id": "phase4b-grounded-answer-v1",
+                "cases": [
+                    {
+                        "case_id": "public-ask-turn",
+                        "family": "ask-turn",
+                        "execution_mode": "ask-turn",
+                        "query_or_prompt": "What does OASIS stand for in the campaign planning guide?",
+                        "expected_primary_sources": [oasis_source_id],
+                        "required_sources_or_units": [oasis_source_id],
+                        "minimum_support_overlap": 1,
+                        "forbidden_sources_or_units": [],
+                        "expected_status": "ready",
+                        "expected_answer_state": "grounded",
+                        "expected_support_basis": "kb-grounded",
+                        "expected_render_inspection_required": None,
+                        "reference_facts": [
+                            "The ask replay should ground to the public GCS OASIS guide."
+                        ],
+                        "active_rubric_dimensions": [],
+                        "feedback_tags": ["coverage_gap"],
+                        "ask_replay": {
+                            "replay_source": {"kind": "manual-suite"},
+                            "semantic_analysis": self.semantic_analysis(),
+                            "answer_plan": {
+                                "answer_text": (
+                                    "OASIS stands for Objectives, Audience/Insight, Strategy/Ideas, "
+                                    "Implementation, and Scoring/Evaluation."
+                                ),
+                                "trace_top": 2,
+                            },
+                            "expectations": {
+                                "final_turn_status": "answered",
+                                "query_session_count": 1,
+                                "trace_count": 1,
+                                "required_run_events": [
+                                    "preanswer-governance-started",
+                                    "ask-prepared",
+                                    "trace-completed",
+                                    "admissibility-passed",
+                                    "projection-refreshed",
+                                ],
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+        write_json(
+            benchmark_dir / "judge-trials.json",
+            {
+                "schema_version": 1,
+                "suite_id": "operator-eval-public-ask-suite",
+                "judge_profile": {
+                    "mode": "agent-judge",
+                    "agent_name": "codex",
+                    "model_name": "gpt-5",
+                    "workflow_id": "operator-eval-test-judge",
+                    "trial_count": 3,
+                },
+                "trials_by_case": {},
+            },
+        )
+
     def write_operator_request(
         self,
         workspace: WorkspacePaths,
@@ -452,17 +573,69 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
         self.assertIn("operator-eval", all_workflows)
 
     def test_operator_examples_validate(self) -> None:
-        workspace = self.make_workspace()
         examples = ROOT / "skills" / "operator" / "operator-eval" / "examples"
         request = load_operator_request(examples / "template_request.json")
         self.assertEqual(request["action"], "run-suite")
         rubric = load_rubric_definition(examples / "template_rubric.json")
         suite = load_evaluation_suite(examples / "template_suite.json", rubric=rubric)
         self.assertEqual(suite["cases"][0]["expected_answer_state"], "abstained")
+        self.assertEqual(suite["cases"][1]["execution_mode"], "ask-turn")
+        self.assertEqual(
+            suite["cases"][1]["ask_replay"]["replay_source"]["kind"],
+            "manual-suite",
+        )
         baseline = load_evaluation_baseline(examples / "template_baseline.json")
         self.assertEqual(baseline["cases"][0]["answer_state"], "abstained")
         candidate = json.loads((examples / "template_candidate.json").read_text(encoding="utf-8"))
         self.assertEqual(candidate["proposed_case"]["declared_answer_state"], "abstained")
+
+    def test_operator_eval_run_suite_supports_public_ask_turn_case(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        materialize_public_markdown_subset(workspace)
+        sync_payload = sync_workspace(workspace, assume_yes=True).payload
+        self.assertEqual(sync_payload["sync_status"], "valid")
+        self.write_public_ask_turn_assets(workspace)
+
+        self.write_operator_request(
+            workspace,
+            action="run-suite",
+            suite="broad",
+            target_ids=[],
+            run_label="Operator public ask-turn suite",
+        )
+        run_report = run_workflow("operator-eval", paths=workspace)
+        self.assertEqual(run_report.payload["status"], "ready")
+
+        run_json = workspace.root / run_report.payload["artifacts"]["run_json"]
+        stored = read_json(run_json)
+        self.assertEqual(stored["summary"]["overall_status"], "passed")
+        case = stored["cases"][0]
+        self.assertEqual(case["execution_mode"], "ask-turn")
+        self.assertEqual(case["execution"]["result"]["answer_state"], "grounded")
+        self.assertEqual(case["execution"]["result"]["support_basis"], "kb-grounded")
+        self.assertEqual(case["execution"]["result"]["front_door_state"], "canonical-ask")
+        self.assertIn("canonical_conversation", case["artifact_paths"])
+        self.assertIn("answer_file", case["artifact_paths"])
+        self.assertIn("query_session_01", case["artifact_paths"])
+        self.assertIn("retrieval_trace_01", case["artifact_paths"])
+        self.assertIn("conversation_projection", case["artifact_paths"])
+        self.assertIn("review_summary", case["artifact_paths"])
+        self.assertIn("answer_history_index", case["artifact_paths"])
+        self.assertIn("projection_state", case["artifact_paths"])
+        conversation = read_json(
+            workspace.conversations_dir
+            / f"{case['execution']['result']['conversation_id']}.json"
+        )
+        self.assertEqual(conversation["turns"][0]["log_origin"], "evaluation-suite")
+        summary = read_json(workspace.review_summary_path)
+        self.assertEqual(summary["query_sessions"]["real_total"], 0)
+        self.assertEqual(summary["query_sessions"]["synthetic_total"], 1)
+        self.assertEqual(summary["retrieval_traces"]["real_total"], 0)
+        self.assertEqual(summary["retrieval_traces"]["synthetic_total"], 1)
+        self.assertEqual(summary["committed_turns"]["total"], 0)
+        answer_history = read_json(workspace.answer_history_index_path)
+        self.assertEqual(answer_history["record_count"], 0)
 
     def test_operator_eval_run_suite_and_freeze_baseline(self) -> None:
         workspace = self.make_workspace()

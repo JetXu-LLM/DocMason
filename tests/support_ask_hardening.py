@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Ask-path hardening, workflow runner, and front-controller tests."""
 
 from __future__ import annotations
@@ -25,14 +26,13 @@ from docmason.commands import (
     sync_workspace,
     trace_knowledge,
 )
-from docmason.conversation import load_turn_record, update_conversation_turn
-from docmason.control_plane import ensure_shared_job, load_shared_job
 from docmason.control_plane import complete_shared_job as complete_control_plane_job
-from docmason.control_plane import lane_c_job_key
+from docmason.control_plane import ensure_shared_job, lane_c_job_key, load_shared_job
+from docmason.conversation import load_turn_record, update_conversation_turn
 from docmason.front_controller import write_hybrid_refresh_work
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import retrieve_corpus, trace_answer_file, trace_session
-from docmason.run_control import load_run_state, run_journal_path, update_run_state
+from docmason.run_control import run_journal_path, update_run_state
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 ROOT = Path(__file__).resolve().parents[1]

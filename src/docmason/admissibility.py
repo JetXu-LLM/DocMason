@@ -6,7 +6,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .control_plane import lane_c_job_key, load_shared_job, shared_job_is_settled
+from .control_plane import (
+    lane_c_job_key,
+    load_shared_job,
+    resolved_attached_shared_job_ids,
+    shared_job_is_settled,
+)
 from .conversation import load_turn_record
 from .project import WorkspacePaths, read_json
 from .run_control import load_run_state
@@ -98,7 +103,6 @@ def _payload_identity_issue(
             return f"Linked {label} belongs to a different run."
     return None
 
-
 def evaluate_commit_admissibility(
     paths: WorkspacePaths,
     *,
@@ -120,35 +124,87 @@ def evaluate_commit_admissibility(
     )
     issues: list[str] = []
     effective_run_id = str(run_id or turn.get("active_run_id") or "")
-    run_state = (
-        load_run_state(paths, effective_run_id)
-        if effective_run_id
-        else {}
-    )
+    run_state = load_run_state(paths, effective_run_id) if effective_run_id else {}
     if not effective_run_id or str(turn.get("active_run_id") or "") != effective_run_id:
         issues.append("The current run no longer owns the turn.")
     run_version_context = run_state.get("version_context")
     if not isinstance(run_version_context, dict):
         run_version_context = turn.get("version_context")
-    for job_id in turn.get("attached_shared_job_ids", []):
+    hybrid_refresh_triggered = bool(turn.get("hybrid_refresh_triggered"))
+    hybrid_refresh_snapshot_id = (
+        str(turn.get("hybrid_refresh_snapshot_id"))
+        if isinstance(turn.get("hybrid_refresh_snapshot_id"), str)
+        and turn.get("hybrid_refresh_snapshot_id")
+        else None
+    )
+    hybrid_refresh_job_ids = [
+        item
+        for item in turn.get("hybrid_refresh_job_ids", [])
+        if isinstance(item, str) and item
+    ]
+    hybrid_refresh_sources = [
+        item
+        for item in turn.get("hybrid_refresh_sources", [])
+        if isinstance(item, str) and item
+    ]
+    hybrid_refresh_completion_status = str(turn.get("hybrid_refresh_completion_status") or "")
+    attached_shared_job_ids = resolved_attached_shared_job_ids(
+        turn=turn,
+        run_state=run_state,
+        hybrid_refresh_job_ids=hybrid_refresh_job_ids,
+    )
+    for job_id in attached_shared_job_ids:
         if not isinstance(job_id, str) or not job_id:
             continue
         manifest = load_shared_job(paths, job_id)
-        if not manifest or not shared_job_is_settled(manifest):
+        if not manifest:
+            issues.append(f"Attached shared job `{job_id}` is missing.")
+            continue
+        if not shared_job_is_settled(manifest):
             issues.append(f"Attached shared job `{job_id}` is not yet settled.")
+        if manifest.get("job_family") == "lane-c":
+            scope = manifest.get("scope")
+            scope_payload = scope if isinstance(scope, dict) else {}
+            if hybrid_refresh_job_ids and job_id not in hybrid_refresh_job_ids:
+                issues.append(
+                    f"Turn truth omits governed multimodal refresh shared job `{job_id}`."
+                )
+            manifest_snapshot_id = (
+                str(scope_payload.get("published_snapshot_id"))
+                if isinstance(scope_payload.get("published_snapshot_id"), str)
+                and scope_payload.get("published_snapshot_id")
+                else None
+            )
+            if hybrid_refresh_snapshot_id and manifest_snapshot_id:
+                if manifest_snapshot_id != hybrid_refresh_snapshot_id:
+                    issues.append(
+                        "Governed multimodal refresh snapshot truth does not match "
+                        "the shared job manifest."
+                    )
+            manifest_source_id = (
+                str(scope_payload.get("source_id"))
+                if isinstance(scope_payload.get("source_id"), str)
+                and scope_payload.get("source_id")
+                else None
+            )
+            if hybrid_refresh_sources and manifest_source_id:
+                if manifest_source_id not in hybrid_refresh_sources:
+                    issues.append(
+                        "Governed multimodal refresh source truth does not match "
+                        "the shared job manifest."
+                    )
+        elif job_id in hybrid_refresh_job_ids:
+            issues.append(
+                f"Turn truth marks shared job `{job_id}` as governed multimodal "
+                "refresh, but the manifest is not lane-c."
+            )
     effective_trace_ids = (
         trace_ids
         if isinstance(trace_ids, list)
-        else [
-            value
-            for value in turn.get("trace_ids", [])
-            if isinstance(value, str) and value
-        ]
+        else [value for value in turn.get("trace_ids", []) if isinstance(value, str) and value]
     )
     effective_session_ids = [
-        value
-        for value in turn.get("session_ids", [])
-        if isinstance(value, str) and value
+        value for value in turn.get("session_ids", []) if isinstance(value, str) and value
     ]
     trace_payload = _latest_trace_payload(paths, effective_trace_ids)
     session_payload = _latest_session_payload(paths, effective_session_ids)
@@ -187,11 +243,14 @@ def evaluate_commit_admissibility(
             latest_gap_source = "trace" if trace_has_unresolved_gap else None
     if latest_gap_source and turn.get("published_artifacts_sufficient") is True:
         issues.append(
-            f"Final turn claims published artifacts are sufficient even though the latest ask-owned {latest_gap_source} still records an unresolved hard-artifact or governed multimodal gap."
+            "Final turn claims published artifacts are sufficient even though the "
+            f"latest ask-owned {latest_gap_source} still records an unresolved "
+            "hard-artifact or governed multimodal gap."
         )
     if latest_gap_source and turn.get("source_escalation_required") is False:
         issues.append(
-            f"Final turn clears source escalation even though the latest ask-owned {latest_gap_source} still requires escalation."
+            "Final turn clears source escalation even though the latest ask-owned "
+            f"{latest_gap_source} still requires escalation."
         )
     if support_basis in {"kb-grounded", "mixed"}:
         if not effective_trace_ids or not trace_payload:
@@ -211,27 +270,10 @@ def evaluate_commit_admissibility(
             "published_source_signature"
         ):
             issues.append("Trace source signature does not match the run version context.")
-    hybrid_refresh_triggered = bool(turn.get("hybrid_refresh_triggered"))
-    hybrid_refresh_snapshot_id = (
-        str(turn.get("hybrid_refresh_snapshot_id"))
-        if isinstance(turn.get("hybrid_refresh_snapshot_id"), str)
-        and turn.get("hybrid_refresh_snapshot_id")
-        else None
-    )
-    hybrid_refresh_job_ids = [
-        value
-        for value in turn.get("hybrid_refresh_job_ids", [])
-        if isinstance(value, str) and value
-    ]
-    hybrid_refresh_sources = [
-        value
-        for value in turn.get("hybrid_refresh_sources", [])
-        if isinstance(value, str) and value
-    ]
-    hybrid_refresh_completion_status = str(turn.get("hybrid_refresh_completion_status") or "")
     if hybrid_refresh_triggered and hybrid_refresh_completion_status not in {"covered", "blocked"}:
         issues.append(
-            "The governed multimodal refresh was triggered but did not settle to covered or blocked."
+            "The governed multimodal refresh was triggered but did not settle "
+            "to covered or blocked."
         )
     if hybrid_refresh_triggered and not effective_session_ids:
         issues.append(
@@ -240,9 +282,13 @@ def evaluate_commit_admissibility(
     if hybrid_refresh_triggered and not effective_trace_ids:
         issues.append("The governed multimodal refresh settled without a post-refresh trace.")
     if hybrid_refresh_triggered and not hybrid_refresh_snapshot_id:
-        issues.append("The governed multimodal refresh turn state is missing the settled snapshot id.")
+        issues.append(
+            "The governed multimodal refresh turn state is missing the settled snapshot id."
+        )
     if hybrid_refresh_triggered and not hybrid_refresh_job_ids:
-        issues.append("The governed multimodal refresh turn state is missing the settled shared job id.")
+        issues.append(
+            "The governed multimodal refresh turn state is missing the settled shared job id."
+        )
     if hybrid_refresh_triggered and hybrid_refresh_snapshot_id and hybrid_refresh_sources:
         expected_job_keys = {
             lane_c_job_key(
@@ -267,7 +313,8 @@ def evaluate_commit_admissibility(
                 matched_expected_job = True
         if not matched_expected_job:
             issues.append(
-                "The settled governed multimodal refresh jobs do not match the selected snapshot/source scope."
+                "The settled governed multimodal refresh jobs do not match "
+                "the selected snapshot/source scope."
             )
     settled_refresh_at = (
         _latest_settled_job_timestamp(paths, hybrid_refresh_job_ids)
@@ -279,11 +326,13 @@ def evaluate_commit_admissibility(
         latest_trace_at = _parse_timestamp(trace_payload.get("recorded_at"))
         if latest_session_at is None or latest_session_at <= settled_refresh_at:
             issues.append(
-                "Covered governed multimodal refresh turns require a post-refresh retrieve session recorded after the shared job settled."
+                "Covered governed multimodal refresh turns require a post-refresh "
+                "retrieve session recorded after the shared job settled."
             )
         if latest_trace_at is None or latest_trace_at <= settled_refresh_at:
             issues.append(
-                "Covered governed multimodal refresh turns require a post-refresh trace recorded after the shared job settled."
+                "Covered governed multimodal refresh turns require a post-refresh "
+                "trace recorded after the shared job settled."
             )
     if hybrid_refresh_completion_status == "blocked" and support_basis != "governed-boundary":
         issues.append("Blocked governed multimodal refresh turns must commit as governed-boundary.")

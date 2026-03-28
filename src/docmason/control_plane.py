@@ -124,6 +124,21 @@ def shared_job_is_active(manifest: dict[str, Any]) -> bool:
     return str(manifest.get("status") or "") in SHARED_JOB_ACTIVE_STATUSES
 
 
+def resolved_attached_shared_job_ids(
+    *,
+    turn: dict[str, Any],
+    run_state: dict[str, Any] | None,
+    hybrid_refresh_job_ids: list[str] | None = None,
+) -> list[str]:
+    """Return the canonical union of shared-job ids linked to the turn or run."""
+    values = [
+        *turn.get("attached_shared_job_ids", []),
+        *((run_state or {}).get("attached_shared_job_ids", [])),
+        *(hybrid_refresh_job_ids or turn.get("hybrid_refresh_job_ids", [])),
+    ]
+    return list(dict.fromkeys(item for item in values if isinstance(item, str) and item))
+
+
 def _normalize_owner(owner: dict[str, Any] | None = None) -> dict[str, str]:
     raw_owner = owner if isinstance(owner, dict) else {}
     kind = str(raw_owner.get("kind") or "command")
@@ -217,8 +232,9 @@ def sync_input_signature(
             for value in change.get("matched_source_ids", [])
             if isinstance(value, str) and value
         ]
-        if classification in {"unchanged", "modified", "moved-or-renamed", "deleted"} and isinstance(
-            source_id, str
+        if (
+            classification in {"unchanged", "modified", "moved-or-renamed", "deleted"}
+            and isinstance(source_id, str)
         ):
             stable_id = source_id
         elif classification == "ambiguous":
@@ -248,7 +264,9 @@ def sync_input_signature(
         {
             "target": target,
             "mode": mode,
-            "strong_source_fingerprint_signature": strong_source_fingerprint_signature(active_sources),
+            "strong_source_fingerprint_signature": strong_source_fingerprint_signature(
+                active_sources
+            ),
             "stable_changes": stable_changes,
             "pending_interaction_signature": pending_interaction_signature_value,
         }
@@ -621,7 +639,12 @@ def approve_shared_job(
         return manifest
 
 
-def decline_shared_job(paths: WorkspacePaths, job_id: str, *, reason: str | None = None) -> dict[str, Any]:
+def decline_shared_job(
+    paths: WorkspacePaths,
+    job_id: str,
+    *,
+    reason: str | None = None,
+) -> dict[str, Any]:
     return _settle_shared_job(
         paths,
         job_id=job_id,
@@ -630,11 +653,21 @@ def decline_shared_job(paths: WorkspacePaths, job_id: str, *, reason: str | None
     )
 
 
-def complete_shared_job(paths: WorkspacePaths, job_id: str, *, result: dict[str, Any] | None = None) -> dict[str, Any]:
+def complete_shared_job(
+    paths: WorkspacePaths,
+    job_id: str,
+    *,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return _settle_shared_job(paths, job_id=job_id, status="completed", result=result)
 
 
-def block_shared_job(paths: WorkspacePaths, job_id: str, *, result: dict[str, Any] | None = None) -> dict[str, Any]:
+def block_shared_job(
+    paths: WorkspacePaths,
+    job_id: str,
+    *,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return _settle_shared_job(paths, job_id=job_id, status="blocked", result=result)
 
 
@@ -651,7 +684,10 @@ def normalize_confirmation_reply(text: str) -> str | None:
     return None
 
 
-def find_conversation_confirmation_job(paths: WorkspacePaths, conversation_id: str) -> dict[str, Any]:
+def find_conversation_confirmation_job(
+    paths: WorkspacePaths,
+    conversation_id: str,
+) -> dict[str, Any]:
     conversation = read_json(paths.conversations_dir / f"{conversation_id}.json")
     turns = conversation.get("turns", [])
     if not isinstance(turns, list):
@@ -663,14 +699,18 @@ def find_conversation_confirmation_job(paths: WorkspacePaths, conversation_id: s
         if turn.get("turn_state") != "awaiting-confirmation":
             continue
         attached = turn.get("attached_shared_job_ids", [])
-        if not isinstance(attached, list) or len([value for value in attached if isinstance(value, str)]) != 1:
+        if not isinstance(attached, list) or len(
+            [value for value in attached if isinstance(value, str)]
+        ) != 1:
             continue
         pending_turns.append(turn)
     if len(pending_turns) != 1:
         return {}
     turn = pending_turns[0]
     job_id = next(
-        value for value in turn.get("attached_shared_job_ids", []) if isinstance(value, str) and value
+        value
+        for value in turn.get("attached_shared_job_ids", [])
+        if isinstance(value, str) and value
     )
     manifest = load_shared_job(paths, job_id)
     if not manifest or manifest.get("status") != "awaiting-confirmation":
@@ -757,7 +797,9 @@ def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
         },
         "corpus_delta": {
             "source_signature": change_set.get("source_signature"),
-            "strong_source_fingerprint_signature": strong_source_fingerprint_signature(active_sources),
+            "strong_source_fingerprint_signature": strong_source_fingerprint_signature(
+                active_sources
+            ),
             "stats": change_set.get("stats", {}),
             "changed_source_count": materiality["changed_total"],
             "changed_ratio": materiality["changed_ratio"],

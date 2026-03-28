@@ -24,6 +24,15 @@ The workflow reads one request file from:
 - `promote-candidate`
 - `freeze-baseline`
 
+Suite definitions may now include manual `execution_mode="ask-turn"` cases in addition to the
+existing retrieval and trace replay modes. This remains a hidden local operator surface only.
+Ask-turn replay remains auditably synthetic:
+
+- the replayed turn and linked runtime artifacts carry `log_origin="evaluation-suite"`
+- review-facing real buckets ignore those synthetic records
+- `required_run_events` is checked as an ordered run-journal subsequence rather than an unordered set
+- shared-job wait or settle closure is validated from persisted runtime truth, not only case-authored expectations
+
 ## Live Artifact Root
 
 All live operator-eval artifacts stay under:

@@ -1,7 +1,8 @@
 <div align="center">
   <h1>DocMason</h1>
-  <p><strong>The repo is the app. Codex is the runtime.</strong></p>
-  <p>Turn private work files into a local, evidence-first knowledge base for AI-assisted deep research.</p>
+  <p><strong>A repo-native agent app for deep research over private work files.</strong></p>
+  <p>The repo is the app. Codex is the runtime.</p>
+  <p>Build a local, evidence-first knowledge base with provenance.</p>
   <p>
     <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black">
     <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue">

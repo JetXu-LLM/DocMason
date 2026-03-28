@@ -1,15 +1,29 @@
+# ruff: noqa: E501
 """Tests for the DocMason private evaluation runtime foundation."""
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
+import docmason.retrieval as retrieval_module
+from docmason.ask import complete_ask_turn, prepare_ask_turn, settle_lane_c_shared_refresh
 from docmason.cli import build_parser
+from docmason.commands import CommandReport, sync_workspace
+from docmason.control_plane import (
+    complete_shared_job,
+    ensure_shared_job,
+    shared_job_control_plane_payload,
+)
+from docmason.conversation import load_turn_record, update_conversation_turn
 from docmason.evaluation import (
     EvaluationConfigurationError,
+    _case_deterministic_checks,
     aggregate_case_rubric,
     compare_against_baseline,
     freeze_baseline_from_run,
@@ -19,7 +33,8 @@ from docmason.evaluation import (
     run_evaluation_suite,
     write_feedback_record,
 )
-from docmason.project import WorkspacePaths, read_json, write_json
+from docmason.project import WorkspacePaths, read_json, source_inventory_signature, write_json
+from docmason.run_control import load_run_state
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 
@@ -81,6 +96,26 @@ class EvaluationRuntimeTests(unittest.TestCase):
             prepared_at="2026-03-16T00:00:00Z",
         )
 
+    def semantic_analysis(
+        self,
+        *,
+        question_class: str,
+        question_domain: str,
+        route_reason: str | None = None,
+        needs_latest_workspace_state: bool = False,
+        evidence_requirements: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "question_class": question_class,
+            "question_domain": question_domain,
+            "route_reason": route_reason
+            or f"Evaluation test classified the question as {question_class}/{question_domain}.",
+            "needs_latest_workspace_state": needs_latest_workspace_state,
+        }
+        if evidence_requirements is not None:
+            payload["evidence_requirements"] = evidence_requirements
+        return payload
+
     def create_pdf(self, path: Path, *, page_count: int = 1) -> None:
         from pypdf import PdfWriter
 
@@ -89,6 +124,34 @@ class EvaluationRuntimeTests(unittest.TestCase):
             writer.add_blank_page(width=144 + index, height=144 + index)
         with path.open("wb") as handle:
             writer.write(handle)
+
+    def create_pdf_with_full_page_image(self, path: Path) -> None:
+        pymupdf_module: Any
+        try:
+            import pymupdf
+
+            pymupdf_module = pymupdf
+        except ImportError:  # pragma: no cover - compatibility import
+            import fitz  # type: ignore[import-untyped]
+
+            pymupdf_module = fitz
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            image_path = Path(tempdir_name) / "page.png"
+            image = Image.new("RGB", (1200, 1600), color=(245, 245, 245))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((80, 120, 1120, 1480), outline=(32, 64, 128), width=14)
+            draw.rectangle((170, 300, 1030, 540), fill=(210, 225, 245))
+            draw.rectangle((170, 660, 1030, 1180), fill=(225, 235, 250))
+            draw.rectangle((170, 1230, 760, 1380), fill=(235, 240, 250))
+            image.save(image_path)
+
+            document = pymupdf_module.open()
+            page = document.new_page(width=595, height=842)
+            page.insert_image(page.rect, filename=str(image_path))
+            document.save(path)
+            document.close()
 
     def build_seeded_knowledge(
         self,
@@ -154,8 +217,6 @@ class EvaluationRuntimeTests(unittest.TestCase):
         (source_dir / "summary.md").write_text(summary_md, encoding="utf-8")
 
     def publish_seeded_corpus(self, workspace: WorkspacePaths) -> list[str]:
-        from docmason.commands import sync_workspace
-
         pending = sync_workspace(workspace, autonomous=False)
         self.assertEqual(pending.payload["sync_status"], "pending-synthesis")
         source_ids = [item["source_id"] for item in pending.payload["pending_sources"]]
@@ -189,6 +250,36 @@ class EvaluationRuntimeTests(unittest.TestCase):
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
         return source_ids
+
+    def publish_seeded_scanned_corpus(self, workspace: WorkspacePaths) -> dict[str, str]:
+        pending = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(pending.payload["sync_status"], "pending-synthesis")
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        scan_source_id = by_path["original_doc/scan.pdf"]
+        control_source_id = by_path["original_doc/control.pdf"]
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / scan_source_id,
+            title="Scanned Workflow Page",
+            summary="A scanned workflow page with a workflow-style layout and limited extracted text.",
+            key_point="The rendered page shows a workflow-style process layout.",
+            claim=(
+                "The page appears to show a workflow-style process layout and needs multimodal "
+                "follow-up for reliable semantic detail."
+            ),
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / control_source_id,
+            title="Control Page",
+            summary="A control page with no scan-specific signals.",
+            key_point="The control page is intentionally generic.",
+            claim="The control page should rank lower for scanned-page queries.",
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+        return {"scan": scan_source_id, "control": control_source_id}
 
     def write_phase_five_specs(
         self,
@@ -392,6 +483,94 @@ class EvaluationRuntimeTests(unittest.TestCase):
         write_json(judge_path, judge_trials)
         return suite_path, rubric_path, judge_path
 
+    def write_ask_turn_specs(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        source_ids: list[str],
+        cases: list[dict[str, object]],
+        title: str = "Ask-turn evaluation suite",
+        description: str = "A focused suite for canonical ask replay tests.",
+    ) -> tuple[Path, Path, Path]:
+        suite_path, rubric_path, judge_path = self.write_phase_five_specs(workspace, source_ids)
+        corpus_signature = read_json(workspace.retrieval_manifest_path("current"))["source_signature"]
+        write_json(
+            suite_path,
+            {
+                "schema_version": 1,
+                "suite_id": "ask-turn-test-suite",
+                "title": title,
+                "description": description,
+                "target": "current",
+                "corpus_signature": corpus_signature,
+                "retrieval_strategy_id": "phase4b-lexical-plus-graph-v1",
+                "answer_workflow_id": "phase4b-grounded-answer-v1",
+                "cases": cases,
+            },
+        )
+        write_json(
+            judge_path,
+            {
+                "schema_version": 1,
+                "suite_id": "ask-turn-test-suite",
+                "judge_profile": {
+                    "mode": "agent-judge",
+                    "agent_name": "codex",
+                    "model_name": "gpt-5",
+                    "workflow_id": "evaluation-test-judge",
+                    "trial_count": 3,
+                },
+                "trials_by_case": {},
+            },
+        )
+        return suite_path, rubric_path, judge_path
+
+    def ask_turn_case(
+        self,
+        *,
+        case_id: str,
+        family: str,
+        question: str,
+        semantic_analysis: dict[str, object],
+        expected_status: str,
+        expected_answer_state: str | None,
+        expected_support_basis: str | None,
+        reference_facts: list[str],
+        continuations: list[dict[str, object]] | None = None,
+        answer_plan: dict[str, object] | None = None,
+        hybrid_refresh: dict[str, object] | None = None,
+        expectations: dict[str, object] | None = None,
+        expected_primary_sources: list[str] | None = None,
+        required_sources_or_units: list[str] | None = None,
+        minimum_support_overlap: int = 0,
+        feedback_tags: list[str] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "case_id": case_id,
+            "family": family,
+            "execution_mode": "ask-turn",
+            "query_or_prompt": question,
+            "expected_primary_sources": expected_primary_sources or [],
+            "required_sources_or_units": required_sources_or_units or [],
+            "minimum_support_overlap": minimum_support_overlap,
+            "forbidden_sources_or_units": [],
+            "expected_status": expected_status,
+            "expected_answer_state": expected_answer_state,
+            "expected_support_basis": expected_support_basis,
+            "expected_render_inspection_required": None,
+            "reference_facts": reference_facts,
+            "active_rubric_dimensions": [],
+            "feedback_tags": feedback_tags or ["coverage_gap"],
+            "ask_replay": {
+                "replay_source": {"kind": "manual-suite"},
+                "semantic_analysis": semantic_analysis,
+                "continuations": continuations or [],
+                **({"answer_plan": answer_plan} if answer_plan is not None else {}),
+                **({"hybrid_refresh": hybrid_refresh} if hybrid_refresh is not None else {}),
+                **({"expectations": expectations} if expectations is not None else {}),
+            },
+        }
+
     def test_suite_validation_rejects_unknown_feedback_tag(self) -> None:
         workspace = self.make_workspace()
         benchmark_dir = workspace.eval_broad_benchmark_dir
@@ -461,6 +640,1326 @@ class EvaluationRuntimeTests(unittest.TestCase):
         rubric = load_rubric_definition(rubric_path)
         with self.assertRaises(EvaluationConfigurationError):
             load_evaluation_suite(suite_path, rubric=rubric)
+
+    def test_load_evaluation_suite_accepts_manual_ask_turn_case(self) -> None:
+        workspace = self.make_workspace()
+        benchmark_dir = workspace.eval_broad_benchmark_dir
+        benchmark_dir.mkdir(parents=True, exist_ok=True)
+        rubric_path = benchmark_dir / "rubric.json"
+        suite_path = benchmark_dir / "suite.json"
+        write_json(
+            rubric_path,
+            {
+                "schema_version": 1,
+                "rubric_id": "r1",
+                "title": "Rubric",
+                "trial_count": 3,
+                "judge_instructions": ["score"],
+                "acceptance_thresholds": {
+                    "deterministic_pass_rate": 1.0,
+                    "answer_mean_score": 1.5,
+                    "aggregate_rubric_regression_limit": 0.2,
+                },
+                "dimensions": {
+                    name: {
+                        "description": name,
+                        "score_0": "0",
+                        "score_1": "1",
+                        "score_2": "2",
+                    }
+                    for name in (
+                        "factual_alignment",
+                        "coverage",
+                        "source_discipline",
+                        "uncertainty_discipline",
+                        "visual_evidence_handling",
+                    )
+                },
+            },
+        )
+        write_json(
+            suite_path,
+            {
+                "schema_version": 1,
+                "suite_id": "s1",
+                "title": "Suite",
+                "description": "desc",
+                "target": "current",
+                "corpus_signature": "abc",
+                "retrieval_strategy_id": "phase4b-lexical-plus-graph-v1",
+                "answer_workflow_id": "phase4b-grounded-answer-v1",
+                "cases": [
+                    {
+                        "case_id": "ask-turn-case",
+                        "family": "ask-turn",
+                        "execution_mode": "ask-turn",
+                        "query_or_prompt": "What does the strategy connect to?",
+                        "expected_primary_sources": [],
+                        "required_sources_or_units": [],
+                        "minimum_support_overlap": 0,
+                        "forbidden_sources_or_units": [],
+                        "expected_status": "ready",
+                        "expected_answer_state": "grounded",
+                        "expected_support_basis": "kb-grounded",
+                        "expected_render_inspection_required": None,
+                        "reference_facts": ["The strategy answer should be replayable."],
+                        "active_rubric_dimensions": [],
+                        "feedback_tags": ["coverage_gap"],
+                        "ask_replay": {
+                            "replay_source": {"kind": "manual-suite"},
+                            "semantic_analysis": self.semantic_analysis(
+                                question_class="answer",
+                                question_domain="workspace-corpus",
+                            ),
+                            "host_thread_ref": "example-thread",
+                            "continuations": [{"message": "What does the strategy connect to?"}],
+                            "answer_plan": {
+                                "answer_text": "The strategy connects the operating model to implementation.",
+                                "trace_top": 2,
+                                "completion_overrides": {"status": "answered"},
+                            },
+                            "expectations": {
+                                "reused_turn": True,
+                                "query_session_count": 1,
+                                "trace_count": 1,
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+        rubric = load_rubric_definition(rubric_path)
+        suite = load_evaluation_suite(suite_path, rubric=rubric)
+        case = suite["cases"][0]
+        self.assertEqual(case["execution_mode"], "ask-turn")
+        self.assertEqual(case["ask_replay"]["replay_source"]["kind"], "manual-suite")
+        self.assertEqual(case["ask_replay"]["host_thread_ref"], "example-thread")
+        self.assertEqual(
+            case["ask_replay"]["continuations"][0]["message"],
+            "What does the strategy connect to?",
+        )
+        self.assertEqual(case["ask_replay"]["answer_plan"]["trace_top"], 2)
+
+    def test_load_evaluation_suite_rejects_invalid_ask_turn_contracts(self) -> None:
+        workspace = self.make_workspace()
+        benchmark_dir = workspace.eval_broad_benchmark_dir
+        benchmark_dir.mkdir(parents=True, exist_ok=True)
+        rubric_path = benchmark_dir / "rubric.json"
+        suite_path = benchmark_dir / "suite.json"
+        write_json(
+            rubric_path,
+            {
+                "schema_version": 1,
+                "rubric_id": "r1",
+                "title": "Rubric",
+                "trial_count": 3,
+                "judge_instructions": ["score"],
+                "acceptance_thresholds": {
+                    "deterministic_pass_rate": 1.0,
+                    "answer_mean_score": 1.5,
+                    "aggregate_rubric_regression_limit": 0.2,
+                },
+                "dimensions": {
+                    name: {
+                        "description": name,
+                        "score_0": "0",
+                        "score_1": "1",
+                        "score_2": "2",
+                    }
+                    for name in (
+                        "factual_alignment",
+                        "coverage",
+                        "source_discipline",
+                        "uncertainty_discipline",
+                        "visual_evidence_handling",
+                    )
+                },
+            },
+        )
+        invalid_cases = {
+            "missing-ask-replay": {
+                "case_id": "bad-case",
+                "family": "ask-turn",
+                "execution_mode": "ask-turn",
+                "query_or_prompt": "What does the strategy connect to?",
+                "expected_primary_sources": [],
+                "required_sources_or_units": [],
+                "minimum_support_overlap": 0,
+                "forbidden_sources_or_units": [],
+                "expected_status": "ready",
+                "expected_answer_state": "grounded",
+                "expected_support_basis": "kb-grounded",
+                "expected_render_inspection_required": None,
+                "reference_facts": ["fact"],
+                "active_rubric_dimensions": [],
+                "feedback_tags": ["coverage_gap"],
+            },
+            "invalid-replay-source": {
+                "case_id": "bad-case",
+                "family": "ask-turn",
+                "execution_mode": "ask-turn",
+                "query_or_prompt": "What does the strategy connect to?",
+                "expected_primary_sources": [],
+                "required_sources_or_units": [],
+                "minimum_support_overlap": 0,
+                "forbidden_sources_or_units": [],
+                "expected_status": "ready",
+                "expected_answer_state": "grounded",
+                "expected_support_basis": "kb-grounded",
+                "expected_render_inspection_required": None,
+                "reference_facts": ["fact"],
+                "active_rubric_dimensions": [],
+                "feedback_tags": ["coverage_gap"],
+                "ask_replay": {
+                    "replay_source": {"kind": "candidate-driven"},
+                    "semantic_analysis": self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                },
+            },
+            "invalid-hybrid-refresh": {
+                "case_id": "bad-case",
+                "family": "ask-turn",
+                "execution_mode": "ask-turn",
+                "query_or_prompt": "What does the strategy connect to?",
+                "expected_primary_sources": [],
+                "required_sources_or_units": [],
+                "minimum_support_overlap": 0,
+                "forbidden_sources_or_units": [],
+                "expected_status": "ready",
+                "expected_answer_state": "grounded",
+                "expected_support_basis": "kb-grounded",
+                "expected_render_inspection_required": None,
+                "reference_facts": ["fact"],
+                "active_rubric_dimensions": [],
+                "feedback_tags": ["coverage_gap"],
+                "ask_replay": {
+                    "replay_source": {"kind": "manual-suite"},
+                    "semantic_analysis": self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    "hybrid_refresh": {"completion_status": "unsupported"},
+                },
+            },
+            "invalid-expectations": {
+                "case_id": "bad-case",
+                "family": "ask-turn",
+                "execution_mode": "ask-turn",
+                "query_or_prompt": "What does the strategy connect to?",
+                "expected_primary_sources": [],
+                "required_sources_or_units": [],
+                "minimum_support_overlap": 0,
+                "forbidden_sources_or_units": [],
+                "expected_status": "ready",
+                "expected_answer_state": "grounded",
+                "expected_support_basis": "kb-grounded",
+                "expected_render_inspection_required": None,
+                "reference_facts": ["fact"],
+                "active_rubric_dimensions": [],
+                "feedback_tags": ["coverage_gap"],
+                "ask_replay": {
+                    "replay_source": {"kind": "manual-suite"},
+                    "semantic_analysis": self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    "expectations": {"unknown_check": True},
+                },
+            },
+        }
+        rubric = load_rubric_definition(rubric_path)
+        for name, invalid_case in invalid_cases.items():
+            with self.subTest(name=name):
+                write_json(
+                    suite_path,
+                    {
+                        "schema_version": 1,
+                        "suite_id": "s1",
+                        "title": "Suite",
+                        "description": "desc",
+                        "target": "current",
+                        "corpus_signature": "abc",
+                        "retrieval_strategy_id": "phase4b-lexical-plus-graph-v1",
+                        "answer_workflow_id": "phase4b-grounded-answer-v1",
+                        "cases": [invalid_case],
+                    },
+                )
+                with self.assertRaises(EvaluationConfigurationError):
+                    load_evaluation_suite(suite_path, rubric=rubric)
+
+    def test_run_suite_replays_ready_and_reused_ask_turn_cases(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-ready-grounded-answer",
+                    family="ask-ready",
+                    question="What does the campaign planning brief say about the architecture operating model?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids[0]],
+                    required_sources_or_units=[source_ids[0]],
+                    minimum_support_overlap=1,
+                    reference_facts=["The ask replay should ground to the planning brief source."],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "reused_turn": False,
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                        "required_run_events": [
+                            "preanswer-governance-started",
+                            "ask-prepared",
+                            "trace-completed",
+                            "admissibility-passed",
+                            "projection-refreshed",
+                        ],
+                    },
+                ),
+                self.ask_turn_case(
+                    case_id="ask-reuse-same-question",
+                    family="ask-reuse",
+                    question="What does the campaign planning brief say about the architecture operating model?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids[0]],
+                    required_sources_or_units=[source_ids[0]],
+                    minimum_support_overlap=1,
+                    reference_facts=["The replay continuation should reuse the same open ask turn."],
+                    continuations=[
+                        {
+                            "message": (
+                                "What does the campaign planning brief say about the architecture "
+                                "operating model?"
+                            )
+                        }
+                    ],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "reused_turn": True,
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                        "required_run_events": [
+                            "preanswer-governance-started",
+                            "ask-prepared",
+                            "trace-completed",
+                            "admissibility-passed",
+                            "projection-refreshed",
+                        ],
+                    },
+                ),
+            ],
+        )
+
+        run_payload = run_evaluation_suite(
+            workspace,
+            suite_path=suite_path,
+            rubric_path=rubric_path,
+            judge_trials_path=judge_path,
+            run_label="Ask ready and reuse",
+        )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        cases = {case["case_id"]: case for case in run_payload["cases"]}
+        ready_case = cases["ask-ready-grounded-answer"]
+        reuse_case = cases["ask-reuse-same-question"]
+        self.assertFalse(ready_case["execution"]["reused_turn"])
+        self.assertTrue(reuse_case["execution"]["reused_turn"])
+        self.assertEqual(
+            ready_case["execution"]["result"]["front_door_state"],
+            "canonical-ask",
+        )
+        self.assertIn("canonical_conversation", ready_case["artifact_paths"])
+        self.assertIn("answer_file", ready_case["artifact_paths"])
+        self.assertIn("query_session_01", ready_case["artifact_paths"])
+        self.assertIn("retrieval_trace_01", ready_case["artifact_paths"])
+        self.assertIn("conversation_projection", ready_case["artifact_paths"])
+        self.assertIn("review_summary", ready_case["artifact_paths"])
+        self.assertIn("benchmark_candidates", ready_case["artifact_paths"])
+        self.assertIn("answer_history_index", ready_case["artifact_paths"])
+        self.assertIn("projection_state", ready_case["artifact_paths"])
+
+    def test_run_suite_marks_ask_turn_replay_as_synthetic_runtime(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-ready-synthetic-origin",
+                    family="ask-ready",
+                    question="What does the campaign planning brief say about the architecture operating model?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids[0]],
+                    required_sources_or_units=[source_ids[0]],
+                    minimum_support_overlap=1,
+                    reference_facts=["The replay should remain synthetic even when it commits."],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                )
+            ],
+        )
+
+        run_payload = run_evaluation_suite(
+            workspace,
+            suite_path=suite_path,
+            rubric_path=rubric_path,
+            judge_trials_path=judge_path,
+            run_label="Ask synthetic isolation",
+        )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        case = run_payload["cases"][0]
+        conversation = read_json(
+            workspace.conversations_dir
+            / f"{case['execution']['result']['conversation_id']}.json"
+        )
+        turn = conversation["turns"][0]
+        self.assertEqual(turn["log_origin"], "evaluation-suite")
+        run_state = read_json(
+            workspace.runs_dir / f"{case['execution']['result']['run_id']}" / "state.json"
+        )
+        self.assertEqual(run_state["log_origin"], "evaluation-suite")
+        query_session = read_json(
+            workspace.query_sessions_dir / f"{case['execution']['session_id']}.json"
+        )
+        retrieval_trace = read_json(
+            workspace.retrieval_traces_dir / f"{case['execution']['trace_id']}.json"
+        )
+        self.assertEqual(query_session["log_origin"], "evaluation-suite")
+        self.assertEqual(retrieval_trace["log_origin"], "evaluation-suite")
+        summary = read_json(workspace.review_summary_path)
+        self.assertEqual(summary["query_sessions"]["real_total"], 0)
+        self.assertEqual(summary["query_sessions"]["synthetic_total"], 1)
+        self.assertEqual(summary["retrieval_traces"]["real_total"], 0)
+        self.assertEqual(summary["retrieval_traces"]["synthetic_total"], 1)
+        self.assertEqual(summary["committed_turns"]["total"], 0)
+        answer_history = read_json(workspace.answer_history_index_path)
+        self.assertEqual(answer_history["record_count"], 0)
+
+    def test_run_suite_requires_ordered_run_events_for_ask_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-run-event-order",
+                    family="ask-ready",
+                    question="What does the campaign planning brief say about the architecture operating model?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    reference_facts=["The deterministic net should reject out-of-order events."],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                    expectations={
+                        "required_run_events": [
+                            "ask-prepared",
+                            "preanswer-governance-started",
+                        ]
+                    },
+                )
+            ],
+        )
+
+        run_payload = run_evaluation_suite(
+            workspace,
+            suite_path=suite_path,
+            rubric_path=rubric_path,
+            judge_trials_path=judge_path,
+            run_label="Ask run event ordering",
+        )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "failed")
+        required_events_check = next(
+            check
+            for check in run_payload["cases"][0]["deterministic_checks"]
+            if check["name"] == "required_run_events"
+        )
+        self.assertFalse(required_events_check["passed"])
+        self.assertEqual(required_events_check["actual"], ["ask-prepared"])
+
+    def test_ask_turn_structural_checks_fail_when_waiting_job_never_settles(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-wait-closure",
+                    family="ask-ready",
+                    question="What does the campaign planning brief say about the architecture operating model?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    reference_facts=["Dirty runtime truth should fail structural closure checks."],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                )
+            ],
+        )
+
+        run_payload = run_evaluation_suite(
+            workspace,
+            suite_path=suite_path,
+            rubric_path=rubric_path,
+            judge_trials_path=judge_path,
+            run_label="Ask structural closure",
+        )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        suite = load_evaluation_suite(
+            suite_path,
+            rubric=load_rubric_definition(rubric_path),
+        )
+        case_definition = suite["cases"][0]
+        execution = run_payload["cases"][0]["execution"]
+        run_id = execution["run_id"]
+        journal_path = workspace.runs_dir / run_id / "journal.jsonl"
+        journal_entries = [
+            json.loads(line)
+            for line in journal_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        commit_index = next(
+            index
+            for index, payload in enumerate(journal_entries)
+            if payload.get("event_type") == "turn-committed"
+        )
+        commit_entry = journal_entries.pop(commit_index)
+        self.assertEqual(commit_entry["event_type"], "turn-committed")
+        journal_entries.append(
+            {
+                "recorded_at": "2026-03-28T00:00:00Z",
+                "run_id": run_id,
+                "stage": "control-plane",
+                "event_type": "shared-job-waiting",
+                "payload": {
+                    "job_id": "job-missing-settlement",
+                    "state": "waiting-shared-job",
+                },
+            }
+        )
+        journal_entries.append(commit_entry)
+        journal_path.write_text(
+            "\n".join(json.dumps(item, ensure_ascii=False) for item in journal_entries) + "\n",
+            encoding="utf-8",
+        )
+
+        checks = _case_deterministic_checks(workspace, case_definition, execution)
+        closure_check = next(
+            check for check in checks if check["name"] == "shared_job_wait_closure"
+        )
+        self.assertFalse(closure_check["passed"])
+        self.assertEqual(closure_check["actual"], ["job-missing-settlement"])
+
+    def test_complete_ask_turn_rejects_orphan_lane_c_job_from_run_state(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+        self.create_pdf(workspace.source_dir / "control.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/scan.pdf"],
+            title="Scanned Workflow Page",
+            summary="A scanned workflow page with limited extracted text.",
+            key_point="The published baseline preserves the rendered page but not enough semantic detail.",
+            claim="This page requires multimodal follow-up before confident semantic use.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/control.pdf"],
+            title="Control Page",
+            summary="A control page with no scan-specific signals.",
+            key_point="The control page is intentionally generic.",
+            claim="The control page should rank lower for scanned-page queries.",
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-lane-c-orphan"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What is shown on the scanned workflow page image?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    evidence_requirements={
+                        "preferred_channels": ["render", "structure"],
+                        "inspection_scope": "unit",
+                        "prefer_published_artifacts": True,
+                    },
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The scanned workflow page appears to show a process diagram, but the current "
+            "published artifacts are insufficient for a reliable semantic answer.",
+            encoding="utf-8",
+        )
+        trace = retrieval_module.trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        transitioned = complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            session_ids=[trace["session_id"]],
+            trace_ids=[trace["trace_id"]],
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt=(
+                "The scanned workflow page needs a governed multimodal refresh before a final answer."
+            ),
+            status="answered",
+        )
+        job_id = str(transitioned["hybrid_refresh_job_ids"][0])
+
+        trace_path = workspace.retrieval_traces_dir / f"{trace['trace_id']}.json"
+        trace_payload = read_json(trace_path)
+        trace_payload.update(
+            {
+                "status": "ready",
+                "answer_state": "grounded",
+                "support_basis": "kb-grounded",
+                "published_artifacts_sufficient": True,
+                "source_escalation_required": False,
+                "source_escalation_reason": None,
+                "recommended_hybrid_targets": [],
+            }
+        )
+        write_json(trace_path, trace_payload)
+        session_path = workspace.query_sessions_dir / f"{trace['session_id']}.json"
+        session_payload = read_json(session_path)
+        session_payload.update(
+            {
+                "status": "ready",
+                "published_artifacts_sufficient": True,
+                "source_escalation_required": False,
+                "source_escalation_reason": None,
+            }
+        )
+        write_json(session_path, session_payload)
+        update_conversation_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            updates={
+                "attached_shared_job_ids": [],
+                "hybrid_refresh_job_ids": [],
+                "hybrid_refresh_triggered": False,
+                "hybrid_refresh_sources": [],
+                "hybrid_refresh_snapshot_id": None,
+                "hybrid_refresh_completion_status": None,
+                "hybrid_refresh_summary": None,
+                "published_artifacts_sufficient": True,
+                "source_escalation_required": False,
+                "source_escalation_reason": None,
+                "status": "prepared",
+                "turn_state": "prepared",
+            },
+        )
+
+        with self.assertRaises(ValueError) as blocked_commit:
+            complete_ask_turn(
+                workspace,
+                conversation_id=turn["conversation_id"],
+                turn_id=turn["turn_id"],
+                inner_workflow_id="grounded-answer",
+                session_ids=[trace["session_id"]],
+                trace_ids=[trace["trace_id"]],
+                answer_file_path=turn["answer_file_path"],
+                response_excerpt="The scanned workflow page shows a governed multimodal diagram.",
+                status="answered",
+            )
+        self.assertIn(job_id, str(blocked_commit.exception))
+        run_state = load_run_state(workspace, turn["run_id"])
+        self.assertIn(job_id, run_state["attached_shared_job_ids"])
+
+        settle_lane_c_shared_refresh(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            job_id=job_id,
+            completion_status="covered",
+            summary={"detail": "The multimodal refresh covered the missing source scope."},
+        )
+        update_conversation_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            updates={"attached_shared_job_ids": []},
+        )
+        session_payload["recorded_at"] = "2100-01-01T00:00:00Z"
+        write_json(session_path, session_payload)
+        trace_payload["recorded_at"] = "2100-01-01T00:00:01Z"
+        write_json(trace_path, trace_payload)
+
+        complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            session_ids=[trace["session_id"]],
+            trace_ids=[trace["trace_id"]],
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="The scanned workflow page shows a governed multimodal diagram.",
+            status="answered",
+        )
+        committed_turn = load_turn_record(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+        )
+        self.assertIn(job_id, committed_turn["attached_shared_job_ids"])
+
+    def test_run_suite_replays_confirmation_decline_ask_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        self.create_pdf(workspace.source_dir / "fresh.pdf")
+
+        def fake_sync(_paths: WorkspacePaths, assume_yes: bool = False, **kwargs: object) -> CommandReport:
+            if assume_yes:
+                raise AssertionError("Decline replay should not approve the sync job.")
+            run_id = kwargs.get("run_id")
+            owner = kwargs.get("owner")
+            job = ensure_shared_job(
+                workspace,
+                job_key="sync:evaluation:decline",
+                job_family="sync",
+                criticality="answer-critical",
+                scope={"workspace_root": str(workspace.root)},
+                input_signature="sync:evaluation:decline",
+                owner=owner if isinstance(owner, dict) else {"kind": "run", "id": "eval"},
+                run_id=str(run_id) if isinstance(run_id, str) else None,
+                requires_confirmation=True,
+                confirmation_kind="material-sync",
+                confirmation_prompt=(
+                    "A large unpublished workspace change set was detected. Build or refresh the "
+                    "knowledge base now before continuing this question?"
+                ),
+                confirmation_reason="changed_total=1 >= 1",
+            )
+            return CommandReport(
+                1,
+                {
+                    "status": "action-required",
+                    "sync_status": "awaiting-confirmation",
+                    "detail": "Material sync confirmation is required.",
+                    "published": False,
+                    "control_plane": shared_job_control_plane_payload(
+                        job["manifest"],
+                        next_command="docmason sync --yes",
+                        state="awaiting-confirmation",
+                    ),
+                },
+                [],
+            )
+
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-confirmation-decline",
+                    family="ask-confirmation",
+                    question="What do the latest documents say after the newest local updates?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                        needs_latest_workspace_state=True,
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="abstained",
+                    expected_support_basis="governed-boundary",
+                    reference_facts=["Declining confirmation should settle the same canonical turn."],
+                    continuations=[{"message": "no"}],
+                    expectations={
+                        "final_turn_status": "completed",
+                        "reused_turn": True,
+                        "auto_sync_triggered": True,
+                        "query_session_count": 0,
+                        "trace_count": 0,
+                        "required_run_events": [
+                            "preanswer-governance-started",
+                            "shared-job-declined",
+                            "shared-job-settled",
+                            "projection-refreshed",
+                        ],
+                    },
+                )
+            ],
+        )
+
+        with mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync):
+            run_payload = run_evaluation_suite(
+                workspace,
+                suite_path=suite_path,
+                rubric_path=rubric_path,
+                judge_trials_path=judge_path,
+                run_label="Ask confirmation decline",
+            )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        case = run_payload["cases"][0]
+        self.assertEqual(case["execution"]["result"]["turn_status"], "completed")
+        self.assertEqual(case["execution"]["result"]["support_basis"], "governed-boundary")
+        self.assertIn("answer_file", case["artifact_paths"])
+
+    def test_run_suite_replays_confirmation_approve_ask_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        self.create_pdf(workspace.source_dir / "fresh.pdf")
+        shared_job_id: str | None = None
+
+        def fake_sync(_paths: WorkspacePaths, assume_yes: bool = False, **kwargs: object) -> CommandReport:
+            nonlocal shared_job_id
+            run_id = kwargs.get("run_id")
+            owner = kwargs.get("owner")
+            if not assume_yes:
+                job = ensure_shared_job(
+                    workspace,
+                    job_key="sync:evaluation:approve",
+                    job_family="sync",
+                    criticality="answer-critical",
+                    scope={"workspace_root": str(workspace.root)},
+                    input_signature="sync:evaluation:approve",
+                    owner=owner if isinstance(owner, dict) else {"kind": "run", "id": "eval"},
+                    run_id=str(run_id) if isinstance(run_id, str) else None,
+                    requires_confirmation=True,
+                    confirmation_kind="material-sync",
+                    confirmation_prompt=(
+                        "A large unpublished workspace change set was detected. Build or refresh the "
+                        "knowledge base now before continuing this question?"
+                    ),
+                    confirmation_reason="changed_total=1 >= 1",
+                )
+                shared_job_id = str(job["manifest"]["job_id"])
+                return CommandReport(
+                    1,
+                    {
+                        "status": "action-required",
+                        "sync_status": "awaiting-confirmation",
+                        "detail": "Material sync confirmation is required.",
+                        "published": False,
+                        "control_plane": shared_job_control_plane_payload(
+                            job["manifest"],
+                            next_command="docmason sync --yes",
+                            state="awaiting-confirmation",
+                        ),
+                    },
+                    [],
+                )
+            if not isinstance(shared_job_id, str) or not shared_job_id:
+                raise AssertionError("The confirmation job was not created before approval.")
+            complete_shared_job(
+                workspace,
+                shared_job_id,
+                result={"status": "completed", "detail": "Operator-eval test sync completed."},
+            )
+            write_json(
+                workspace.current_publish_manifest_path,
+                {
+                    "snapshot_id": "snapshot-confirm-approve",
+                    "published_at": "2026-03-28T00:10:00Z",
+                },
+            )
+            write_json(
+                workspace.sync_state_path,
+                {
+                    "published_source_signature": source_inventory_signature(workspace),
+                    "last_publish_at": "2026-03-28T00:10:00Z",
+                    "last_sync_at": "2026-03-28T00:10:00Z",
+                },
+            )
+            return CommandReport(
+                0,
+                {
+                    "status": "ready",
+                    "sync_status": "valid",
+                    "detail": "Published.",
+                    "published": True,
+                    "change_set": {"stats": {}},
+                    "auto_repairs": {"repair_count": 0},
+                    "auto_authoring": {"authored_count": 0},
+                    "autonomous_steps": [],
+                },
+                [],
+            )
+
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-confirmation-approve",
+                    family="ask-confirmation",
+                    question="What do the latest documents say about the architecture operating model?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                        needs_latest_workspace_state=True,
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids[0]],
+                    required_sources_or_units=[source_ids[0]],
+                    minimum_support_overlap=1,
+                    reference_facts=["Approving confirmation should resume the same canonical turn."],
+                    continuations=[{"message": "yes"}],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "reused_turn": True,
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                        "required_run_events": [
+                            "preanswer-governance-started",
+                            "shared-job-approved",
+                            "trace-completed",
+                            "admissibility-passed",
+                            "projection-refreshed",
+                        ],
+                    },
+                )
+            ],
+        )
+
+        with mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync):
+            run_payload = run_evaluation_suite(
+                workspace,
+                suite_path=suite_path,
+                rubric_path=rubric_path,
+                judge_trials_path=judge_path,
+                run_label="Ask confirmation approve",
+            )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        case = run_payload["cases"][0]
+        self.assertTrue(case["execution"]["reused_turn"])
+        self.assertEqual(case["execution"]["result"]["answer_state"], "grounded")
+
+    def test_run_suite_replays_auto_prepare_and_auto_sync_ask_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        self.create_pdf(workspace.source_dir / "fresh.pdf")
+        workspace.bootstrap_state_path.unlink()
+
+        def fake_prepare(*args: object, **kwargs: object) -> CommandReport:
+            del args, kwargs
+            seed_self_contained_bootstrap_state(
+                workspace,
+                prepared_at="2026-03-28T00:00:00Z",
+            )
+            return CommandReport(
+                0,
+                {
+                    "status": "ready",
+                    "actions_performed": ["Refreshed bootstrap marker."],
+                    "actions_skipped": [],
+                    "next_steps": [],
+                    "environment": {
+                        "package_manager": "uv",
+                        "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                    },
+                },
+                [],
+            )
+
+        def fake_sync(*args: object, **kwargs: object) -> CommandReport:
+            del args, kwargs
+            write_json(
+                workspace.current_publish_manifest_path,
+                {
+                    "snapshot_id": "snapshot-auto-prepare-eval",
+                    "published_at": "2026-03-28T00:05:00Z",
+                },
+            )
+            write_json(
+                workspace.sync_state_path,
+                {
+                    "published_source_signature": source_inventory_signature(workspace),
+                    "last_publish_at": "2026-03-28T00:05:00Z",
+                    "last_sync_at": "2026-03-28T00:05:00Z",
+                },
+            )
+            return CommandReport(
+                0,
+                {
+                    "status": "ready",
+                    "sync_status": "valid",
+                    "detail": "Published.",
+                    "published": True,
+                    "change_set": {"stats": {}},
+                    "auto_repairs": {"repair_count": 0},
+                    "auto_authoring": {"authored_count": 0},
+                    "autonomous_steps": [],
+                },
+                [],
+            )
+
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-auto-prepare-auto-sync",
+                    family="ask-auto-repair",
+                    question="What do the latest documents say about the architecture operating model?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                        needs_latest_workspace_state=True,
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids[0]],
+                    required_sources_or_units=[source_ids[0]],
+                    minimum_support_overlap=1,
+                    reference_facts=["The replay should auto-prepare and auto-sync before answering."],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "auto_prepare_triggered": True,
+                        "auto_sync_triggered": True,
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                        "required_run_events": [
+                            "preanswer-governance-started",
+                            "ask-prepared",
+                            "trace-completed",
+                            "admissibility-passed",
+                            "projection-refreshed",
+                        ],
+                    },
+                )
+            ],
+        )
+
+        with (
+            mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare),
+            mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
+        ):
+            run_payload = run_evaluation_suite(
+                workspace,
+                suite_path=suite_path,
+                rubric_path=rubric_path,
+                judge_trials_path=judge_path,
+                run_label="Ask auto prepare sync",
+            )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        case = run_payload["cases"][0]
+        self.assertTrue(case["execution"]["result"]["auto_prepare_triggered"])
+        self.assertTrue(case["execution"]["result"]["auto_sync_triggered"])
+
+    def test_run_suite_replays_lane_c_blocked_ask_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+        self.create_pdf(workspace.source_dir / "control.pdf")
+        source_ids = self.publish_seeded_scanned_corpus(workspace)
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=list(source_ids.values()),
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-lane-c-blocked",
+                    family="ask-lane-c",
+                    question="What is shown on the scanned workflow page image?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                        evidence_requirements={
+                            "preferred_channels": ["render", "structure"],
+                            "inspection_scope": "unit",
+                            "prefer_published_artifacts": True,
+                        },
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="abstained",
+                    expected_support_basis="governed-boundary",
+                    expected_primary_sources=[source_ids["scan"]],
+                    required_sources_or_units=[source_ids["scan"]],
+                    minimum_support_overlap=1,
+                    reference_facts=["A blocked Lane C refresh should settle the same turn honestly."],
+                    answer_plan={
+                        "answer_text": (
+                            "The scanned workflow page appears to show a process diagram, but the "
+                            "current published artifacts are insufficient for a reliable semantic answer."
+                        ),
+                        "trace_top": 2,
+                    },
+                    hybrid_refresh={
+                        "completion_status": "blocked",
+                        "summary": {
+                            "detail": "The required multimodal source refresh could not continue safely."
+                        },
+                    },
+                    expectations={
+                        "final_turn_status": "completed",
+                        "hybrid_refresh_triggered": True,
+                        "hybrid_refresh_completion_status": "blocked",
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                        "required_run_events": [
+                            "preanswer-governance-started",
+                            "shared-job-waiting",
+                            "shared-job-settled",
+                            "projection-refreshed",
+                        ],
+                    },
+                )
+            ],
+        )
+
+        run_payload = run_evaluation_suite(
+            workspace,
+            suite_path=suite_path,
+            rubric_path=rubric_path,
+            judge_trials_path=judge_path,
+            run_label="Ask lane c blocked",
+        )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        case = run_payload["cases"][0]
+        self.assertTrue(case["execution"]["result"]["hybrid_refresh_triggered"])
+        self.assertEqual(
+            case["execution"]["result"]["hybrid_refresh_completion_status"],
+            "blocked",
+        )
+        self.assertIn("hybrid_refresh_work", case["artifact_paths"])
+        self.assertIn("shared_job_01_manifest", case["artifact_paths"])
+
+    def test_run_suite_replays_lane_c_covered_ask_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+        self.create_pdf(workspace.source_dir / "control.pdf")
+        source_ids = self.publish_seeded_scanned_corpus(workspace)
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=list(source_ids.values()),
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-lane-c-covered",
+                    family="ask-lane-c",
+                    question="What is shown on the scanned workflow page image?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                        evidence_requirements={
+                            "preferred_channels": ["render", "structure"],
+                            "inspection_scope": "unit",
+                            "prefer_published_artifacts": True,
+                        },
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids["scan"]],
+                    required_sources_or_units=[source_ids["scan"]],
+                    minimum_support_overlap=1,
+                    reference_facts=["A covered Lane C refresh should rerun trace and then commit."],
+                    answer_plan={
+                        "answer_text": (
+                            "The scanned workflow page appears to show a process diagram, but the "
+                            "current published artifacts are insufficient for a reliable semantic answer."
+                        ),
+                        "trace_top": 2,
+                    },
+                    hybrid_refresh={
+                        "completion_status": "covered",
+                        "summary": {
+                            "covered_source_count": 1,
+                            "detail": "Governed multimodal refresh coverage was recorded for the source.",
+                        },
+                        "post_refresh_answer_text": (
+                            "The scanned workflow page shows a workflow-style process layout."
+                        ),
+                        "post_refresh_trace_top": 2,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "hybrid_refresh_triggered": True,
+                        "hybrid_refresh_completion_status": "covered",
+                        "query_session_count": 2,
+                        "trace_count": 2,
+                        "required_run_events": [
+                            "preanswer-governance-started",
+                            "shared-job-waiting",
+                            "shared-job-settled",
+                            "trace-completed",
+                            "admissibility-passed",
+                            "projection-refreshed",
+                        ],
+                    },
+                )
+            ],
+        )
+        real_trace_answer_file: Any = retrieval_module.trace_answer_file
+        trace_call_count = 0
+
+        def patched_trace_answer_file(*args: object, **kwargs: object) -> dict[str, object]:
+            nonlocal trace_call_count
+            trace_call_count += 1
+            payload: dict[str, object] = real_trace_answer_file(*args, **kwargs)
+            if trace_call_count != 2:
+                return payload
+            trace_path = workspace.retrieval_traces_dir / f"{payload['trace_id']}.json"
+            trace_payload = read_json(trace_path)
+            trace_payload.update(
+                {
+                    "status": "ready",
+                    "answer_state": "grounded",
+                    "support_basis": "kb-grounded",
+                    "published_artifacts_sufficient": True,
+                    "source_escalation_required": False,
+                    "source_escalation_reason": None,
+                    "recommended_hybrid_targets": [],
+                }
+            )
+            write_json(trace_path, trace_payload)
+            session_path = workspace.query_sessions_dir / f"{payload['session_id']}.json"
+            session_payload = read_json(session_path)
+            session_payload["status"] = "ready"
+            write_json(session_path, session_payload)
+            return {
+                **payload,
+                "status": "ready",
+                "answer_state": "grounded",
+                "support_basis": "kb-grounded",
+                "published_artifacts_sufficient": True,
+                "source_escalation_required": False,
+                "source_escalation_reason": None,
+                "recommended_hybrid_targets": [],
+            }
+
+        with mock.patch(
+            "docmason.retrieval.trace_answer_file",
+            side_effect=patched_trace_answer_file,
+        ):
+            run_payload = run_evaluation_suite(
+                workspace,
+                suite_path=suite_path,
+                rubric_path=rubric_path,
+                judge_trials_path=judge_path,
+                run_label="Ask lane c covered",
+            )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        case = run_payload["cases"][0]
+        self.assertEqual(
+            case["execution"]["result"]["hybrid_refresh_completion_status"],
+            "covered",
+        )
+        self.assertEqual(case["execution"]["result"]["answer_state"], "grounded")
+        self.assertIn("hybrid_refresh_work", case["artifact_paths"])
+        self.assertIn("retrieval_trace_02", case["artifact_paths"])
 
     def test_aggregate_case_rubric_uses_median_and_flags_large_spread(self) -> None:
         case = {

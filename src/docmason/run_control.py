@@ -38,7 +38,11 @@ def run_commit_path(paths: WorkspacePaths, run_id: str) -> Path:
 
 def load_run_state(paths: WorkspacePaths, run_id: str) -> dict[str, Any]:
     """Load one run state when it exists."""
-    return read_json(run_state_path(paths, run_id))
+    payload = read_json(run_state_path(paths, run_id))
+    if not payload:
+        return {}
+    payload.setdefault("log_origin", None)
+    return payload
 
 
 def capability_profile(paths: WorkspacePaths) -> dict[str, Any]:
@@ -144,7 +148,12 @@ def record_run_event_for_runs(
         )
 
 
-def update_run_state(paths: WorkspacePaths, *, run_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+def update_run_state(
+    paths: WorkspacePaths,
+    *,
+    run_id: str,
+    updates: dict[str, Any],
+) -> dict[str, Any]:
     """Merge updates into one run state."""
     state = load_run_state(paths, run_id)
     if not state:
@@ -211,8 +220,8 @@ def refresh_turn_run_version_truth(
     run_id: str | None,
 ) -> dict[str, Any]:
     """Refresh the active run and turn version truth from current published state."""
-    from .conversation import update_conversation_turn
     from .control_plane import workspace_state_ref
+    from .conversation import update_conversation_turn
 
     refreshed_context = version_context(paths)
     if isinstance(run_id, str) and run_id and load_run_state(paths, run_id):
@@ -243,8 +252,8 @@ def ensure_run_for_turn(
     run_origin: str | None = None,
 ) -> dict[str, Any]:
     """Create or reuse the governed run for one canonical turn."""
-    from .conversation import load_turn_record, update_conversation_turn, utc_now
     from .control_plane import workspace_state_ref
+    from .conversation import load_turn_record, update_conversation_turn, utc_now
 
     turn: dict[str, Any] = {}
     try:
@@ -252,7 +261,11 @@ def ensure_run_for_turn(
     except KeyError:
         turn = {}
     existing_run_id = turn.get("active_run_id") or turn.get("committed_run_id")
-    if isinstance(existing_run_id, str) and existing_run_id and load_run_state(paths, existing_run_id):
+    if (
+        isinstance(existing_run_id, str)
+        and existing_run_id
+        and load_run_state(paths, existing_run_id)
+    ):
         existing_state = load_run_state(paths, existing_run_id)
         requested_origin = normalize_run_origin(run_origin)
         effective_origin = stronger_run_origin(existing_state.get("run_origin"), requested_origin)
@@ -285,6 +298,7 @@ def ensure_run_for_turn(
         "published_snapshot_id_used": None,
         "published_source_signature_used": None,
         "run_origin": normalize_run_origin(run_origin),
+        "log_origin": None,
     }
     run_dir(paths, run_id).mkdir(parents=True, exist_ok=True)
     write_json(run_state_path(paths, run_id), payload)
