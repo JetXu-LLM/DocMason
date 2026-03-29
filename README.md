@@ -6,13 +6,13 @@
   <p>
     <a href="https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip"><strong>Download DocMason</strong></a>
   </p>
+  <p><sub>Already paying for OpenAI? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included in your plan. Open DocMason inside Codex — and finally put your AI to work on your real private documents, not just chat prompts. Zero-to-working in minutes. <b>Unlock the full power of your subscription.</b></sub></p>
   <p>
     <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black?style=flat-square">
     <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square">
     <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square">
     <img alt="Status" src="https://img.shields.io/badge/status-pre--alpha-orange?style=flat-square">
   </p>
-  <p><sub>Already paying for OpenAI? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included in your plan. Open DocMason inside Codex — and finally put your AI to work on your real private documents, not just chat prompts. Zero-to-working in minutes. <b>Unlock the full power of your subscription.</b></sub></p>
 </div>
 
 Most workspace AI tools flatten your complex office documents into a single unstructured blob. When you ask a hard question, the answer sounds plausible — but it's impossible to trace back to reality.
