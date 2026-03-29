@@ -42,6 +42,7 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - reconcile any active native thread
    - keep native reconciliation in the native ledger and interaction-ingest path by default
    - open or reuse the canonical turn
+   - for adapter-owned or compatible host execution, use the repo-provided hidden canonical ask integration path rather than calling lifecycle helpers directly
    - keep canonical ask truth separate from native-ledger audit truth unless an explicit bridge or promotion is required
    - obtain the canonical answer-file path or composition bundle path
    - pass an agent-authored `semantic_analysis`
@@ -80,7 +81,9 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - runtime review request -> `runtime-log-review`
 6. Route into the chosen inner workflow and let it own the evidence loop.
    - keep workspace commands sequential inside the live turn
+   - do not treat `retrieve`, `trace`, or direct helper calls as a substitute for canonical ordinary ask execution
    - use published KB artifacts first when they already expose the needed evidence channels
+   - treat the published KB as the primary evidence surface: inspect retrieved text, structure, notes, media, and artifact metadata first, then inspect cited `focus_render_assets` or render spans when the question is genuinely visual or layout-sensitive, and only then consider governed refresh or source fallback
    - keep approximate or unresolved reference notices explicit
    - let the routed inner workflow own retrieval, trace, render inspection, and answer or composition drafting
    - if published artifacts are still insufficient because of hard-artifact semantic gaps, let the canonical routed path enter one governed narrowed hybrid refresh instead of improvising raw source fallback

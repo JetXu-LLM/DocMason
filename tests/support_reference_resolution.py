@@ -257,6 +257,168 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.assertEqual(report.payload["results"][0]["source_id"], resolved_source_id)
         self.assertTrue(any(line.startswith("Reference notice:") for line in report.lines))
 
+    def test_missing_explicit_source_hard_stops_retrieval(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_pdf_corpus(workspace)
+
+        report = retrieve_knowledge(
+            query=(
+                "Using only the document 'Missing Campaign Brief', summarize the architecture "
+                "strategy in 3 bullet points. Do not use any other source."
+            ),
+            top=5,
+            graph_hops=2,
+            include_renders=False,
+            paths=workspace,
+        )
+
+        self.assertEqual(report.exit_code, 2)
+        self.assertEqual(report.payload["results"], [])
+        self.assertEqual(report.payload["filters"]["source_ids"], [])
+        self.assertEqual(report.payload["reference_resolution"]["status"], "unresolved")
+        self.assertEqual(
+            report.payload["reference_resolution"]["unresolved_reason"],
+            "missing-source",
+        )
+        self.assertTrue(report.payload["reference_resolution"]["hard_boundary"])
+        self.assertFalse(report.payload["reference_resolution"]["continued_with_best_effort"])
+        self.assertIsNone(report.payload["reference_resolution"]["target_source_ref"])
+
+    def test_repo_relative_path_with_spaces_resolves_as_one_source_text(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "current_path": (
+                    "original_doc/Data service layer/"
+                    "China Data Service Layer Architecture design.pptx"
+                ),
+                "title": "China Data Service Layer Architecture design",
+                "prior_paths": [],
+                "path_history": [],
+            }
+        ]
+
+        result = resolve_reference_query(
+            (
+                "Using only original_doc/Data service layer/China Data Service Layer "
+                "Architecture design.pptx, give 5 bullets on architecture scope."
+            ),
+            source_records=source_records,
+            unit_records=[],
+        )
+
+        self.assertEqual(result["status"], "exact")
+        self.assertEqual(
+            result["requested_source_text"],
+            "original_doc/Data service layer/China Data Service Layer Architecture design.pptx",
+        )
+        self.assertEqual(result["resolved_source_id"], "source-001")
+
+    def test_exact_source_title_does_not_invent_locator_approximation(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "current_path": "original_doc/Data service layer/design.pptx",
+                "title": "China Data Service Layer Architecture design",
+                "prior_paths": [],
+                "path_history": [],
+            }
+        ]
+        unit_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "unit_id": "slide-001",
+                "unit_type": "slide",
+                "logical_ordinal": 1,
+                "render_ordinal": 1,
+                "title": "Architecture Scope",
+                "locator_aliases": ["Architecture Scope"],
+            }
+        ]
+
+        result = resolve_reference_query(
+            (
+                'Using only the document "China Data Service Layer Architecture design", '
+                "give 5 bullets on architecture scope."
+            ),
+            source_records=source_records,
+            unit_records=unit_records,
+        )
+
+        self.assertEqual(result["status"], "exact")
+        self.assertEqual(result["source_match_status"], "exact")
+        self.assertEqual(result["unit_match_status"], "none")
+        self.assertIsNone(result["resolved_unit_id"])
+        self.assertIsNone(result["parsed_locator_ref"])
+        self.assertEqual(build_reference_resolution_summary(result), "exact-reference")
+
+    def test_sibling_exact_title_collision_stays_unresolved(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-one-page",
+                "source_family": "corpus",
+                "current_path": "original_doc/CUS/CUS Achievent 2025 one page.pdf",
+                "title": "CUS Achievent 2025 one page",
+                "prior_paths": [],
+                "path_history": [],
+            },
+            {
+                "source_id": "source-one",
+                "source_family": "corpus",
+                "current_path": "original_doc/CUS/CUS Achievent 2025 1.pdf",
+                "title": "CUS Achievent 2025 one",
+                "prior_paths": [],
+                "path_history": [],
+            },
+        ]
+
+        result = resolve_reference_query(
+            (
+                'Using only the document "CUS Achievent 2025 one page", extract 4 bullet '
+                'points. Do not use "CUS Achievent 2025 1" or any other source.'
+            ),
+            source_records=source_records,
+            unit_records=[],
+        )
+
+        self.assertEqual(result["status"], "unresolved")
+        self.assertEqual(result["source_match_status"], "unresolved")
+        self.assertEqual(result["unresolved_reason"], "ambiguous-source")
+        self.assertTrue(result["hard_boundary"])
+        self.assertIsNone(result["resolved_source_id"])
+
+    def test_prepare_turn_machine_guard_hardens_source_scoped_question(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_pdf_corpus(workspace)
+
+        turn = prepare_ask_turn(
+            workspace,
+            question=(
+                "Using only the document 'Campaign Planning Brief', summarize the architecture "
+                "strategy. Do not use any other source."
+            ),
+            semantic_analysis={
+                "question_class": "answer",
+                "question_domain": "external-factual",
+                "support_strategy": "web-first",
+                "route_reason": "Deliberately wrong host hint for Wave 3 guard coverage.",
+            },
+        )
+
+        self.assertEqual(turn["question_domain"], "workspace-corpus")
+        self.assertEqual(turn["support_strategy"], "kb-first")
+        self.assertTrue(turn["reference_resolution"]["analysis_guard_applied"])
+        self.assertEqual(turn["source_scope_policy"]["scope_mode"], "source-scoped-hard")
+
     def test_exact_source_with_soft_locator_still_filters_to_source_only(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -951,7 +1113,8 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.mark_environment_ready(workspace)
         self.create_pdf(workspace.source_dir / "a.pdf", page_count=2)
         self.create_pdf(workspace.source_dir / "b.pdf")
-        self.publish_seeded_pdf_corpus(workspace)
+        source_ids = self.publish_seeded_pdf_corpus(workspace)
+        deck_source_id = source_ids["original_doc/a.pdf"]
 
         turn = prepare_ask_turn(
             workspace,
@@ -963,6 +1126,7 @@ class ReferenceResolutionTests(unittest.TestCase):
             },
         )
         self.assertEqual(turn["reference_resolution"]["status"], "exact")
+        self.assertEqual(turn["source_scope_policy"]["scope_mode"], "source-scoped-soft")
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
             "The exact visual detail remains unresolved without inspecting the render.\n",
@@ -977,6 +1141,14 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.assertIn("reference_resolution", trace_report.payload)
         self.assertEqual(
             trace_report.payload["reference_resolution"]["resolved_unit_id"], "page-002"
+        )
+        self.assertEqual(
+            trace_report.payload["source_scope_policy"]["target_source_id"],
+            deck_source_id,
+        )
+        self.assertEqual(
+            trace_report.payload["supporting_source_ids"],
+            [deck_source_id],
         )
 
         updated = complete_ask_turn(
@@ -994,7 +1166,81 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.assertEqual(updated["reference_resolution"]["resolved_unit_id"], "page-002")
         self.assertEqual(updated["reference_resolution_summary"], "exact-reference")
 
+    def test_commit_rejects_grounded_source_scope_without_target_support(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_pdf_corpus(workspace)
+        target_source_id = source_ids["original_doc/a.pdf"]
+        distractor_source_id = source_ids["original_doc/b.pdf"]
+
+        turn = prepare_ask_turn(
+            workspace,
+            question=(
+                "Using only the document 'Campaign Planning Brief', summarize the architecture "
+                "strategy. Do not use any other source."
+            ),
+            semantic_analysis={
+                "question_class": "answer",
+                "question_domain": "workspace-corpus",
+                "route_reason": "Wave 3 commit-guard test.",
+            },
+        )
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The architecture strategy connects the operating model to implementation.\n",
+            encoding="utf-8",
+        )
+        trace_report = trace_knowledge(
+            answer_file=turn["answer_file_path"],
+            top=1,
+            paths=workspace,
+        )
+        trace_path = workspace.retrieval_traces_dir / f"{trace_report.payload['trace_id']}.json"
+        trace_payload = read_json(trace_path)
+        trace_payload["answer_state"] = "grounded"
+        trace_payload["kb_answer_state"] = "grounded"
+        trace_payload["supporting_source_ids"] = [distractor_source_id]
+        trace_payload["canonical_support_summary"] = {
+            "scope_mode": "source-scoped-hard",
+            "target_source_id": target_source_id,
+            "target_source_ref": trace_payload["reference_resolution"]["target_source_ref"],
+            "source_scope_satisfied": False,
+            "support_layers_present": ["kb"],
+            "supporting_source_ids": [distractor_source_id],
+            "supporting_unit_ids": [],
+            "supporting_artifact_ids": [],
+            "segment_truth_counts": {
+                "grounded": 1,
+                "partially_grounded": 0,
+                "unresolved": 0,
+            },
+            "mixed_support_explainable": True,
+        }
+        write_json(trace_path, trace_payload)
+
+        with self.assertRaisesRegex(ValueError, "source scope"):
+            complete_ask_turn(
+                workspace,
+                conversation_id=turn["conversation_id"],
+                turn_id=turn["turn_id"],
+                inner_workflow_id="grounded-answer",
+                trace_ids=[trace_report.payload["trace_id"]],
+                answer_file_path=turn["answer_file_path"],
+                response_excerpt=(
+                    "The architecture strategy connects the operating model to "
+                    "implementation."
+                ),
+                status="answered",
+            )
+
     def test_trace_cli_surface_remains_id_first(self) -> None:
         parser = build_parser()
         with self.assertRaises(SystemExit):
             parser.parse_args(["trace", "--source-ref", "Platform Review slide 35"])
+
+    def test_cli_parser_accepts_hidden_ask_subcommand(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["_ask"])
+        self.assertEqual(args.command, "_ask")

@@ -451,7 +451,7 @@ def resolve_canonical_turn_support(
     paths: WorkspacePaths,
     *,
     turn: dict[str, Any],
-) -> dict[str, list[str]]:
+) -> dict[str, Any]:
     """Return the final canonical trace-owned support set for one committed turn."""
     trace_ids = [
         value for value in turn.get("trace_ids", []) if isinstance(value, str) and value
@@ -460,6 +460,7 @@ def resolve_canonical_turn_support(
     supporting_source_ids: list[str] = []
     supporting_unit_ids: list[str] = []
     supporting_artifact_ids: list[str] = []
+    canonical_support_summary: dict[str, Any] | None = None
     for trace_id in trace_ids:
         payload = read_json(paths.retrieval_traces_dir / f"{trace_id}.json")
         if not payload:
@@ -482,12 +483,15 @@ def resolve_canonical_turn_support(
             for value in payload.get("supporting_artifact_ids", [])
             if isinstance(value, str) and value
         )
+        if isinstance(payload.get("canonical_support_summary"), dict):
+            canonical_support_summary = dict(payload["canonical_support_summary"])
     return {
         "trace_ids": list(dict.fromkeys(trace_ids)),
         "session_ids": list(dict.fromkeys(session_ids)),
         "supporting_source_ids": list(dict.fromkeys(supporting_source_ids)),
         "supporting_unit_ids": list(dict.fromkeys(supporting_unit_ids)),
         "supporting_artifact_ids": list(dict.fromkeys(supporting_artifact_ids)),
+        "canonical_support_summary": canonical_support_summary or {},
     }
 
 
@@ -580,8 +584,17 @@ def _candidate_priority(
     conversation_id: str | None,
     log_origin: str | None,
     feedback_match_count: int,
+    source_scope_satisfied: bool,
+    render_required: bool,
+    degraded_answer_state: str | None,
 ) -> str:
-    if conversation_id and log_origin == "interactive-ask":
+    if (
+        source_scope_satisfied
+        and render_required is False
+        and degraded_answer_state != "unresolved"
+    ):
+        base = "low"
+    elif conversation_id and log_origin == "interactive-ask":
         base = "high"
     elif conversation_id:
         base = "medium"
@@ -770,6 +783,7 @@ def build_benchmark_candidates(
                 "feedback_match_count": 0,
                 "reference_resolution_summary": None,
                 "canonical_support": canonical_support,
+                "candidate_gate_reason": None,
             }
             if isinstance(conversation_record, dict):
                 group["conversation_path"] = conversation_record["conversation_path"]
@@ -837,6 +851,14 @@ def build_benchmark_candidates(
         trace_ids = list(
             dict.fromkeys(item for item in group["trace_ids"] if isinstance(item, str))
         )
+        canonical_support = (
+            group["canonical_support"] if isinstance(group.get("canonical_support"), dict) else {}
+        )
+        canonical_support_summary: dict[str, Any] = (
+            dict(canonical_support["canonical_support_summary"])
+            if isinstance(canonical_support.get("canonical_support_summary"), dict)
+            else {}
+        )
         candidate_priority = _candidate_priority(
             conversation_id=(
                 group["conversation_id"]
@@ -845,7 +867,34 @@ def build_benchmark_candidates(
             ),
             log_origin=group["log_origin"] if isinstance(group["log_origin"], str) else None,
             feedback_match_count=int(group["feedback_match_count"]),
+            source_scope_satisfied=bool(
+                canonical_support_summary.get("source_scope_satisfied")
+            ),
+            render_required=bool(group["requires_render_inspection"]),
+            degraded_answer_state=(
+                str(group.get("suggested_expected_answer_state"))
+                if isinstance(group.get("suggested_expected_answer_state"), str)
+                else None
+            ),
         )
+        should_admit = bool(group["requires_render_inspection"]) or (
+            str(group.get("suggested_expected_answer_state") or "") == "unresolved"
+        )
+        if not should_admit and _question_mentions_ambiguity(str(group["original_user_question"])):
+            should_admit = True
+            group["candidate_gate_reason"] = "ambiguity-or-contradiction"
+        if (
+            not should_admit
+            and group.get("support_basis") == "mixed"
+            and not bool(canonical_support_summary.get("mixed_support_explainable"))
+        ):
+            should_admit = True
+            group["candidate_gate_reason"] = "mixed-support-unexplained"
+        if not should_admit and int(group["feedback_match_count"]) > 0:
+            should_admit = True
+            group["candidate_gate_reason"] = "explicit-feedback"
+        if not should_admit:
+            continue
         candidate: dict[str, Any] = {
             "candidate_id": group["candidate_id"],
             "recorded_at": group["recorded_at"],
@@ -872,11 +921,9 @@ def build_benchmark_candidates(
             "reason": group["reason"],
             "support_basis": group.get("support_basis"),
             "candidate_source": group.get("candidate_source"),
+            "candidate_gate_reason": group.get("candidate_gate_reason"),
             **group["question_context"],
         }
-        canonical_support = (
-            group["canonical_support"] if isinstance(group.get("canonical_support"), dict) else {}
-        )
         if (
             isinstance(group.get("candidate_source"), str)
             and group["candidate_source"] == "committed-turn"
@@ -886,6 +933,10 @@ def build_benchmark_candidates(
             candidate["supporting_artifact_ids"] = canonical_support.get(
                 "supporting_artifact_ids",
                 [],
+            )
+            candidate["canonical_support_summary"] = canonical_support_summary
+            candidate["source_scope_satisfied"] = canonical_support_summary.get(
+                "source_scope_satisfied"
             )
         if isinstance(group.get("reference_resolution_summary"), str):
             candidate["reference_resolution_summary"] = group["reference_resolution_summary"]
@@ -1427,6 +1478,10 @@ def build_answer_history_index(paths: WorkspacePaths) -> dict[str, Any]:
                     "support_basis": turn.get("support_basis"),
                     "answer_state": turn.get("answer_state"),
                     "answer_file_path": answer_file_path,
+                    "canonical_support_summary": canonical_support.get(
+                        "canonical_support_summary",
+                        {},
+                    ),
                     "kb_source_ids": canonical_support["supporting_source_ids"],
                     "kb_unit_ids": canonical_support["supporting_unit_ids"],
                     "kb_artifact_ids": canonical_support["supporting_artifact_ids"],

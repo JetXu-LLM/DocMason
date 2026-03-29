@@ -13,13 +13,18 @@ from .control_plane import (
     shared_job_is_settled,
 )
 from .conversation import load_turn_record
+from .front_controller import load_support_manifest
 from .project import WorkspacePaths, read_json
 from .run_control import load_run_state
+from .truth_boundary import (
+    answer_mentions_illegal_machine_path,
+    normalize_repo_relative_source_path,
+    support_manifest_is_local_corpus,
+)
 
 ILLEGAL_WORK_AREA_MARKERS = (
     "knowledge_base/staging/",
     "knowledge_base/.staging-build/",
-    "original_doc/",
 )
 
 
@@ -123,6 +128,7 @@ def evaluate_commit_admissibility(
         else load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
     )
     issues: list[str] = []
+    issue_codes: list[str] = []
     effective_run_id = str(run_id or turn.get("active_run_id") or "")
     run_state = load_run_state(paths, effective_run_id) if effective_run_id else {}
     if not effective_run_id or str(turn.get("active_run_id") or "") != effective_run_id:
@@ -247,16 +253,23 @@ def evaluate_commit_admissibility(
             f"latest ask-owned {latest_gap_source} still records an unresolved "
             "hard-artifact or governed multimodal gap."
         )
+        issue_codes.append("published-artifacts-gap")
     if latest_gap_source and turn.get("source_escalation_required") is False:
         issues.append(
             "Final turn clears source escalation even though the latest ask-owned "
             f"{latest_gap_source} still requires escalation."
         )
+        issue_codes.append("source-escalation-required")
     if support_basis in {"kb-grounded", "mixed"}:
         if not effective_trace_ids or not trace_payload:
             issues.append("Canonical grounded ask commits require an ask-owned trace.")
         elif not isinstance(trace_version_context, dict):
             issues.append("KB-grounded commits require trace version truth.")
+    trace_summary_payload = trace_payload.get("canonical_support_summary")
+    trace_summary = dict(trace_summary_payload) if isinstance(trace_summary_payload, dict) else {}
+    issue_codes = list(dict.fromkeys(issue_codes))
+    if support_basis in {"kb-grounded", "mixed"} and (not effective_trace_ids or not trace_payload):
+        issue_codes.append("missing-ask-owned-trace")
     if (
         trace_payload
         and isinstance(run_version_context, dict)
@@ -348,10 +361,70 @@ def evaluate_commit_admissibility(
                         issues.append(
                             f"Canonical answer text references work-area path `{marker}`."
                         )
+                        issue_codes.append("illegal-source-citation-path")
                         break
+                if answer_mentions_illegal_machine_path(answer_text):
+                    issues.append("Canonical answer text exposes an absolute machine path.")
+                    issue_codes.append("illegal-source-citation-path")
+                if "original_doc/" in answer_text:
+                    for token in answer_text.split():
+                        if "original_doc/" not in token:
+                            continue
+                        normalized_path = token.strip("`()[]{}<>,.;:!?'\"")
+                        if normalize_repo_relative_source_path(normalized_path) is None:
+                            issues.append(
+                                "Canonical answer text references a non-canonical source path."
+                            )
+                            issue_codes.append("illegal-source-citation-path")
+                            break
     if support_basis in {"external-source-verified", "mixed"}:
         if not isinstance(support_manifest_path, str) or not support_manifest_path:
             issues.append(f"support_basis `{support_basis}` requires a support manifest.")
+            if support_basis == "mixed":
+                issue_codes.append("mixed-support-unexplained")
+    support_manifest = load_support_manifest(
+        paths,
+        support_manifest_path_value=support_manifest_path,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+    )
+    if support_basis == "external-source-verified" and support_manifest_is_local_corpus(
+        support_manifest
+    ):
+        issues.append(
+            "Local first-class corpus support may not be committed as "
+            "`external-source-verified`."
+        )
+        issue_codes.append("illegal-local-external-support")
+    segment_truth_counts = trace_summary.get("segment_truth_counts")
+    if (
+        answer_state == "grounded"
+        and support_basis in {"kb-grounded", "mixed", None}
+        and isinstance(segment_truth_counts, dict)
+        and int(segment_truth_counts.get("unresolved", 0)) > 0
+    ):
+        issues.append(
+            "Top-level answer_state is grounded even though the canonical trace still "
+            "contains unresolved segments."
+        )
+        issue_codes.append("trace-answer-state-mismatch")
+    if (
+        str(trace_summary.get("scope_mode") or "global")
+        in {"source-scoped-soft", "source-scoped-hard"}
+        and answer_state == "grounded"
+        and not bool(trace_summary.get("source_scope_satisfied"))
+    ):
+        issues.append(
+            "The final canonical support does not satisfy the turn's source scope."
+        )
+        issue_codes.append("source-scope-missing-target-support")
+    if (
+        support_basis == "mixed"
+        and trace_summary
+        and not bool(trace_summary.get("mixed_support_explainable"))
+    ):
+        issues.append("Mixed support lacks an explainable canonical support breakdown.")
+        issue_codes.append("mixed-support-unexplained")
     if answer_state == "abstained" and support_basis == "governed-boundary":
         pass
     allowed = not issues
@@ -359,5 +432,7 @@ def evaluate_commit_admissibility(
         "allowed": allowed,
         "reason": None if allowed else issues[0],
         "issues": issues,
+        "primary_issue_code": issue_codes[0] if issue_codes else None,
+        "issue_codes": list(dict.fromkeys(issue_codes)),
         "run_id": effective_run_id or None,
     }

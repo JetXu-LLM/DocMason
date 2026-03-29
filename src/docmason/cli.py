@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 
 from .commands import (
@@ -17,6 +18,7 @@ from .commands import (
     trace_knowledge,
     validate_knowledge_base,
 )
+from .host_integration import run_hidden_ask_cli
 from .project import SUPPORTED_DOCUMENT_TYPES
 
 
@@ -182,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
         "event_name",
         help="Hook event name (session, prompt-submit, post-tool-use, stop).",
     )
+    subparsers.add_parser("_ask", help=argparse.SUPPRESS)
     return parser
 
 
@@ -231,6 +234,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .hooks import run_hook_cli
 
         return run_hook_cli(args.event_name)
+    if args.command == "_ask":
+        return run_hidden_ask_cli(sys.stdin.read())
 
     parser.error(f"Unsupported command: {args.command}")
     return 1

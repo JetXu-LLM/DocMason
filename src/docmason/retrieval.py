@@ -54,6 +54,15 @@ from .source_references import (
     normalize_unit_record_reference,
     resolve_reference_query,
 )
+from .truth_boundary import (
+    build_canonical_support_summary,
+    build_source_scope_policy,
+    result_direct_support_score,
+    result_is_canonical_support,
+    segment_scope_satisfied,
+    support_manifest_is_local_corpus,
+    trace_issue_codes,
+)
 
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z]+|[\u4e00-\u9fff]+")
 SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?。！？])\s+")
@@ -3128,22 +3137,57 @@ def retrieve_corpus(
         source_records=retrieval_data["source_records"],
         unit_records=retrieval_data["unit_records"],
     )
+    source_scope_policy = build_source_scope_policy(
+        question=query,
+        question_class=None,
+        question_domain=effective_question_domain,
+        reference_resolution=reference_resolution,
+    )
     effective_source_ids = _effective_source_ids_from_reference(
         source_ids,
         reference_resolution,
     )
-    payload = run_retrieval_query(
-        retrieval_data,
-        query=query,
-        top=top,
-        graph_hops=graph_hops,
-        document_types=document_types,
-        source_ids=effective_source_ids,
-        include_renders=include_renders,
-        question_domain=effective_question_domain,
-        evidence_requirements=evidence_requirements,
-        reference_resolution=reference_resolution,
-    )
+    if bool(reference_resolution.get("hard_boundary")) and not reference_resolution.get(
+        "resolved_source_id"
+    ):
+        payload = {
+            "query": query,
+            "results": [],
+            "result_count": 0,
+            "strategy": {
+                "strategy_id": RETRIEVAL_STRATEGY_ID,
+                "mode": "lexical-plus-graph",
+                "graph_hops": graph_hops,
+                "question_domain": effective_question_domain,
+                "memory_profile": memory_profile,
+                "field_weights": FIELD_WEIGHTS,
+                "graph_strength_weights": GRAPH_STRENGTH_WEIGHTS,
+            },
+            "corpus_signature": retrieval_data["manifest"].get("source_signature"),
+            "evidence_requirements": _effective_evidence_requirements(
+                evidence_requirements,
+                question_domain=effective_question_domain,
+            ),
+            "inspection_scope": None,
+            "preferred_channels": [],
+            "matched_published_channels": [],
+            "published_artifacts_sufficient": False,
+            "source_escalation_required": False,
+            "source_escalation_reason": None,
+        }
+    else:
+        payload = run_retrieval_query(
+            retrieval_data,
+            query=query,
+            top=top,
+            graph_hops=graph_hops,
+            document_types=document_types,
+            source_ids=effective_source_ids,
+            include_renders=include_renders,
+            question_domain=effective_question_domain,
+            evidence_requirements=evidence_requirements,
+            reference_resolution=reference_resolution,
+        )
     session_id = str(uuid.uuid4())
     payload["session_id"] = session_id
     payload["status"] = "ready" if payload["results"] else "no-results"
@@ -3153,6 +3197,7 @@ def retrieve_corpus(
     payload["reference_resolution_summary"] = build_reference_resolution_summary(
         reference_resolution
     )
+    payload["source_scope_policy"] = source_scope_policy
     payload["filters"] = {
         "document_types": document_types or [],
         "source_ids": effective_source_ids,
@@ -3666,6 +3711,7 @@ def trace_answer_text(
     prefer_published_artifacts: bool | None = None,
     declared_answer_state: str | None = None,
     reference_resolution: dict[str, Any] | None = None,
+    source_scope_policy: dict[str, Any] | None = None,
     version_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Trace free-form answer text back to knowledge-base evidence."""
@@ -3700,6 +3746,9 @@ def trace_answer_text(
         manifest_support_basis = support_manifest.get("support_basis")
         if isinstance(manifest_support_basis, str) and manifest_support_basis:
             effective_support_basis = manifest_support_basis
+    if support_manifest_is_local_corpus(support_manifest):
+        if effective_support_basis == "external-source-verified" or not effective_support_basis:
+            effective_support_basis = "kb-grounded"
     effective_evidence_requirements = _effective_evidence_requirements(
         {
             **(evidence_requirements or {}),
@@ -3720,6 +3769,9 @@ def trace_answer_text(
     effective_reference_resolution = (
         dict(reference_resolution) if isinstance(reference_resolution, dict) else None
     )
+    effective_source_scope_policy = (
+        dict(source_scope_policy) if isinstance(source_scope_policy, dict) else None
+    )
     fallback_turn_record = (
         _turn_record_from_answer_file(paths, answer_file_path=answer_file_path)
         if isinstance(answer_file_path, str) and answer_file_path
@@ -3735,6 +3787,22 @@ def trace_answer_text(
             else None
         )
     )
+    if effective_source_scope_policy is None:
+        fallback_source_scope_policy = fallback_turn_record.get("source_scope_policy")
+        effective_source_scope_policy = (
+            dict(fallback_source_scope_policy)
+            if isinstance(fallback_source_scope_policy, dict)
+            else build_source_scope_policy(
+                question=str(fallback_turn_record.get("user_question") or answer_text),
+                question_class=(
+                    str(fallback_turn_record.get("question_class"))
+                    if isinstance(fallback_turn_record.get("question_class"), str)
+                    else None
+                ),
+                question_domain=effective_question_domain,
+                reference_resolution=effective_reference_resolution,
+            )
+        )
 
     recorded_at = utc_now()
     segment_budget = _answer_segments_with_budget(answer_text)
@@ -3789,17 +3857,52 @@ def trace_answer_text(
             segment_cache_hit_count += 1
         else:
             unique_segment_query_count += 1
-            reference_resolution_for_segment = (
-                resolve_reference_query(
+            reference_resolution_for_segment: dict[str, Any] | None
+            if (
+                isinstance(retrieval_data, dict)
+                and str(effective_source_scope_policy.get("scope_mode") or "global")
+                in {"source-scoped-soft", "source-scoped-hard"}
+                and isinstance(effective_source_scope_policy.get("target_source_id"), str)
+            ):
+                target_source_id = str(effective_source_scope_policy["target_source_id"])
+                scoped_source_records = [
+                    record
+                    for record in retrieval_data["source_records"]
+                    if isinstance(record, dict) and record.get("source_id") == target_source_id
+                ]
+                scoped_unit_records = [
+                    record
+                    for record in retrieval_data["unit_records"]
+                    if isinstance(record, dict) and record.get("source_id") == target_source_id
+                ]
+                reference_resolution_for_segment = resolve_reference_query(
                     segment,
-                    source_records=retrieval_data["source_records"],
-                    unit_records=retrieval_data["unit_records"],
+                    source_records=scoped_source_records,
+                    unit_records=scoped_unit_records,
                 )
-                if isinstance(retrieval_data, dict)
-                else None
-            )
+                if isinstance(reference_resolution_for_segment, dict):
+                    reference_resolution_for_segment["resolved_source_id"] = target_source_id
+                    reference_resolution_for_segment["source_match_status"] = "exact"
+                    reference_resolution_for_segment["source_narrowing_allowed"] = True
+                    reference_resolution_for_segment["scope_mode"] = (
+                        effective_source_scope_policy.get("scope_mode")
+                    )
+            else:
+                reference_resolution_for_segment = (
+                    resolve_reference_query(
+                        segment,
+                        source_records=retrieval_data["source_records"],
+                        unit_records=retrieval_data["unit_records"],
+                    )
+                    if isinstance(retrieval_data, dict)
+                    else None
+                )
             retrieval_started = perf_counter()
-            if isinstance(retrieval_data, dict):
+            if bool(effective_source_scope_policy.get("hard_boundary_on_missing_source")) and (
+                not effective_source_scope_policy.get("target_source_id")
+            ):
+                results = []
+            elif isinstance(retrieval_data, dict):
                 retrieval_payload = run_retrieval_query(
                     retrieval_data,
                     query=segment,
@@ -3820,8 +3923,16 @@ def trace_answer_text(
                 results = []
             retrieval_scoring_seconds += perf_counter() - retrieval_started
             segment_query_cache[cache_key] = results
-        top_result = results[0] if results else None
-        supports = build_segment_supports_from_results(results[:top])
+        admitted_results = [
+            result
+            for result in results[:top]
+            if result_is_canonical_support(
+                result,
+                source_scope_policy=effective_source_scope_policy,
+            )
+        ]
+        top_result = admitted_results[0] if admitted_results else None
+        supports = build_segment_supports_from_results(admitted_results[:top])
         artifact_supports = [
             artifact
             for support in supports
@@ -3839,24 +3950,75 @@ def trace_answer_text(
             supporting_unit_ids,
             supporting_artifact_ids,
             supporting_overlay_unit_ids,
-        ) = compact_support_ids(results[:top])
+        ) = compact_support_ids(admitted_results[:top])
+        coverage_ratio = support_term_coverage(segment, top_result)
+        direct_support_score = result_direct_support_score(top_result) if top_result else 0.0
+        grounding_status = groundedness_from_result(top_result, segment_text=segment)
+        if (
+            str(effective_source_scope_policy.get("scope_mode") or "global") == "compare"
+            and grounding_status == "grounded"
+            and len(
+                {item.get("source_id") for item in admitted_results if item.get("source_id")}
+            )
+            < 2
+        ):
+            grounding_status = "partially-grounded"
+        scope_satisfied = segment_scope_satisfied(
+            source_scope_policy=effective_source_scope_policy,
+            supporting_source_ids=supporting_source_ids,
+            grounding_status=grounding_status,
+        )
+        if not scope_satisfied and str(
+            effective_source_scope_policy.get("scope_mode") or "global"
+        ) in {"source-scoped-soft", "source-scoped-hard"}:
+            grounding_status = "unresolved"
+        interaction_lane = [
+            {
+                "source_id": result.get("source_id"),
+                "source_family": result.get("source_family"),
+                "pending_promotion": result.get("pending_promotion", False),
+                "title": result.get("title"),
+            }
+            for result in results[:top]
+            if str(result.get("source_family") or "")
+            in {"interaction-memory", "interaction-pending"}
+        ]
+        external_lane = []
+        if effective_support_basis in {"external-source-verified", "mixed"} and support_manifest:
+            external_lane = [
+                {
+                    "url": item.get("url"),
+                    "title": item.get("title"),
+                    "source_type": item.get("source_type"),
+                }
+                for item in support_manifest.get("sources", [])
+                if isinstance(item, dict)
+            ]
         segment_trace = {
             "segment_index": index,
             "segment_text": segment,
-            "grounding_status": groundedness_from_result(top_result, segment_text=segment),
+            "grounding_status": grounding_status,
             "needs_render_inspection": needs_render_inspection_from_supports(
                 supports,
                 preferred_channels=list(
                     effective_evidence_requirements.get("preferred_channels", [])
                 ),
             ),
+            "support_lanes": {
+                "kb": supports,
+                "interaction": interaction_lane,
+                "external": external_lane,
+            },
+            "scope_satisfied": scope_satisfied,
+            "direct_support_score": round(float(direct_support_score), 3),
+            "coverage_ratio": round(float(coverage_ratio), 3),
             "supporting_source_ids": supporting_source_ids,
             "supporting_unit_ids": supporting_unit_ids,
             "supporting_artifact_ids": supporting_artifact_ids,
             "supporting_overlay_unit_ids": supporting_overlay_unit_ids,
             "artifact_supports": artifact_supports,
             "semantic_supports": semantic_supports,
-            "supporting_results": results[:top],
+            "supporting_results": admitted_results[:top],
             "supporting_units": supports,
         }
         consulted_results.append(
@@ -3888,13 +4050,29 @@ def trace_answer_text(
                             and unit.get("semantic_labels")
                         ],
                     }
-                    for result in results[:top]
+                    for result in admitted_results[:top]
                 ],
             }
         )
         segment_traces.append(segment_trace)
 
     kb_answer_state = answer_state_from_segments(segment_traces)
+    canonical_support_summary = build_canonical_support_summary(
+        source_scope_policy=effective_source_scope_policy,
+        segment_traces=segment_traces,
+        support_basis=effective_support_basis,
+    )
+    if (
+        kb_answer_state == "grounded"
+        and int(canonical_support_summary["segment_truth_counts"]["unresolved"]) > 0
+    ):
+        kb_answer_state = "partially-grounded"
+    if (
+        str(canonical_support_summary.get("scope_mode") or "global")
+        in {"source-scoped-soft", "source-scoped-hard"}
+        and not canonical_support_summary.get("source_scope_satisfied")
+    ):
+        kb_answer_state = "unresolved"
     answer_state = final_answer_state(
         kb_answer_state=kb_answer_state,
         answer_text=answer_text,
@@ -3942,6 +4120,14 @@ def trace_answer_text(
         support_basis=effective_support_basis,
         support_manifest_path=effective_support_manifest_path,
     )
+    issue_codes = trace_issue_codes(
+        answer_state=answer_state,
+        canonical_support_summary=canonical_support_summary,
+        published_artifacts_sufficient=published_evidence_plan.get("published_artifacts_sufficient"),
+        source_escalation_required=published_evidence_plan.get("source_escalation_required"),
+        support_basis=effective_support_basis,
+        support_manifest_path=effective_support_manifest_path,
+    )
 
     session_value = session_id or str(uuid.uuid4())
     trace_id = str(uuid.uuid4())
@@ -3973,6 +4159,7 @@ def trace_answer_text(
         "reference_resolution_summary": build_reference_resolution_summary(
             effective_reference_resolution
         ),
+        "source_scope_policy": effective_source_scope_policy,
         "version_context": effective_version_context,
         "source_escalation_required": published_evidence_plan.get("source_escalation_required"),
         "source_escalation_reason": published_evidence_plan.get("source_escalation_reason"),
@@ -3981,6 +4168,11 @@ def trace_answer_text(
         "supporting_unit_ids": supporting_unit_ids,
         "supporting_artifact_ids": supporting_artifact_ids,
         "supporting_overlay_unit_ids": supporting_overlay_unit_ids,
+        "canonical_support_summary": canonical_support_summary,
+        "source_scope_satisfied": canonical_support_summary.get("source_scope_satisfied"),
+        "mixed_support_explainable": canonical_support_summary.get("mixed_support_explainable"),
+        "primary_issue_code": issue_codes[0] if issue_codes else None,
+        "issue_codes": issue_codes,
         "answer_text": answer_text,
         "segments": segment_traces,
         "segment_count": len(segment_traces),
@@ -4052,6 +4244,7 @@ def trace_answer_text(
                 "reference_resolution_summary": build_reference_resolution_summary(
                     effective_reference_resolution
                 ),
+                "source_scope_policy": effective_source_scope_policy,
                 "version_context": effective_version_context,
                 "source_escalation_required": published_evidence_plan.get(
                     "source_escalation_required"
@@ -4062,6 +4255,13 @@ def trace_answer_text(
                 "supporting_unit_ids": supporting_unit_ids,
                 "supporting_artifact_ids": supporting_artifact_ids,
                 "supporting_overlay_unit_ids": supporting_overlay_unit_ids,
+                "canonical_support_summary": canonical_support_summary,
+                "source_scope_satisfied": canonical_support_summary.get("source_scope_satisfied"),
+                "mixed_support_explainable": canonical_support_summary.get(
+                    "mixed_support_explainable"
+                ),
+                "primary_issue_code": issue_codes[0] if issue_codes else None,
+                "issue_codes": issue_codes,
                 "final_answer": answer_text,
                 "segment_traces": segment_traces,
                 "consulted_results": consulted_results,
@@ -4265,12 +4465,10 @@ def trace_answer_file(
             reference_resolution=turn_record.get("reference_resolution")
             if isinstance(turn_record.get("reference_resolution"), dict)
             else None,
-            declared_answer_state=declared_answer_state
-            or (
-                turn_record.get("answer_state")
-                if isinstance(turn_record.get("answer_state"), str)
-                else None
-            ),
+            source_scope_policy=turn_record.get("source_scope_policy")
+            if isinstance(turn_record.get("source_scope_policy"), dict)
+            else None,
+            declared_answer_state=declared_answer_state,
             version_context=(
                 turn_record.get("version_context")
                 if isinstance(turn_record.get("version_context"), dict)
@@ -4414,6 +4612,62 @@ def trace_session(
                 supporting_overlay_unit_ids,
             ) = supporting_ids_from_segments(segment_traces)
         trace_id = str(uuid.uuid4())
+        source_scope_policy = (
+            session_payload.get("source_scope_policy")
+            if isinstance(session_payload.get("source_scope_policy"), dict)
+            else (
+                fallback_turn_record.get("source_scope_policy")
+                if isinstance(fallback_turn_record.get("source_scope_policy"), dict)
+                else build_source_scope_policy(
+                    question=str(
+                        session_payload.get("query")
+                        or session_payload.get("final_answer")
+                        or ""
+                    ),
+                    question_class=(
+                        str(session_payload.get("question_class"))
+                        if isinstance(session_payload.get("question_class"), str)
+                        else None
+                    ),
+                    question_domain=session_payload.get("question_domain")
+                    if isinstance(session_payload.get("question_domain"), str)
+                    else None,
+                    reference_resolution=(
+                        session_payload.get("reference_resolution")
+                        if isinstance(session_payload.get("reference_resolution"), dict)
+                        else None
+                    ),
+                )
+            )
+        )
+        canonical_support_summary = build_canonical_support_summary(
+            source_scope_policy=source_scope_policy,
+            segment_traces=segment_traces,
+            support_basis=support_basis,
+        )
+        if (
+            answer_state == "grounded"
+            and int(canonical_support_summary["segment_truth_counts"]["unresolved"]) > 0
+        ):
+            answer_state = "partially-grounded"
+        if (
+            str(canonical_support_summary.get("scope_mode") or "global")
+            in {"source-scoped-soft", "source-scoped-hard"}
+            and not canonical_support_summary.get("source_scope_satisfied")
+        ):
+            answer_state = "unresolved"
+        issue_codes = trace_issue_codes(
+            answer_state=answer_state,
+            canonical_support_summary=canonical_support_summary,
+            published_artifacts_sufficient=published_evidence_plan.get(
+                "published_artifacts_sufficient"
+            ),
+            source_escalation_required=published_evidence_plan.get(
+                "source_escalation_required"
+            ),
+            support_basis=support_basis,
+            support_manifest_path=support_manifest_path,
+        )
         result = {
             "recorded_at": utc_now(),
             "trace_id": trace_id,
@@ -4455,6 +4709,7 @@ def trace_session(
                 if isinstance(session_payload.get("reference_resolution"), dict)
                 else None
             ),
+            "source_scope_policy": source_scope_policy,
             "version_context": (
                 dict(session_version_context)
                 if isinstance(session_version_context, dict)
@@ -4471,6 +4726,13 @@ def trace_session(
             "supporting_unit_ids": supporting_unit_ids,
             "supporting_artifact_ids": supporting_artifact_ids,
             "supporting_overlay_unit_ids": supporting_overlay_unit_ids,
+            "canonical_support_summary": canonical_support_summary,
+            "source_scope_satisfied": canonical_support_summary.get("source_scope_satisfied"),
+            "mixed_support_explainable": canonical_support_summary.get(
+                "mixed_support_explainable"
+            ),
+            "primary_issue_code": issue_codes[0] if issue_codes else None,
+            "issue_codes": issue_codes,
             "answer_text": session_payload.get("final_answer"),
             "segments": segment_traces,
             "segment_count": len(segment_traces),
@@ -4537,12 +4799,10 @@ def trace_session(
         inspection_scope=session_payload.get("inspection_scope")
         if isinstance(session_payload.get("inspection_scope"), str)
         else None,
-        declared_answer_state=declared_answer_state
-        or (
-            session_payload.get("answer_state")
-            if isinstance(session_payload.get("answer_state"), str)
-            else None
-        ),
+        source_scope_policy=session_payload.get("source_scope_policy")
+        if isinstance(session_payload.get("source_scope_policy"), dict)
+        else None,
+        declared_answer_state=declared_answer_state,
         version_context=(
             session_payload.get("version_context")
             if isinstance(session_payload.get("version_context"), dict)

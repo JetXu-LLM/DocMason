@@ -179,57 +179,6 @@ class FoundationAndContractTests(unittest.TestCase):
         for snippet in required_snippets:
             self.assertIn(snippet, text)
 
-    def test_readme_is_honest_about_phase_status(self) -> None:
-        text = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("Historical implemented phases:", text)
-        self.assertIn("Current architecture refactor program:", text)
-        self.assertIn("Phase 1, Repository Foundation and Public Face", text)
-        self.assertIn("Phase 2, Agent Operating Surface and Workspace Bootstrap", text)
-        self.assertIn("Phase 3, Knowledge-Base Construction and Validation", text)
-        self.assertIn("Phase 4, Incremental Maintenance, Retrieval, and Trace", text)
-        phase_four_b = "Phase 4b, Workflow Productization and Execution Orchestration"
-        self.assertIn(phase_four_b, text)
-        phase_five = "Phase 5, Benchmarking, Evaluation, and Feedback Foundation"
-        self.assertIn(phase_five, text)
-        phase_six = "Phase 6, Natural Intent Routing and Conversation-Native Logging"
-        self.assertIn(phase_six, text)
-        self.assertIn(
-            (
-                "Phase 6 follow-on, Native Chat Reconciliation and Interaction-Derived "
-                "Knowledge Overlay"
-            ),
-            text,
-        )
-        self.assertIn(
-            ("Phase 6b1, Pre-Learning Boundary, Answer Contract, and Regression Closure"),
-            text,
-        )
-        self.assertIn("Phase 6b2, User-Native Source Reference Resolution", text)
-        self.assertIn("Phase 6b3, Markdown and Plain-Text First-Class Knowledge Sources", text)
-        self.assertIn("Phase 0, Rename To DocMason: implemented", text)
-        self.assertIn(
-            "Phase 1, Run Control, Turn Ownership, and Commit Barrier: implemented",
-            text,
-        )
-        self.assertIn(
-            (
-                "Phase 2, Workspace Coordination, Atomic Publish, and Projection "
-                "Discipline: implemented"
-            ),
-            text,
-        )
-        self.assertIn(
-            "Phase 3, Spreadsheet and Multimodal Evidence Compiler Deepening: implemented",
-            text,
-        )
-        self.assertIn(
-            "Phase 4, Governed Interaction Memory and Operator Control Plane: planned",
-            text,
-        )
-        self.assertIn("Use Privately", text)
-        self.assertIn("Try ICO + GCS Demo", text)
-        self.assertIn("sample_corpus/", text)
-
     def test_agents_contract_stays_generic(self) -> None:
         text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertNotIn("sample_corpus/", text)
@@ -301,12 +250,9 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("require canonical ask ownership", review_skill)
         self.assertIn("do not replace canonical `ask`", orchestration_doc)
 
-    def test_public_contributor_docs_point_to_optional_sample_skill(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    def test_contributing_points_to_optional_sample_skill(self) -> None:
         contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-        self.assertIn("public-sample-workspace", readme)
         self.assertIn("public-sample-workspace", contributing)
-        self.assertNotIn("evals/", readme)
         self.assertNotIn("evals/", contributing)
 
     def test_copilot_instructions_stay_minimal_and_agents_first(self) -> None:

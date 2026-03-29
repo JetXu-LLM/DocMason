@@ -30,6 +30,7 @@ from docmason.control_plane import complete_shared_job as complete_control_plane
 from docmason.control_plane import ensure_shared_job, lane_c_job_key, load_shared_job
 from docmason.conversation import load_turn_record, update_conversation_turn
 from docmason.front_controller import write_hybrid_refresh_work
+from docmason.host_integration import handle_hidden_ask_request
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import retrieve_corpus, trace_answer_file, trace_session
 from docmason.review import refresh_log_review_summary
@@ -1034,6 +1035,18 @@ class AskHardeningTests(unittest.TestCase):
                 source_escalation_required=False,
                 status="answered",
             )
+        
+        blocked_turn = load_turn_record(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+        )
+        self.assertEqual(blocked_turn["primary_issue_code"], "published-artifacts-gap")
+        self.assertEqual(
+            blocked_turn["issue_codes"][:2],
+            ["published-artifacts-gap", "source-escalation-required"],
+        )
+        self.assertIn("missing-ask-owned-trace", blocked_turn["issue_codes"])
 
     def test_complete_ask_turn_autolinks_unique_runtime_artifacts_before_commit(self) -> None:
         workspace = self.make_workspace()
@@ -1235,8 +1248,55 @@ class AskHardeningTests(unittest.TestCase):
         self.assertNotIn("turn_id", query_session)
         self.assertNotIn("run_id", query_session)
         self.assertNotIn("conversation_id", trace_payload)
-        self.assertNotIn("turn_id", trace_payload)
-        self.assertNotIn("run_id", trace_payload)
+
+    def test_local_corpus_support_manifest_cannot_commit_as_external(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-local-external"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the campaign planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The planning brief connects strategy to implementation.",
+            encoding="utf-8",
+        )
+        trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="The planning brief connects strategy to implementation.",
+            support_basis="external-source-verified",
+            support_manifest_sources=[
+                {
+                    "url": "original_doc/a.pdf",
+                    "title": "Campaign Planning Brief",
+                    "source_type": "local-file",
+                    "support_snippet": "The planning brief connects strategy to implementation.",
+                }
+            ],
+            status="answered",
+        )
+        self.assertEqual(completed["support_basis"], "kb-grounded")
 
     def test_post_commit_trace_replay_is_demoted_from_canonical_binding(self) -> None:
         workspace = self.make_workspace()
@@ -2454,22 +2514,23 @@ class AskHardeningTests(unittest.TestCase):
             top=2,
             log_context=turn["log_context"],
         )
-        complete_ask_turn(
-            workspace,
-            conversation_id=turn["conversation_id"],
-            turn_id=turn["turn_id"],
-            inner_workflow_id="grounded-answer",
-            session_ids=[trace["session_id"]],
-            trace_ids=[trace["trace_id"]],
-            answer_state=trace["answer_state"],
-            render_inspection_required=trace["render_inspection_required"],
-            answer_file_path=turn["answer_file_path"],
-            response_excerpt="支持 HTTPS API。",
-            question_domain=turn["question_domain"],
-            support_basis="external-source-verified",
-            support_manifest_path=first_completion["support_manifest_path"],
-            status="answered",
-        )
+        with self.assertRaisesRegex(ValueError, "already-committed-canonical-turn"):
+            complete_ask_turn(
+                workspace,
+                conversation_id=turn["conversation_id"],
+                turn_id=turn["turn_id"],
+                inner_workflow_id="grounded-answer",
+                session_ids=[trace["session_id"]],
+                trace_ids=[trace["trace_id"]],
+                answer_state=trace["answer_state"],
+                render_inspection_required=trace["render_inspection_required"],
+                answer_file_path=turn["answer_file_path"],
+                response_excerpt="支持 HTTPS API。",
+                question_domain=turn["question_domain"],
+                support_basis="external-source-verified",
+                support_manifest_path=first_completion["support_manifest_path"],
+                status="answered",
+            )
 
         self.assertEqual(trace["status"], "ready")
         self.assertEqual(trace["answer_state"], "grounded")
@@ -2816,6 +2877,131 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(turn["question_domain"], "external-factual")
         self.assertEqual(turn["inner_workflow_id"], "grounded-answer")
         self.assertEqual(turn["analysis_origin"], "agent-supplied")
+
+    def test_hidden_ask_open_commits_missing_source_boundary(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-hidden-boundary"}, clear=False):
+            payload = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": (
+                        "Using only the document 'Missing Campaign Brief', summarize the "
+                        "architecture strategy in 3 bullet points. Do not use any other source."
+                    ),
+                    "host_provider": "codex",
+                    "host_thread_ref": "thread-hidden-boundary",
+                    "host_identity_source": "codex_thread_id",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(payload["status"], "boundary")
+        self.assertTrue(payload["user_reply_allowed"])
+        self.assertIn("stopping at", payload["answer_text"])
+        turn = load_turn_record(
+            workspace,
+            conversation_id=str(payload["conversation_id"]),
+            turn_id=str(payload["turn_id"]),
+        )
+        self.assertEqual(turn["support_basis"], "governed-boundary")
+        self.assertEqual(turn["answer_state"], "abstained")
+        self.assertEqual(turn["host_provider"], "codex")
+        self.assertEqual(turn["host_thread_ref"], "thread-hidden-boundary")
+
+    def test_hidden_ask_finalize_quarantines_noncanonical_answer_file(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-hidden-fail"}, clear=False):
+            opened = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": (
+                        'Using only the document "Campaign Planning Brief", summarize the '
+                        "architecture strategy in 3 bullet points."
+                    ),
+                    "host_provider": "codex",
+                    "host_thread_ref": "thread-hidden-fail",
+                    "host_identity_source": "codex_thread_id",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(opened["status"], "execute")
+        self.assertFalse(opened["user_reply_allowed"])
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The architecture strategy defines the operating model.\n",
+            encoding="utf-8",
+        )
+
+        failed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(failed["status"], "blocked")
+        self.assertFalse(failed["user_reply_allowed"])
+        quarantined_path = workspace.root / str(failed["noncanonical_answer_file_path"])
+        self.assertTrue(quarantined_path.exists())
+        self.assertFalse(answer_path.exists())
+        turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertEqual(
+            turn["noncanonical_answer_file_path"],
+            failed["noncanonical_answer_file_path"],
+        )
+
+    def test_hidden_ask_finalize_rejects_second_finalize_after_commit(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-hidden-second"}, clear=False):
+            opened = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": (
+                        "Using only the document 'Missing Campaign Brief', summarize the "
+                        "architecture strategy in 3 bullet points. Do not use any other source."
+                    ),
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(opened["status"], "boundary")
+        failed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+            },
+            paths=workspace,
+        )
+        self.assertEqual(failed["status"], "blocked")
+        self.assertEqual(
+            failed["primary_issue_code"],
+            "already-committed-canonical-turn",
+        )
+        self.assertFalse(failed["user_reply_allowed"])
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ Ordinary users should not need to name it explicitly before asking.
 
 - `grounded-composition` is never a free-standing ordinary front door.
 - Start only from canonical ask turn metadata and canonical ask runtime ownership.
+- Compatible hosts should enter through the repo-provided hidden canonical ask integration path rather than stitching ordinary ask lifecycle helpers manually.
 - If the current turn is missing explicit canonical ask ownership, stop and route back to `ask`.
 
 ## Required Capabilities
@@ -39,6 +40,7 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - run retrieval and trace first
    - inspect `reference_resolution` when the user names a document or locator in user-native terms
    - inspect published text, render, structure, notes, or media artifacts first
+   - treat those published artifacts as the primary working surface: draft from retrieved units and artifact sidecars first, inspect cited `focus_render_assets` when visual or tabular semantics matter, and reopen source files only after the published KB has been shown insufficient for the requested deliverable
    - for spreadsheet, chart, table, diagram, PDF-layout, or slide-structure work, read the artifact-aware payload rather than only the unit summary:
      - `matched_artifacts`
      - `focus_render_assets`

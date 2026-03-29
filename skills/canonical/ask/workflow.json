@@ -21,9 +21,7 @@
     "mutability": "read-only",
     "parallelism": "read-only-safe",
     "background_commands": [
-      "docmason status --json",
-      "docmason retrieve \"<query>\" --json",
-      "docmason trace --answer-file <path> --json"
+      "docmason _ask"
     ],
     "must_return_to_main_agent": true
   },

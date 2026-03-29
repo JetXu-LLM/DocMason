@@ -4,333 +4,186 @@
   <p>The repo is the app. Codex is the runtime.</p>
   <p>Build a local, evidence-first knowledge base with provenance.</p>
   <p>
-    <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black">
-    <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue">
-    <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue">
-    <img alt="Status" src="https://img.shields.io/badge/status-pre--alpha-orange">
+    <a href="https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip"><strong>Download DocMason</strong></a>
   </p>
+  <p>
+    <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black?style=flat-square">
+    <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square">
+    <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square">
+    <img alt="Status" src="https://img.shields.io/badge/status-pre--alpha-orange?style=flat-square">
+  </p>
+  <p><sub>Already paying for OpenAI? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included in your plan. Open DocMason inside Codex — and finally put your AI to work on your real private documents, not just chat prompts. Zero-to-working in minutes. <b>Unlock the full power of your subscription.</b></sub></p>
 </div>
 
-DocMason is for people who need more than keyword search:
+Most workspace AI tools flatten your complex office documents into a single unstructured blob. When you ask a hard question, the answer sounds plausible — but it's impossible to trace back to reality.
 
-- ask natural business questions against private PDFs, decks, spreadsheets, docs, and repo-native text sources
-- retrieve evidence bundles instead of vague summaries
-- trace claims back to provenance
-- keep the workflow local, file-first, and auditable
+**DocMason** is built around a different thesis: **answers must be traceable**. It creates a local, file-based knowledge base over your private decks, spreadsheets, and documents, and lets your AI agent retrieve real evidence bundles with strict source provenance. A local repo, running as a deep-research AI app on Codex — no hidden backends, no cloud ingestion. Just local files and answers you can actually verify.
 
-The current native reference workflow is Codex on macOS.
-Claude Code and GitHub Copilot also receive quiet repository-native compatibility adaptations, so users can open the same repo, follow the same bootstrap and sync path, and start working without a separate adapter ritual.
+## Start Here
 
-The current repository also supports a narrower but important extension beyond pure factual QA:
-odd or non-typical document questions can stay KB-native when the published corpus already exposes
-the needed text, render, structure, notes, or media evidence.
+- **[Download DocMason](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip)**: The ready-to-use workspace — everything you need to start with your private files. No `.git`, no test suites, just empty workspace directories.
+- **[See a Public Proof Case](#public-proof-case)**: Try the official ICO + GCS public demo corpus to see what a rigorously traceable answer looks like before using your own files.
 
-## Choose Your Start
+*Native path is Codex on macOS. Claude Code is also well supported.*
 
-Pick the entry point that matches what you want to do on minute one:
+## Public Proof Case
 
-- [Use Privately](../../releases/latest/download/DocMason-clean.zip): download the clean workspace bundle with no `.git`, no `tests/`, and empty live workspace directories.
-- [Try ICO + GCS Demo](../../releases/latest/download/DocMason-demo-ico-gcs.zip): download the demo workspace bundle with no `.git`, no `tests/`, and a preloaded public sample corpus in `original_doc/`.
-- [Develop / Contribute](CONTRIBUTING.md): clone the canonical source repo, keep `tests/` and the tracked public demo corpus, then materialize the demo corpus locally only when you want it.
+The fastest public proof today uses the ICO + GCS demo corpus compiled from official UK public-sector releases.
 
-The clean and demo bundles also include the committed GitHub Copilot workspace instructions so bundle users get the same AGENTS-first repository guidance without extra setup.
+**Ask this through your AI agent:**
+> "Across the ICO and GCS materials, what are the main rollout risks, and which sources support them?"
+
+**What good looks like:**
+- The answer synthesizes overlapping governance risks instead of echoing documents one by one.
+- The answer explicitly points to the exact document origin, instead of blurring the corpus into one anonymous narrative.
+- **The answer is inherently traceable** — providing the real evidence bundles so you can verify the root context.
+
+[Try the ICO + GCS Demo Bundle](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-demo-ico-gcs.zip) to test a governed truth environment before transitioning to your own private folders.
+
+## Why It Feels Safer
+
+DocMason is built for **deep research** over your real work files — where every answer must be **traceable** to its actual source.
+
+* **Strict Source Identity.** DocMason enforces strict document boundaries. It prevents agents from hallucinating cross-source facts that only vaguely fit together.
+* **Answers Are Traceable.** You don't just get convincing text. You get a verifiable lineage pointing directly to the exact file and page you dropped in.
+* **100% Local and Auditable.** Your files, staged data, and compiled knowledge base remain physically inside your local folder boundary. [See more →](#privacy-and-local-first-boundary)
+
+## Two Easy Ways to Start
+
+![Two ways to reach your first answer](docs/product/readme-first-minute-flow.svg)
+
+- **Path A: Start Small**
+  Drop a handful of work files (`.pptx`, `.docx`, `.xlsx`, PDFs) into the `DocMason/original_doc/` folder. Open the DocMason folder in Codex, and ask your question naturally. DocMason intelligently guides you through environment setup and quietly builds the knowledge base in the background — just approve when prompted.
+
+- **Path B: Stage Entire Folders**
+  Drop your massive, department-level folders into `DocMason/original_doc/`. Open the DocMason folder in Codex. Tell Codex:
+  > "Please prepare the DocMason environment."
+
+  Then:
+  > "Please build the knowledge base."
+
+  Once it's done, start asking complex research questions against the entire published corpus.
+
+*Inside a valid workspace, you do not need to memorize internal commands. Just speak naturally to your AI agent.*
+
+**What gets installed:** DocMason needs **[LibreOffice](https://www.libreoffice.org/)** to parse Office files (`.pptx`, `.docx`, `.xlsx`) with full fidelity — this is the most important external dependency. It also sets up a local Python environment automatically. If you don't have [Homebrew](https://brew.sh/) installed, DocMason will guide you through that too. All setup is handled through your AI agent — just approve installations when prompted.
+
+## Supported Work File Types
+
+- **First-Class Office & PDF**: `pdf`, `pptx`, `ppt`, `docx`, `doc`, `xlsx`, `xls`
+- **First-Class Deep Text**: `md`, `markdown`, `txt`, `eml` (email)
+- **Lightweight Text**: `mdx`, `yaml`, `yml`, `tex`, `csv`, `tsv`
+
+High-fidelity Office file parsing relies on a lightweight local LibreOffice shim. PDF parsing uses the embedded stack (`PyMuPDF`, `pypdfium2`, `pypdf`, `pillow`). Markdown, plain text, `.eml`, and the lightweight-compatible family do not require LibreOffice.
 
 ## Why This Exists
 
-Most document pipelines flatten complex business material into weak text dumps.
-That breaks down on the documents people actually care about:
+Most document AI tools map complex corporate files into flat, unreadable text strings. They strip out critical structural meaning:
 
-- slide decks with screenshots and layout meaning
-- spreadsheets where structure matters as much as text
-- multilingual reports
-- cross-referential proposals, plans, and reviews
+- **Slide Decks**: Visual layout and positional logic are discarded.
+- **Spreadsheets**: Row/column relationships are lost.
+- **Multi-Part Proposals**: Disconnected, leaving cross-referential depth missing.
 
-DocMason is built around a different assumption:
+DocMason addresses this by forcing AI to respect original document structure. It produces deterministic file-based evidence, runs strong offline retrieval and trace algorithms, and validates the resulting knowledge base through strict code rules — all locally, with nothing leaving your machine. The repo holds the truth. The agent does the reasoning.
 
-- preserve multimodal evidence
-- prepare deterministic file-based artifacts
-- add richer semantic overlays when a capable multimodal agent is available
-- let strong AI agents do the hardest semantic work
-- validate the resulting knowledge base with code
-- keep everything local-file-first and repository-native
+## Getting Started on macOS
 
-## What It Feels Like
+**Five steps from download to your first traceable answer — no developer experience required.**
 
-```mermaid
-flowchart LR
-    A[Private PDFs / PPTX / DOCX / XLSX / Markdown / Plain text] --> B[Zero-to-working bootstrap]
-    B --> C[Local multimodal knowledge base]
-    C --> D[Ask your AI agent naturally]
-    D --> E[Retrieve evidence and trace provenance]
-```
+**1. Download, unzip, and drop in your files**
 
-The target experience is simple:
+[Download DocMason](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip), unzip it to any folder on your Mac, then drag your `.pptx`, `.docx`, `.xlsx`, `.pdf`, and other work files into `DocMason/original_doc/`.
 
-1. Put private files into `original_doc/`, or materialize the public sample corpus if you are evaluating the project.
-2. Run one bootstrap command.
-3. Build the knowledge base.
-4. Ask naturally inside your AI agent.
+**2. Open the DocMason folder in Codex**
 
-Ordinary users should not need to learn internal workflow IDs like `grounded-answer`, `retrieval-workflow`, or `validation-repair`.
-Inside a valid workspace, natural freeform asking is the primary UX.
+Launch [Codex for macOS](https://openai.com/codex) (or Claude Code) and open the DocMason folder as your workspace. This is the operating model — the repo is your app, the agent is your runtime.
 
-## Zero To Working
+**3. Ask your agent to prepare the environment**
 
-The project now has three intentional entry modes:
+> "Please prepare the DocMason environment."
 
-- private real use: download the clean release bundle, then put your own files into `original_doc/`
-- public product evaluation: download the demo release bundle with `ICO + GCS` already materialized in `original_doc/`
-- source-repo development: clone the canonical repo, then ask your agent to use `public-sample-workspace`, or run `python3 scripts/use-sample-corpus.py --preset ico-gcs` if you want the public demo corpus in your local workspace
+**DocMason will set up a managed local Python environment, install required dependencies, and guide you through LibreOffice installation via Homebrew if it's not already present. Just approve when prompted. If Homebrew itself is missing, DocMason will guide that installation too.**
 
-From a raw checkout or release bundle on macOS:
+**4. Build the knowledge base** *(for medium-to-large corpora)*
 
-```bash
-./scripts/bootstrap-workspace.sh --yes
-./.venv/bin/python -m docmason sync
-```
+> "Please build the knowledge base."
 
-Then continue inside your agent with natural requests such as:
+DocMason stages, compiles, validates, and publishes your documents into a searchable evidence layer. For a small handful of files, DocMason may handle this step automatically during your first question.
 
-- `What does the AI data readiness deck actually say about rollout risk?`
-- `Which document supports this claim?`
-- `Please review my recent degraded answer traces.`
+**5. Start asking questions**
 
-If you want a machine-readable readiness snapshot after bootstrap:
+> "What are the main rollout risks across these documents, and which sources support them?"
 
-```bash
-./.venv/bin/python -m docmason doctor --json
-```
-
-The bootstrap launcher is designed for first-run setup:
-
-- it can start from a raw checkout by delegating to `docmason prepare --yes` through a bootstrap Python before the package is installed
-- on the native macOS path, it can auto-install Homebrew and a supported shared bootstrap Python when no usable bootstrap interpreter is already available
-- `prepare` then provisions repo-local managed Python `3.13` under `.docmason/toolchain/python/` and rebuilds `.venv` against that runtime
-- when `uv` is unavailable, `prepare` provisions a repo-local bootstrap helper venv under `.docmason/toolchain/bootstrap/venv` instead of falling back to an externally anchored steady-state `.venv`
-- it refreshes repo-local skill shims under `.agents/skills` and `.claude/skills` instead of touching a global Codex skills directory
-- after bootstrap, ordinary repository commands should prefer the repo-local `.venv`
-
-If your shell, platform, or agent environment cannot run the normal launcher path cleanly, use the
-deeper fallback guide in [`docs/setup/manual-workspace-recovery.md`](docs/setup/manual-workspace-recovery.md).
-
-If you are using the generated Claude adapter surface, run `./.venv/bin/python -m docmason sync-adapters` when you need it.
-That adapter step is important for that ecosystem, but it is not part of the default first-answer path for every user.
-
-## Distribution Model
-
-DocMason intentionally separates the canonical source repository from the end-user release bundles.
-
-- The canonical `main` branch is the contributor surface.
-  It keeps `tests/`, the tracked public demo corpus under `sample_corpus/`, and the scripts that
-  build clean/demo release bundles.
-- The clean release bundle is the safest private-workspace start.
-- The demo release bundle is the fastest product-evaluation start.
-
-This boundary is deliberate:
-
-- live `original_doc/` is the writable user-managed corpus boundary
-- `sample_corpus/` is the tracked public fixture boundary used to build demo experiences and contributor regressions
-
-The deeper rationale lives in [`docs/product/distribution-and-benchmarks.md`](docs/product/distribution-and-benchmarks.md).
+Your answers come with exact source identity and provenance trace — you can verify every claim against the original file and page.
 
 ## What You Get Today
 
-- Incremental knowledge-base build and refresh.
-- Validation-gated publication into `knowledge_base/current/`.
-- Deterministic retrieval and provenance trace over the published corpus.
-- First-class Markdown, plain-text, and `.eml` knowledge sources plus lightweight-compatible text-like inputs.
-- Implicit user-native source reference resolution for `ask` and `retrieve`, with auditable notices when references are only approximate or unresolved.
-- The user-facing `ask` workflow for natural questions inside a valid workspace.
-- Conversation-native logging, review summaries, and benchmark-candidate extraction.
-- Pending interaction-derived overlay retrieval plus staged and published interaction memory support.
-- KB-native odd-question support through published evidence channels rather than default source rerender.
-- Deterministic PDF document-context sidecars plus first-class `page-image` artifacts for image-heavy or scanned pages.
-- Additive workflow-level hybrid enrichment through `knowledge_base/staging/hybrid_work.json` when a capable multimodal host agent is available.
+- **Incremental Sync**: Fast updates pushing to your local `knowledge_base/current/`.
+- **Validation-Gated Commits**: Bad data fails the build instead of quietly degrading answers.
+- **Rich Source Parsing**: First-class handling for `.pdf`, `.pptx`, `.xlsx`, `.md`, `.eml`, and more.
+- **Deterministic Retrieval**: Exact provenance trace over published corpora.
+- **Review Surface**: Conversation-native logging and extraction for real analysis.
 
-A capable agent should also behave honestly on first contact:
+## Privacy and Local-First Boundary
 
-- if a workspace-dependent first ask arrives before the environment is ready, it should silently
-  attempt workspace bootstrap or repair before asking the user for manual help
-- once `runtime/bootstrap_state.json` says the current root is ready, repeated asks should reuse
-  that cached readiness marker instead of rerunning deep setup checks every time
-- if no published knowledge base exists yet, it should guide the user toward setup or sync instead of bluffing an answer
-- if the knowledge base is stale, it should say so
-- if the user explicitly needs the latest local document state, it should offer sync before answering
+DocMason is designed to run entirely over local files. Here's exactly what that means:
 
-## Why It Feels Different
+**DocMason does NOT send any of the following over the network:**
+- Your document content, file names, or file paths
+- Your queries or answer text
+- Any corpus data, evidence bundles, or knowledge-base artifacts
 
-- Multimodal by design: evidence is prepared for both text and rendered-image inspection when the document demands it.
-- Hard-artifact first: the shipped deterministic compiler builds page, slide, sheet, and artifact targets first, then the workflow-level multimodal lane only enriches the hard artifacts that still need semantic closure.
-- Agent-native: the main operating model is working with a strong AI agent inside the repository, not sending files into a bespoke backend product.
-- File-only knowledge base: no required database service, no hidden SaaS dependency, no platform lock-in.
-- Provenance-first: retrieval and trace are first-class, not an afterthought.
-- Honest boundaries: if the environment cannot support a required workflow, the system should fail clearly instead of producing weak pretend output.
-- Small stable CLI, richer workflow layer: deterministic machine operations stay compact while the agent-facing workflow layer handles composition and routing.
+**All AI inference traffic** is handled by your chosen host agent (Codex, Claude Code, etc.) — DocMason itself makes zero model API calls. The network behavior of your AI agent is governed by that agent's own privacy and telemetry policy.
 
-## Public Surface Today
+**The only network request DocMason may make:**
+A future release will include an optional version update check against the public GitHub release. This check will transmit no corpus data, no file information, and no query content. It will respect `DO_NOT_TRACK=1` and can be explicitly disabled via DocMason configuration. Full technical details will be documented before the feature ships.
 
-The stable public command surface now includes nine commands:
-
-- `docmason prepare`
-- `docmason doctor`
-- `docmason status`
-- `docmason sync`
-- `docmason retrieve`
-- `docmason trace`
-- `docmason validate-kb`
-- `docmason sync-adapters`
-- `docmason workflow`
-
-The public CLI keeps a deterministic substrate and can expand when that materially improves usability, auditability, and operator reliability.
-`docmason workflow` is the advanced public execution surface for explicit workflow-level operator and agent use.
-The primary user-facing natural-language workflow is `ask`, not a new public CLI command.
-For multimodal closure, keep the boundary explicit: bare `docmason sync` publishes deterministic truth, while the canonical workflow layer may consume `hybrid_work.json` and add honest `semantic_overlay/` sidecars when the host agent can inspect renders.
-
-In practice, the surface is layered like this:
-
-- ordinary business questions: `ask`
-- explicit setup or repair: `doctor`, `prepare`, `status`
-- explicit build or refresh: `sync`
-- explicit evidence lookup: `retrieve`
-- explicit provenance proof: `trace`
-- explicit adapter maintenance: `sync-adapters`
-- advanced explicit workflow execution: `workflow`
-
-Advanced contributors and operator tooling also rely on a broader canonical workflow layer inside `skills/canonical/`, but ordinary users should not need to name those internal workflows to get work done.
-
-`docmason retrieve` now parses user-native source references implicitly from the freeform query and always returns a structured `reference_resolution` block in `--json` output.
-The normal CLI echoes the resolution status and any best-effort notice.
-`docmason trace` intentionally remains ID-first in this phase and still expects `--source-id`, `--unit-id`, `--answer-file`, or `--session-id` rather than a new freeform source-reference surface.
-
-## Native Reference Workflow
-
-DocMason should feel most natural in this environment:
-
-- AI agent: Codex
-- platform: macOS
-- prepared-workspace runtime: repo-local managed Python `3.13`
-- bootstrap or repair helper runtime: Python `3.11+`
-- package workflow: repo-local `uv` during prepare, then repo-local `.venv` for ordinary commands
-
-This is the current supported v1 platform target.
-Other platforms may become support targets later, but they should not be treated as equally supported today.
-
-## Supported Inputs
-
-Current v1 input support is tiered:
-
-- Office/PDF first-class: `pdf`, `pptx`, `ppt`, `docx`, `doc`, `xlsx`, `xls`
-- Text first-class: `md`, `markdown`, `txt`
-- Email first-class: `eml`
-- Text lightweight-compatible: `mdx`, `yaml`, `yml`, `tex`, `csv`, `tsv`
-
-For PowerPoint, Word, and Excel inputs, high-fidelity rendering depends on LibreOffice. Legacy `.ppt`, `.doc`, and `.xls` files are normalized through LibreOffice into the same published office-source pipeline used for `.pptx`, `.docx`, and `.xlsx`.
-PDF-first corpora also rely on the repo-local PDF stack: `PyMuPDF` for deterministic region extraction, `pypdfium2` for renders, `pypdf` for conservative page handling, and `pillow` for image output.
-Markdown, plain text, `.eml`, and the lightweight-compatible text family do not require LibreOffice.
-
-## Office Rendering Setup
-
-If your corpus includes PowerPoint, Word, or Excel files such as `.pptx`, `.ppt`, `.docx`, `.doc`, `.xlsx`, or `.xls`, DocMason requires LibreOffice for high-fidelity rendering.
-
-Recommended setup:
-
-- macOS with Homebrew already installed: let `./scripts/bootstrap-workspace.sh --yes` or `docmason prepare --yes` install it automatically when the current corpus needs it, or run `brew install --cask libreoffice-still`
-- macOS without Homebrew: download the official macOS installer from `https://www.libreoffice.org/download/download/`, open the `.dmg`, and drag LibreOffice into `/Applications`
-
-Verification:
-
-- run `./.venv/bin/python -m docmason doctor`
-- on standard macOS installs, DocMason detects `/Applications/LibreOffice.app/Contents/MacOS/soffice` automatically
-
-If your corpus includes PDFs, keep the repo-local PDF stack installed as well. The normal editable install path already includes `PyMuPDF`, `pypdfium2`, `pypdf`, and `pillow`.
-If you need the manual recovery path, follow [`docs/setup/manual-workspace-recovery.md`](docs/setup/manual-workspace-recovery.md).
-
-## Privacy And Local-First Boundary
-
-DocMason is designed to work locally over private files.
-
-The repository itself should not send content to external cloud APIs by default.
-Users may still choose to operate the project through external AI agents, and those agents may have their own privacy and retention behavior.
-Choosing an agent that matches the user's privacy requirements remains the user's responsibility.
-
-Do not commit private source documents, compiled knowledge bases, or runtime state to the public repository.
-Tracked public sample fixtures belong under `sample_corpus/`, not under live `original_doc/`.
+**Your responsibility:**
+- Configure your host agent's telemetry and privacy settings according to your own standards.
+- Do NOT commit `original_doc/`, `knowledge_base/`, or `runtime/` directories to any public repository.
 
 ## Current Status
 
-Project status as of March 21, 2026:
+DocMason is **pre-alpha**, but ships the functional core of the local workflow:
+- Workspace repair and rapid bootstrapping
+- Knowledge-base structural sync and incremental refresh
+- Deterministic retrieval and provenance trace boundaries
+- Natural-language `ask` with conversation-native logging
 
-Historical implemented phases:
+**Host compatibility:**
+- **Native**: Codex on macOS (reference experience)
+- **Well supported**: Claude Code
+- **Also works**: GitHub Copilot (VS Code)
 
-- Phase 1, Repository Foundation and Public Face
-- Phase 2, Agent Operating Surface and Workspace Bootstrap
-- Phase 3, Knowledge-Base Construction and Validation
-- Phase 4, Incremental Maintenance, Retrieval, and Trace
-- Phase 4b, Workflow Productization and Execution Orchestration
-- Phase 5, Benchmarking, Evaluation, and Feedback Foundation
-- Phase 6, Natural Intent Routing and Conversation-Native Logging
-- Phase 6 follow-on, Native Chat Reconciliation and Interaction-Derived Knowledge Overlay
-- Phase 6b1, Pre-Learning Boundary, Answer Contract, and Regression Closure
-- Phase 6b2, User-Native Source Reference Resolution
-- Phase 6b3, Markdown and Plain-Text First-Class Knowledge Sources
+**Recommended model**: We strongly recommend running DocMason with **GPT 5.4** or models of equivalent reasoning depth. Weaker models may produce degraded answers and unreliable trace boundaries.
 
-Current architecture refactor program:
+**Environment**: Managed repo-local Python `3.13` on macOS.
 
-- Phase 0, Rename To DocMason: implemented
-- Phase 1, Run Control, Turn Ownership, and Commit Barrier: implemented
-- Phase 2, Workspace Coordination, Atomic Publish, and Projection Discipline: implemented
-- Phase 3, Spreadsheet and Multimodal Evidence Compiler Deepening: implemented, including `pdf_document.json`, richer native Office semantics, `page-image` artifacts for image-dominant PDF pages, and additive `semantic_overlay/` support through the workflow-level hybrid lane
-- Phase 4, Governed Interaction Memory and Operator Control Plane: planned
+*Watch mode and automatic sync are intentionally out-of-scope for the present build.*
 
-What is intentionally not implemented yet:
+## Deeper Documentation
 
-- watch mode
+- [Product Rationale](docs/product/README.md)
+- [Distribution and Bundles](docs/product/distribution-and-benchmarks.md)
+- [Workflow Layers](docs/workflows/README.md)
+- [Execution Orchestration](docs/workflows/execution-orchestration.md)
+- [Architecture Index](docs/architecture/README.md)
 
-This README is intentionally promotional in tone, but it does not claim later-phase functionality that the repository does not yet ship.
+---
 
-## Repository Layout
+## Our Vision
 
-The canonical source repository keeps live workspace data local while still tracking the public demo
-corpus:
+DocMason is building toward a future where every professional has access to a **deep, intelligent, and privacy-first AI assistant** over their work documents — one where provenance and traceability are first-class requirements, not afterthoughts.
 
-```text
-DocMason/
-├── README.md
-├── AGENTS.md
-├── LICENSE
-├── CONTRIBUTING.md
-├── SECURITY.md
-├── docmason.yaml
-├── pyproject.toml
-├── src/
-│   └── docmason/
-├── tests/
-├── docs/
-├── sample_corpus/   # tracked public demo fixtures
-├── scripts/
-├── skills/
-│   └── canonical/
-├── adapters/        # local/generated, gitignored
-├── original_doc/    # live user corpus boundary, gitignored
-├── knowledge_base/  # private/generated, gitignored
-└── runtime/         # private/generated, gitignored
-```
+We believe AI document analysis should be:
+- **Honest**: answers tied to verifiable evidence, not plausible-sounding fiction.
+- **Private**: your files stay on your machine, under your control.
+- **Open**: the full logic is inspectable, auditable, and improvable.
 
-## For Contributors
+**If this direction resonates with how you actually work:**
+- **[Star this repository](https://github.com/JetXu-LLM/DocMason)** to follow the project as it matures.
+- Try the clean bundle on your real work files.
+- [File an issue](https://github.com/JetXu-LLM/DocMason/issues) when the answer quality or trace boundary breaks down.
+- Share with colleagues who are tired of AI answers they can't verify.
 
-- `AGENTS.md` is the minimal first-contact contract for agents inside the workspace.
-- `skills/canonical/` contains the detailed canonical workflow contracts that agents should follow after first contact.
-- `docs/` contains deeper public notes on product direction, workflows, orchestration, and policies.
-- `scripts/bootstrap-workspace.sh` is the preferred zero-to-working launcher from a raw checkout.
-- `public-sample-workspace` is the contributor-only optional skill for materializing the tracked public demo corpus into live `original_doc/`.
-- `python3 scripts/use-sample-corpus.py --preset ico-gcs` remains the direct script path when you want the same setup without going through an agent skill.
-- `sample_corpus/` is the tracked fixture boundary. Do not replace it with your private corpus.
-- `scripts/install-git-hooks.sh` installs the repo safety hooks that block staged live workspace data and re-check tracked live workspace paths before push.
-
-## If This Direction Matters
-
-If this is the kind of document-native, provenance-first AI workflow you want to use or help shape:
-
-- try the bootstrap flow on a real private corpus
-- file issues when the setup or answer path feels rough
-- star the repository if you want to follow the project as it hardens
+*The repo is the app. Codex is the runtime. Your documents deserve both.*

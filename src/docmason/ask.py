@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ from .conversation import (
     utc_now,
 )
 from .front_controller import (
+    load_support_manifest,
     question_execution_profile,
     write_external_support_manifest,
     write_hybrid_refresh_work,
@@ -80,6 +82,11 @@ from .source_references import (
     build_reference_resolution_summary,
     resolve_workspace_reference,
 )
+from .truth_boundary import (
+    apply_machine_semantic_guard,
+    build_source_scope_policy,
+    support_manifest_is_local_corpus,
+)
 
 
 def _workspace_notices_enabled(question_domain: str) -> bool:
@@ -91,6 +98,7 @@ def _interaction_backlog_policy(
     question_class: str,
     question_domain: str,
     inspection_scope: str,
+    source_scope_policy: dict[str, Any] | None,
     reference_resolution: dict[str, Any] | None,
     interaction_snapshot: dict[str, Any],
     interaction_relevance: dict[str, Any],
@@ -99,6 +107,11 @@ def _interaction_backlog_policy(
     pending_count = int(interaction_snapshot.get("pending_promotion_count", 0) or 0)
     if pending_count <= 0 or question_domain != "workspace-corpus":
         return {"state": "ignored", "notice": None}
+    scope_mode = (
+        str(source_scope_policy.get("scope_mode") or "global")
+        if isinstance(source_scope_policy, dict)
+        else "global"
+    )
     exact_or_source_narrowed_reference = (
         isinstance(reference_resolution, dict)
         and (
@@ -110,10 +123,15 @@ def _interaction_backlog_policy(
         )
     )
     narrowed_exact_source = (
-        question_class == "answer"
+        question_class in {"answer", "composition"}
         and exact_or_source_narrowed_reference
-        and inspection_scope in {"source", "unit"}
+        and inspection_scope in {"source", "unit", "compare"}
     )
+    if scope_mode in {"source-scoped-hard", "compare"}:
+        notice = (
+            "Pending interaction-derived backlog was ignored for this strict source-scoped ask."
+        )
+        return {"state": "advisory", "notice": notice}
     if interaction_snapshot.get("load_warnings"):
         notice = (
             "Pending interaction-derived runtime state could not be read completely "
@@ -446,6 +464,7 @@ def _sync_turn_log_artifacts(
     published_artifacts_sufficient: bool | None = None,
     reference_resolution: dict[str, Any] | None = None,
     reference_resolution_summary: str | None = None,
+    source_scope_policy: dict[str, Any] | None = None,
     source_escalation_required: bool | None = None,
     source_escalation_reason: str | None = None,
     auto_sync_triggered: bool | None = None,
@@ -456,6 +475,11 @@ def _sync_turn_log_artifacts(
     hybrid_refresh_sources: list[str] | None = None,
     hybrid_refresh_completion_status: str | None = None,
     hybrid_refresh_summary: dict[str, Any] | None = None,
+    canonical_support_summary: dict[str, Any] | None = None,
+    source_scope_satisfied: bool | None = None,
+    mixed_support_explainable: bool | None = None,
+    primary_issue_code: str | None = None,
+    issue_codes: list[str] | None = None,
 ) -> None:
     update_fields = {
         "conversation_id": conversation_id,
@@ -474,6 +498,7 @@ def _sync_turn_log_artifacts(
         "published_artifacts_sufficient": published_artifacts_sufficient,
         "reference_resolution": reference_resolution,
         "reference_resolution_summary": reference_resolution_summary,
+        "source_scope_policy": source_scope_policy,
         "source_escalation_required": source_escalation_required,
         "source_escalation_reason": source_escalation_reason,
         "auto_sync_triggered": auto_sync_triggered,
@@ -484,6 +509,11 @@ def _sync_turn_log_artifacts(
         "hybrid_refresh_sources": hybrid_refresh_sources or [],
         "hybrid_refresh_completion_status": hybrid_refresh_completion_status,
         "hybrid_refresh_summary": hybrid_refresh_summary,
+        "canonical_support_summary": canonical_support_summary,
+        "source_scope_satisfied": source_scope_satisfied,
+        "mixed_support_explainable": mixed_support_explainable,
+        "primary_issue_code": primary_issue_code,
+        "issue_codes": issue_codes or [],
     }
     if semantic_log_context:
         update_fields.update(semantic_log_context)
@@ -509,6 +539,7 @@ def _changed_source_relevance(
     *,
     question: str,
     change_set: dict[str, Any],
+    source_scope_policy: dict[str, Any] | None,
     reference_resolution: dict[str, Any] | None,
     needs_latest_workspace_state: bool,
 ) -> tuple[bool, str]:
@@ -536,6 +567,11 @@ def _changed_source_relevance(
         if isinstance(reference_resolution, dict)
         else "none"
     )
+    scope_mode = (
+        str(source_scope_policy.get("scope_mode") or "global")
+        if isinstance(source_scope_policy, dict)
+        else "global"
+    )
     if resolved_source_id and source_match_status in {"exact", "approximate"}:
         if resolved_source_id in changed_source_ids:
             return True, "The resolved source reference points to a changed source."
@@ -552,6 +588,12 @@ def _changed_source_relevance(
         searchable = set(tokenize_text(f"{current_path} {previous_path}"))
         if question_tokens & searchable:
             return True, "Changed source paths overlap lexically with the current question."
+
+    if scope_mode in {"source-scoped-hard", "compare"}:
+        return (
+            False,
+            "The strict source-scoped ask does not currently point at a changed published source.",
+        )
 
     return True, "Change relevance is uncertain, so the ask path is biasing to sync."
 
@@ -746,6 +788,45 @@ def _commit_governed_boundary_turn(
         "turn_id": turn_id,
         **updated,
     }
+
+
+def quarantine_noncanonical_answer_file(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+) -> str | None:
+    """Move one non-canonical answer draft out of the canonical answer path."""
+    turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
+    if isinstance(turn.get("committed_run_id"), str) and turn.get("committed_run_id"):
+        return None
+    answer_file_path = (
+        str(turn.get("answer_file_path"))
+        if isinstance(turn.get("answer_file_path"), str) and turn.get("answer_file_path")
+        else None
+    )
+    if answer_file_path is None:
+        return None
+    answer_path = Path(answer_file_path)
+    if not answer_path.is_absolute():
+        answer_path = paths.root / answer_path
+    if not answer_path.exists():
+        return None
+    if not answer_path.read_text(encoding="utf-8").strip():
+        return None
+    destination = (
+        paths.agent_work_dir / conversation_id / turn_id / "noncanonical-answer.md"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(answer_path), str(destination))
+    relative_destination = str(destination.relative_to(paths.root))
+    update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates={"noncanonical_answer_file_path": relative_destination},
+    )
+    return relative_destination
 
 
 def _apply_control_plane_pause(
@@ -1218,6 +1299,10 @@ def _effective_turn_snapshot(
     published_artifacts_sufficient: Any,
     reference_resolution: dict[str, Any] | None,
     reference_resolution_summary: Any,
+    source_scope_policy: dict[str, Any] | None,
+    canonical_support_summary: dict[str, Any] | None,
+    source_scope_satisfied: Any,
+    mixed_support_explainable: Any,
     source_escalation_required: Any,
     source_escalation_reason: Any,
     auto_sync_triggered: Any,
@@ -1247,6 +1332,10 @@ def _effective_turn_snapshot(
             "published_artifacts_sufficient": published_artifacts_sufficient,
             "reference_resolution": reference_resolution,
             "reference_resolution_summary": reference_resolution_summary,
+            "source_scope_policy": source_scope_policy,
+            "canonical_support_summary": canonical_support_summary,
+            "source_scope_satisfied": source_scope_satisfied,
+            "mixed_support_explainable": mixed_support_explainable,
             "source_escalation_required": source_escalation_required,
             "source_escalation_reason": source_escalation_reason,
             "auto_sync_triggered": auto_sync_triggered,
@@ -1455,6 +1544,7 @@ def _prepared_turn_response(
     preferred_channels: list[str],
     reference_resolution: dict[str, Any] | None,
     reference_resolution_summary: str | None,
+    source_scope_policy: dict[str, Any] | None,
     prefer_published_artifacts: bool,
     analysis_origin: str,
     normalized_semantic_analysis: dict[str, Any],
@@ -1495,6 +1585,7 @@ def _prepared_turn_response(
         "preferred_channels": preferred_channels,
         "reference_resolution": reference_resolution,
         "reference_resolution_summary": reference_resolution_summary,
+        "source_scope_policy": source_scope_policy,
         "prefer_published_artifacts": prefer_published_artifacts,
         "analysis_origin": analysis_origin,
         "semantic_analysis": normalized_semantic_analysis,
@@ -1737,17 +1828,42 @@ def prepare_ask_turn(
     warm_start = profile["warm_start_evidence"]
     workspace_notices_enabled = _workspace_notices_enabled(question_domain)
     reference_resolution = (
-        resolve_workspace_reference(paths, query=question)
-        if knowledge_base["present"]
-        else None
+        resolve_workspace_reference(paths, query=question) if knowledge_base["present"] else None
     )
     if isinstance(reference_resolution, dict) and not reference_resolution.get("detected"):
         reference_resolution = None
+    if isinstance(reference_resolution, dict):
+        guarded_question_domain, guarded_support_strategy, analysis_guard_applied = (
+            apply_machine_semantic_guard(
+                question=question,
+                question_domain=question_domain,
+                support_strategy=support_strategy,
+                reference_resolution=reference_resolution,
+            )
+        )
+        question_domain = guarded_question_domain
+        support_strategy = guarded_support_strategy
+        reference_resolution["analysis_guard_applied"] = analysis_guard_applied
+    source_scope_policy = build_source_scope_policy(
+        question=question,
+        question_class=question_class,
+        question_domain=question_domain,
+        reference_resolution=reference_resolution,
+    )
+    if isinstance(reference_resolution, dict):
+        reference_resolution["scope_mode"] = source_scope_policy["scope_mode"]
     reference_resolution_summary = build_reference_resolution_summary(reference_resolution)
+    normalized_semantic_analysis["question_domain"] = question_domain
+    normalized_semantic_analysis["support_strategy"] = support_strategy
+    normalized_semantic_analysis["analysis_guard_applied"] = bool(
+        isinstance(reference_resolution, dict)
+        and reference_resolution.get("analysis_guard_applied")
+    )
     backlog_policy = _interaction_backlog_policy(
         question_class=question_class,
         question_domain=question_domain,
         inspection_scope=inspection_scope,
+        source_scope_policy=source_scope_policy,
         reference_resolution=reference_resolution,
         interaction_snapshot=interaction_snapshot,
         interaction_relevance=interaction_relevance,
@@ -1851,6 +1967,7 @@ def prepare_ask_turn(
             should_auto_sync, candidate_reason = _changed_source_relevance(
                 question=question,
                 change_set=preview_change_set,
+                source_scope_policy=source_scope_policy,
                 reference_resolution=reference_resolution,
                 needs_latest_workspace_state=needs_latest_workspace_state,
             )
@@ -2081,8 +2198,13 @@ def prepare_ask_turn(
             "preferred_channels": preferred_channels,
             "reference_resolution": reference_resolution,
             "reference_resolution_summary": reference_resolution_summary,
+            "source_scope_policy": source_scope_policy,
             "analysis_origin": analysis_origin,
             "semantic_analysis": normalized_semantic_analysis,
+            "analysis_guard_applied": bool(
+                isinstance(reference_resolution, dict)
+                and reference_resolution.get("analysis_guard_applied")
+            ),
             "research_depth": research_depth,
             "bundle_paths": bundle_paths,
             "reused_previous_evidence": bool(warm_start.get("matched_records")),
@@ -2144,6 +2266,7 @@ def prepare_ask_turn(
         preferred_channels=preferred_channels,
         reference_resolution=reference_resolution,
         reference_resolution_summary=reference_resolution_summary,
+        source_scope_policy=source_scope_policy,
         prefer_published_artifacts=prefer_published_artifacts,
         analysis_origin=analysis_origin,
         normalized_semantic_analysis=normalized_semantic_analysis,
@@ -2228,6 +2351,14 @@ def complete_ask_turn(
         "turn_id": turn_id,
         **current_turn,
     }
+    committed_run_id = (
+        str(current_turn.get("committed_run_id"))
+        if isinstance(current_turn.get("committed_run_id"), str)
+        and current_turn.get("committed_run_id")
+        else None
+    )
+    if committed_run_id is not None:
+        raise ValueError("already-committed-canonical-turn")
     run_id = (
         str(current_turn.get("active_run_id"))
         if isinstance(current_turn.get("active_run_id"), str) and current_turn.get("active_run_id")
@@ -2348,6 +2479,30 @@ def complete_ask_turn(
         current_turn,
         "reference_resolution_summary",
     )
+    resolved_source_scope_policy = _resolve_mapping(
+        None,
+        latest_trace_payload,
+        current_turn,
+        "source_scope_policy",
+    )
+    resolved_canonical_support_summary = _resolve_mapping(
+        None,
+        latest_trace_payload,
+        current_turn,
+        "canonical_support_summary",
+    )
+    resolved_source_scope_satisfied = _resolve_scalar(
+        None,
+        latest_trace_payload,
+        current_turn,
+        "source_scope_satisfied",
+    )
+    resolved_mixed_support_explainable = _resolve_scalar(
+        None,
+        latest_trace_payload,
+        current_turn,
+        "mixed_support_explainable",
+    )
     resolved_source_escalation_required = _resolve_scalar(
         source_escalation_required,
         latest_trace_payload,
@@ -2428,6 +2583,10 @@ def complete_ask_turn(
             else "kb-grounded"
         )
     )
+    explicit_local_manifest = support_manifest_is_local_corpus(
+        None,
+        support_manifest_sources=support_manifest_sources,
+    )
     effective_answer_state = (
         resolved_answer_state
         if isinstance(resolved_answer_state, str)
@@ -2453,6 +2612,7 @@ def complete_ask_turn(
         and isinstance(resolved_answer_file_path, str)
         and isinstance(support_manifest_sources, list)
         and support_manifest_sources
+        and not explicit_local_manifest
     ):
         resolved_support_manifest_path = write_external_support_manifest(
             paths,
@@ -2464,13 +2624,40 @@ def complete_ask_turn(
             key_assertions=support_manifest_key_assertions,
             verification_notes=support_manifest_notes,
         )
-    if (
-        not isinstance(resolved_answer_state, str)
-        and effective_support_basis == "external-source-verified"
-        and isinstance(resolved_support_manifest_path, str)
-        and resolved_support_manifest_path
-    ):
-        effective_answer_state = "grounded"
+    support_manifest = load_support_manifest(
+        paths,
+        support_manifest_path_value=(
+            resolved_support_manifest_path
+            if isinstance(resolved_support_manifest_path, str)
+            else None
+        ),
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+    )
+    local_manifest = support_manifest_is_local_corpus(
+        support_manifest,
+        support_manifest_sources=support_manifest_sources,
+    )
+    if local_manifest and effective_support_basis == "external-source-verified":
+        effective_support_basis = "kb-grounded"
+    if not isinstance(resolved_answer_state, str):
+        if effective_support_basis == "governed-boundary":
+            effective_answer_state = "abstained"
+        elif (
+            effective_support_basis == "external-source-verified"
+            and isinstance(resolved_support_manifest_path, str)
+            and resolved_support_manifest_path
+            and not local_manifest
+        ):
+            effective_answer_state = "grounded"
+        elif (
+            effective_support_basis == "mixed"
+            and isinstance(resolved_support_manifest_path, str)
+            and resolved_support_manifest_path
+        ):
+            effective_answer_state = "partially-grounded"
+        elif effective_answer_state is None or effective_answer_state == "grounded":
+            effective_answer_state = "unresolved"
     effective_turn_snapshot = _effective_turn_snapshot(
         current_turn,
         session_ids=resolved_session_ids,
@@ -2491,6 +2678,10 @@ def complete_ask_turn(
         published_artifacts_sufficient=resolved_published_artifacts_sufficient,
         reference_resolution=resolved_reference_resolution,
         reference_resolution_summary=resolved_reference_resolution_summary,
+        source_scope_policy=resolved_source_scope_policy,
+        canonical_support_summary=resolved_canonical_support_summary,
+        source_scope_satisfied=resolved_source_scope_satisfied,
+        mixed_support_explainable=resolved_mixed_support_explainable,
         source_escalation_required=resolved_source_escalation_required,
         source_escalation_reason=resolved_source_escalation_reason,
         auto_sync_triggered=resolved_auto_sync_triggered,
@@ -2551,6 +2742,15 @@ def complete_ask_turn(
         payload={"issues": admissibility_gate_result.get("issues", [])},
     )
     if not admissibility_gate_result["allowed"]:
+        update_conversation_turn(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            updates={
+                "primary_issue_code": admissibility_gate_result.get("primary_issue_code"),
+                "issue_codes": admissibility_gate_result.get("issue_codes", []),
+            },
+        )
         raise ValueError(
             str(admissibility_gate_result.get("reason") or "The turn is not commit-admissible.")
         )
@@ -2595,6 +2795,12 @@ def complete_ask_turn(
             "published_artifacts_sufficient": resolved_published_artifacts_sufficient,
             "reference_resolution": resolved_reference_resolution,
             "reference_resolution_summary": resolved_reference_resolution_summary,
+            "source_scope_policy": resolved_source_scope_policy,
+            "canonical_support_summary": resolved_canonical_support_summary,
+            "source_scope_satisfied": resolved_source_scope_satisfied,
+            "mixed_support_explainable": resolved_mixed_support_explainable,
+            "primary_issue_code": admissibility_gate_result.get("primary_issue_code"),
+            "issue_codes": admissibility_gate_result.get("issue_codes", []),
             "source_escalation_required": resolved_source_escalation_required,
             "source_escalation_reason": resolved_source_escalation_reason,
             "auto_sync_triggered": resolved_auto_sync_triggered,
@@ -2665,6 +2871,18 @@ def complete_ask_turn(
         reference_resolution_summary=resolved_reference_resolution_summary
         if isinstance(resolved_reference_resolution_summary, str)
         else None,
+        source_scope_policy=resolved_source_scope_policy,
+        canonical_support_summary=resolved_canonical_support_summary,
+        source_scope_satisfied=(
+            resolved_source_scope_satisfied
+            if isinstance(resolved_source_scope_satisfied, bool)
+            else None
+        ),
+        mixed_support_explainable=(
+            resolved_mixed_support_explainable
+            if isinstance(resolved_mixed_support_explainable, bool)
+            else None
+        ),
         source_escalation_required=(
             resolved_source_escalation_required
             if isinstance(resolved_source_escalation_required, bool)

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .project import WorkspacePaths, read_json
+from .truth_boundary import format_user_visible_source_ref
 
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z]+|[\u4e00-\u9fff]+")
 PAGE_PATTERN = re.compile(r"\bpage\s*(?:no\.?|number|#)?\s*(\d{1,4})\b", re.IGNORECASE)
@@ -53,6 +54,51 @@ ARTIFACT_HINT_PATTERN = re.compile(
 COMPARATIVE_HINT_PATTERN = re.compile(
     r"\b(compare|versus|vs\.?|difference|between)\b",
     re.IGNORECASE,
+)
+EXPLICIT_SOURCE_REQUEST_PATTERN = re.compile(
+    (
+        r"\b(?:using|use)\s+only\s+the\s+(?:document|deck|file|proposal|pdf|pptx?|docx?|xlsx?|"
+        r"spreadsheet|sheet|markdown|email|message|eml)\s+[\"']([^\"']+)[\"']"
+        r"|\bonly\s+the\s+(?:document|deck|file|proposal|pdf|pptx?|docx?|xlsx?|spreadsheet|"
+        r"sheet|markdown|email|message|eml)\s+[\"']([^\"']+)[\"']"
+        r"|\b(?:document|deck|file|proposal|pdf|pptx?|docx?|xlsx?|spreadsheet|sheet|"
+        r"markdown|email|message|eml)\s+[\"']([^\"']+)[\"']"
+    ),
+    re.IGNORECASE,
+)
+QUOTED_SOURCE_PATH_PATTERN = re.compile(r"(?P<quote>[\"'`])(original_doc/.+?)(?P=quote)")
+SINGLE_SOURCE_REQUEST_PATTERN = re.compile(
+    (
+        r"\b(using only|use only|only the document|only the deck|only the file|"
+        r"do not use any other source|don't use any other source|no other source|"
+        r"single document|single source)\b"
+    ),
+    re.IGNORECASE,
+)
+GENERIC_SOURCE_TEXT_TOKENS = frozenset(
+    {
+        "page",
+        "slide",
+        "sheet",
+        "section",
+        "row",
+        "line",
+        "use",
+        "uses",
+        "cases",
+        "case",
+        "architecture",
+        "strategy",
+        "detail",
+        "details",
+        "summary",
+        "roadmap",
+        "purpose",
+        "components",
+        "main",
+        "benefits",
+        "scenarios",
+    }
 )
 
 
@@ -529,6 +575,52 @@ def _document_ref_detected(query: str, source_candidates: list[dict[str, Any]]) 
     return any(bool(candidate.get("exact_source_match")) for candidate in source_candidates)
 
 
+def extract_requested_source_text(query: str) -> str | None:
+    """Extract the strongest user-requested source text from a question when present."""
+    if not isinstance(query, str) or not query.strip():
+        return None
+    quoted_path_match = QUOTED_SOURCE_PATH_PATTERN.search(query)
+    if quoted_path_match is not None:
+        candidate = _nonempty_string(quoted_path_match.group(2))
+        if candidate is not None:
+            return candidate
+    start = query.find("original_doc/")
+    if start >= 0:
+        candidate_chars: list[str] = []
+        for char in query[start:]:
+            if char in "\n\r\t,;!?\"'`()[]{}<>":
+                break
+            candidate_chars.append(char)
+        candidate = _nonempty_string("".join(candidate_chars).rstrip(" .:"))
+        if candidate is not None:
+            return candidate
+    match = EXPLICIT_SOURCE_REQUEST_PATTERN.search(query)
+    if match is None:
+        return None
+    for group in match.groups():
+        candidate = _nonempty_string(group)
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def question_has_single_source_constraint(query: str) -> bool:
+    """Return whether the question explicitly requires a single source."""
+    if not isinstance(query, str) or not query.strip():
+        return False
+    return bool(SINGLE_SOURCE_REQUEST_PATTERN.search(query))
+
+
+def _requested_source_text_is_generic(requested_source_text: str | None) -> bool:
+    requested = _nonempty_string(requested_source_text)
+    if requested is None:
+        return False
+    tokens = [token for token in tokenize_text(requested) if token]
+    if not tokens:
+        return True
+    return all(token in GENERIC_SOURCE_TEXT_TOKENS for token in tokens)
+
+
 def _alias_query_coverage(query: str, alias: str | None) -> float:
     alias_text = _nonempty_string(alias)
     if alias_text is None:
@@ -812,6 +904,21 @@ def _combined_candidate_sort_key(item: dict[str, Any]) -> tuple[float, float, fl
     )
 
 
+def _clear_source_winner(
+    top: dict[str, Any],
+    second: dict[str, Any] | None,
+) -> bool:
+    top_score = float(top.get("score", 0.0))
+    if second is None:
+        return top_score > 0.0
+    second_score = float(second.get("score", 0.0))
+    if top_score <= second_score:
+        return False
+    if bool(top.get("exact_source_match")) and not bool(second.get("exact_source_match")):
+        return True
+    return (top_score - second_score) >= 8.0 or top_score >= (second_score * 1.25)
+
+
 def _pick_best_unit_candidate(
     query: str,
     units: list[dict[str, Any]],
@@ -859,6 +966,13 @@ def resolve_reference_query(
         if isinstance(source_id, str) and source_family == "corpus":
             units_by_source[source_id].append(unit)
 
+    requested_source_text = extract_requested_source_text(query)
+    source_query = (
+        requested_source_text
+        if requested_source_text is not None
+        and not _requested_source_text_is_generic(requested_source_text)
+        else query
+    )
     parsed_locator = _parse_locator_hints(query)
     source_candidates: list[dict[str, Any]] = []
     for source in normalized_source_records:
@@ -874,7 +988,7 @@ def resolve_reference_query(
         for alias in source.get("path_aliases", []):
             if not isinstance(alias, str):
                 continue
-            match = _source_alias_match(query, alias, weight=90.0, basis="path-alias")
+            match = _source_alias_match(source_query, alias, weight=90.0, basis="path-alias")
             if match is None:
                 continue
             alias_score, alias_basis = match
@@ -886,7 +1000,7 @@ def resolve_reference_query(
         for alias in source.get("title_aliases", []):
             if not isinstance(alias, str):
                 continue
-            match = _source_alias_match(query, alias, weight=72.0, basis="title-alias")
+            match = _source_alias_match(source_query, alias, weight=72.0, basis="title-alias")
             if match is None:
                 continue
             alias_score, alias_basis = match
@@ -922,11 +1036,17 @@ def resolve_reference_query(
         )
 
     source_candidates.sort(key=_combined_candidate_sort_key)
-    document_ref_detected = _document_ref_detected(query, source_candidates)
+    document_ref_detected = bool(requested_source_text) or _document_ref_detected(
+        query, source_candidates
+    )
     detected = document_ref_detected or parsed_locator.get("locator_type") is not None
     result = {
         "detected": detected,
-        "parsed_document_ref": None,
+        "parsed_document_ref": (
+            {"raw_text": requested_source_text, "match_basis": []}
+            if requested_source_text is not None
+            else None
+        ),
         "parsed_locator_ref": parsed_locator
         if any(value is not None for value in parsed_locator.values())
         else None,
@@ -947,6 +1067,12 @@ def resolve_reference_query(
         "source_narrowing_allowed": False,
         "continued_with_best_effort": False,
         "notice_text": None,
+        "requested_source_text": requested_source_text,
+        "scope_mode": "global",
+        "unresolved_reason": None,
+        "hard_boundary": False,
+        "target_source_ref": None,
+        "analysis_guard_applied": False,
     }
     if not detected:
         return result
@@ -957,21 +1083,25 @@ def resolve_reference_query(
         exact_source_candidates.sort(key=_combined_candidate_sort_key)
         top_exact = exact_source_candidates[0]
         second_exact = exact_source_candidates[1] if len(exact_source_candidates) > 1 else None
-        top_exact_score = float(top_exact.get("score", 0.0))
-        second_exact_score = (
-            float(second_exact.get("score", 0.0)) if second_exact is not None else None
-        )
-        if second_exact is None or top_exact_score > (second_exact_score or 0.0):
+        if _clear_source_winner(top_exact, second_exact):
             chosen_source = top_exact
             chosen_source_status = "exact"
+        elif requested_source_text is not None:
+            chosen_source = None
+            chosen_source_status = None
     if chosen_source is None and source_candidates:
         approximate_sources = [
             item for item in source_candidates if float(item.get("source_score", 0.0)) > 0.0
         ]
-        if approximate_sources:
+        if approximate_sources and not (
+            requested_source_text is not None and len(exact_source_candidates) >= 2
+        ):
             approximate_sources.sort(key=_combined_candidate_sort_key)
-            chosen_source = approximate_sources[0]
-            chosen_source_status = "approximate"
+            top_approx = approximate_sources[0]
+            second_approx = approximate_sources[1] if len(approximate_sources) > 1 else None
+            if _clear_source_winner(top_approx, second_approx):
+                chosen_source = top_approx
+                chosen_source_status = "approximate"
         elif any(item.get("best_unit") is not None for item in source_candidates):
             source_candidates.sort(key=_combined_candidate_sort_key)
             chosen_source = source_candidates[0]
@@ -988,21 +1118,28 @@ def resolve_reference_query(
             parsed_locator=parsed_locator,
         )
         result["parsed_document_ref"] = {
-            "raw_text": top.get("matched_alias"),
+            "raw_text": requested_source_text or top.get("matched_alias"),
             "match_basis": _string_list(top.get("match_basis")),
         }
         result["status"] = chosen_source_status or "approximate"
         result["source_match_status"] = chosen_source_status or "approximate"
         result["resolved_source_id"] = top["source_id"]
+        result["target_source_ref"] = format_user_visible_source_ref(
+            title=top.get("title") if isinstance(top.get("title"), str) else None,
+            current_path=(
+                top.get("current_path")
+                if isinstance(top.get("current_path"), str)
+                else None
+            ),
+        ) or top.get("current_path")
         match_basis.extend(_string_list(top.get("match_basis")))
         best_unit = top.get("best_unit")
-        if isinstance(best_unit, dict):
+        if isinstance(best_unit, dict) and (
+            parsed_locator.get("locator_type") is not None or requested_source_text is None
+        ):
             result["candidate_unit_ids"] = _string_list(top.get("candidate_unit_ids"))
             parsed_locator_ref = _mapping_copy(result.get("parsed_locator_ref"))
             parsed_locator_ref["matched_alias"] = best_unit.get("matched_alias")
-            parsed_locator_ref["locator_type"] = parsed_locator_ref.get("locator_type") or (
-                "semantic-alias" if best_unit.get("matched_alias") else None
-            )
             if isinstance(best_unit.get("logical_ordinal"), int):
                 parsed_locator_ref["resolved_logical_ordinal"] = best_unit.get("logical_ordinal")
             if isinstance(best_unit.get("render_ordinal"), int):
@@ -1043,6 +1180,43 @@ def resolve_reference_query(
             result["unit_match_status"] = "unresolved"
         if result["status"] == "approximate":
             result["continued_with_best_effort"] = True
+            result["unresolved_reason"] = "soft-approximation"
+    single_source_constraint = question_has_single_source_constraint(query)
+    hard_missing_source = bool(
+        single_source_constraint
+        and requested_source_text
+        and result["source_match_status"] != "exact"
+    )
+    if hard_missing_source:
+        unresolved_reason = (
+            "ambiguous-source" if len(exact_source_candidates) >= 2 else "missing-source"
+        )
+        result["status"] = "unresolved"
+        result["source_match_status"] = "unresolved"
+        result["unit_match_status"] = (
+            "unresolved" if parsed_locator.get("locator_type") is not None else "none"
+        )
+        result["continued_with_best_effort"] = False
+        result["resolved_source_id"] = None
+        result["resolved_unit_id"] = None
+        result["target_source_ref"] = None
+        result["notice_text"] = (
+            "I could not isolate the requested published source exactly, so I am stopping at "
+            "that boundary."
+            if unresolved_reason == "ambiguous-source"
+            else (
+                "I could not find the requested published source, so I am stopping at a "
+                "missing-source boundary."
+            )
+        )
+        result["unresolved_reason"] = unresolved_reason
+        result["hard_boundary"] = True
+    elif result["status"] == "unresolved":
+        result["unresolved_reason"] = (
+            "unresolved-locator"
+            if result["resolved_source_id"] is not None and parsed_locator.get("locator_type")
+            else "ambiguous-source"
+        )
     if result["status"] == "approximate":
         if result["resolved_source_id"] and result["resolved_unit_id"]:
             result["notice_text"] = (
@@ -1060,11 +1234,25 @@ def resolve_reference_query(
                 "I am continuing with the closest published match."
             )
     elif result["status"] == "unresolved":
-        result["continued_with_best_effort"] = True
-        result["notice_text"] = (
-            "I did not find a clear document or locator match. "
-            "I am continuing with the closest published evidence."
+        result["continued_with_best_effort"] = not result["hard_boundary"]
+        if not result["hard_boundary"]:
+            result["notice_text"] = (
+                "I did not find a clear document or locator match. "
+                "I am continuing with the closest published evidence."
+            )
+    result["scope_mode"] = (
+        "compare"
+        if COMPARATIVE_HINT_PATTERN.search(query)
+        else (
+            "source-scoped-hard"
+            if single_source_constraint
+            else (
+                "source-scoped-soft"
+                if result["resolved_source_id"] and result["source_narrowing_allowed"]
+                else "global"
+            )
         )
+    )
     result["match_basis"] = _deduplicate_strings(_string_list(result.get("match_basis")))
     return result
 
@@ -1093,6 +1281,12 @@ def resolve_workspace_reference(
             "candidate_unit_ids": [],
             "continued_with_best_effort": False,
             "notice_text": None,
+            "requested_source_text": None,
+            "scope_mode": "global",
+            "unresolved_reason": None,
+            "hard_boundary": False,
+            "target_source_ref": None,
+            "analysis_guard_applied": False,
         }
     source_records = read_json(source_records_path).get("records", [])
     unit_records = read_json(unit_records_path).get("records", [])

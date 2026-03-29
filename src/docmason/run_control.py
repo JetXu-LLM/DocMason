@@ -628,7 +628,7 @@ def commit_run(
     )
     run_id = str(run_payload["run_id"])
     committed_run_id = turn.get("committed_run_id")
-    if isinstance(committed_run_id, str) and committed_run_id and committed_run_id != run_id:
+    if isinstance(committed_run_id, str) and committed_run_id:
         raise ValueError(
             f"Turn `{turn_id}` is already committed by run `{committed_run_id}`."
         )

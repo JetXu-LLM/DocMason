@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="590" viewBox="0 0 940 590">
+  <defs>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="6" stdDeviation="16" flood-color="#0F172A" flood-opacity="0.05"/>
+      <feDropShadow dx="0" dy="1" stdDeviation="3" flood-color="#0F172A" flood-opacity="0.02"/>
+    </filter>
+    <filter id="shadow-sm" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="3" stdDeviation="10" flood-color="#0F172A" flood-opacity="0.04"/>
+    </filter>
+    <marker id="arr-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#93C5FD"/>
+    </marker>
+    <marker id="arr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#FCD34D"/>
+    </marker>
+    <marker id="arr-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#CBD5E1"/>
+    </marker>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F8FAFC"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .bg{fill:url(#bg)}
+    .panel{fill:#FFF;stroke:#E2E8F0;stroke-width:1}
+    text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif;fill:#0F172A}
+    .t1{font-size:24px;font-weight:700;letter-spacing:-.02em}
+    .t2{font-size:14px;fill:#64748B}
+    .pt{font-size:15px;font-weight:700}
+    .pd{font-size:12px;fill:#64748B}
+    .sn{font-size:11px;font-weight:700;fill:#FFF;text-anchor:middle;dominant-baseline:central}
+    .st{font-size:13px;font-weight:600;fill:#1E293B}
+    .sd{font-size:12px;fill:#64748B}
+    .bb{fill:#FFF;stroke:#E2E8F0;stroke-width:1}
+    .bt{font-size:12px;font-weight:500;fill:#334155;font-style:italic}
+    .ot{font-size:15px;font-weight:700}
+    .od{font-size:13px;fill:#64748B}
+    .pl{fill:#F8FAFC;stroke:#E2E8F0;stroke-width:1}
+    .plt{fill:#475569;font-size:11px;font-weight:600}
+    .lb{stroke:#BFDBFE;stroke-width:2;fill:none}
+    .la{stroke:#FDE68A;stroke-width:2;fill:none}
+    .lm{stroke:#CBD5E1;stroke-width:2;fill:none;stroke-dasharray:5 5}
+    .bl{font-size:11px;font-weight:600}
+  </style>
+
+  <rect class="bg" width="940" height="640"/>
+
+  <!-- Header -->
+  <text class="t1" x="44" y="40">Two ways to reach your first answer</text>
+  <text class="t2" x="44" y="62">Choose how you start. Both paths end with a governed, strictly traceable answer.</text>
+
+  <!-- ==================== PATH A ==================== -->
+  <g transform="translate(44,84)">
+    <rect class="panel" width="410" height="351" rx="12" filter="url(#shadow)"/>
+
+    <!-- Header -->
+    <rect fill="#EFF6FF" x="24" y="18" width="52" height="22" rx="6"/>
+    <text class="bl" fill="#2563EB" x="50" y="33" text-anchor="middle">Path A</text>
+    <text class="pt" x="86" y="34">Start Small</text>
+    <text class="pd" x="24" y="54">Drop a few files and ask right away.</text>
+
+    <!-- Step 1 -->
+    <g transform="translate(24,74)">
+      <circle cx="11" cy="11" r="11" fill="#3B82F6"/>
+      <text class="sn" x="11" y="11.5">1</text>
+      <text class="st" x="32" y="9">Drop files into DocMason/original_doc/</text>
+      <text class="sd" x="32" y="25">.pptx, .docx, .xlsx, PDFs, and more.</text>
+    </g>
+    <path class="lb" d="M 35 100 L 35 136" marker-end="url(#arr-b)"/>
+
+    <!-- Step 2 -->
+    <g transform="translate(24,144)">
+      <circle cx="11" cy="11" r="11" fill="#3B82F6"/>
+      <text class="sn" x="11" y="11.5">2</text>
+      <text class="st" x="32" y="9">Open DocMason folder in Codex</text>
+      <text class="sd" x="32" y="25">Your AI agent is the runtime.</text>
+    </g>
+    <path class="lb" d="M 35 170 L 35 206" marker-end="url(#arr-b)"/>
+
+    <!-- Step 3 -->
+    <g transform="translate(24,214)">
+      <circle cx="11" cy="11" r="11" fill="#3B82F6"/>
+      <text class="sn" x="11" y="11.5">3</text>
+      <text class="st" x="32" y="9">Ask your question</text>
+      <text class="sd" x="32" y="25">DocMason guides setup and builds the KB.</text>
+      <rect class="bb" x="32" y="31" width="340" height="30" rx="6"/>
+      <text class="bt" x="44" y="51">"What are the rollout risks in these docs?"</text>
+    </g>
+    <path class="lb" d="M 35 240 L 35 276" marker-end="url(#arr-b)"/>
+
+    <!-- Auto step -->
+    <g transform="translate(24,284)">
+      <circle cx="11" cy="11" r="11" fill="#CBD5E1"/>
+      <path d="M 7 11 L 10 14 L 15 9" fill="none" stroke="#FFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text class="st" x="32" y="9" fill="#64748B">Setup is automatic</text>
+      <text class="sd" x="32" y="25" fill="#94A3B8">Just approve when prompted.</text>
+    </g>
+  </g>
+
+  <!-- ==================== PATH B ==================== -->
+  <g transform="translate(486,84)">
+    <rect class="panel" width="410" height="351" rx="12" filter="url(#shadow)"/>
+
+    <!-- Header -->
+    <rect fill="#FFFBEB" x="24" y="18" width="52" height="22" rx="6"/>
+    <text class="bl" fill="#D97706" x="50" y="33" text-anchor="middle">Path B</text>
+    <text class="pt" x="86" y="34">Stage Entire Folders</text>
+    <text class="pd" x="24" y="54">For large, department-level document sets.</text>
+
+    <!-- Step 1 -->
+    <g transform="translate(24,74)">
+      <circle cx="11" cy="11" r="11" fill="#F59E0B"/>
+      <text class="sn" x="11" y="11.5">1</text>
+      <text class="st" x="32" y="9" style="font-size:11.5px">Drop folders into DocMason/original_doc/</text>
+      <text class="sd" x="32" y="25">.pptx, .docx, .xlsx, PDFs, and more.</text>
+    </g>
+    <path class="la" d="M 35 100 L 35 136" marker-end="url(#arr-a)"/>
+
+    <!-- Step 2 -->
+    <g transform="translate(24,144)">
+      <circle cx="11" cy="11" r="11" fill="#F59E0B"/>
+      <text class="sn" x="11" y="11.5">2</text>
+      <text class="st" x="32" y="9">Open DocMason folder in Codex</text>
+      <text class="sd" x="32" y="25">Your AI agent is the runtime.</text>
+    </g>
+    <path class="la" d="M 35 170 L 35 206" marker-end="url(#arr-a)"/>
+
+    <!-- Step 3 -->
+    <g transform="translate(24,214)">
+      <circle cx="11" cy="11" r="11" fill="#F59E0B"/>
+      <text class="sn" x="11" y="11.5">3</text>
+      <text class="st" x="32" y="9">Prepare and sync - send command to Codex</text>
+      <rect class="bb" x="32" y="15" width="340" height="44" rx="6"/>
+      <text class="bt" x="44" y="35">"Prepare the DocMason environment."</text>
+      <text class="bt" x="44" y="51">"Build the knowledge base."</text>
+    </g>
+    <path class="la" d="M 35 240 L 35 276" marker-end="url(#arr-a)"/>
+
+    <!-- Step 4 -->
+    <g transform="translate(24,284)">
+      <circle cx="11" cy="11" r="11" fill="#F59E0B"/>
+      <text class="sn" x="11" y="11.5">4</text>
+      <text class="st" x="32" y="9">Ask complex questions</text>
+      <rect class="bb" x="32" y="17" width="340" height="30" rx="6"/>
+      <text class="bt" x="44" y="37">"Trace the data sovereignty rules."</text>
+    </g>
+  </g>
+
+  <!-- ==================== MERGE ==================== -->
+  <path class="lm" d="M 249 435 L 249 459 L 470 459"/>
+  <path class="lm" d="M 691 435 L 691 459 L 470 459"/>
+  <path class="lm" d="M 470 459 L 470 479" marker-end="url(#arr-g)"/>
+
+  <!-- ==================== OUTCOME ==================== -->
+  <g transform="translate(150,481)">
+    <rect class="panel" width="640" height="80" rx="12" filter="url(#shadow-sm)"/>
+
+    <circle cx="32" cy="40" r="14" fill="#10B981"/>
+    <path d="M 24 40 L 30 46 L 40 34" fill="none" stroke="#FFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <text class="ot" x="58" y="36">Governed, Traceable Answer</text>
+    <text class="od" x="58" y="56">Exact document origin and evidence you can verify.</text>
+
+    <rect class="pl" x="468" y="16" width="146" height="24" rx="12"/>
+    <text class="plt" x="541" y="33" text-anchor="middle">Source Identity</text>
+
+    <rect class="pl" x="468" y="46" width="146" height="24" rx="12"/>
+    <text class="plt" x="541" y="63" text-anchor="middle">Provenance Trace</text>
+  </g>
+</svg>

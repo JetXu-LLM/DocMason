@@ -19,6 +19,11 @@ Do not hand-edit them, create global skill links, or maintain parallel skill cop
 Do not treat low-level Python helpers such as `docmason.ask.prepare_ask_turn()` or
 `docmason.ask.complete_ask_turn()` as preferred host entrypoints.
 They are internal lifecycle primitives behind the canonical `ask` workflow contract.
+For ordinary ask execution, use the repo-provided hidden canonical ask integration
+path rather than reverse engineering `ask.py` or substituting `retrieve` / `trace`
+for canonical ask completion.
+Do not return a final business answer unless the canonical turn has already reached
+legal completion or governed boundary closure.
 
 The import below is optional enrichment.
 If the file exists, Claude gets the richer routing layer.

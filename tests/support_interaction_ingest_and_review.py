@@ -1074,7 +1074,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertFalse(turn["auto_sync_triggered"])
         self.assertTrue(turn["interaction_sync_suggested"])
         self.assertIn(
-            "Pending interaction-derived knowledge appears relevant",
+            "Pending interaction-derived backlog was ignored for this strict source-scoped ask.",
             turn["freshness_notice"],
         )
 

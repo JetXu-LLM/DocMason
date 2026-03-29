@@ -205,6 +205,20 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["log_origin"] = None
     else:
         turn["log_origin"] = normalize_log_origin(turn.get("log_origin"))
+    if "host_provider" not in turn:
+        turn["host_provider"] = None
+    if "host_thread_ref" not in turn:
+        turn["host_thread_ref"] = None
+    if "host_identity_source" not in turn:
+        turn["host_identity_source"] = None
+    if "analysis_guard_applied" not in turn:
+        turn["analysis_guard_applied"] = None
+    if "primary_issue_code" not in turn:
+        turn["primary_issue_code"] = None
+    if "issue_codes" not in turn:
+        turn["issue_codes"] = []
+    if "noncanonical_answer_file_path" not in turn:
+        turn["noncanonical_answer_file_path"] = None
     return turn
 
 
@@ -731,6 +745,10 @@ def base_turn_record(
         "question_domain": None,
         "analysis_origin": None,
         "semantic_analysis": None,
+        "analysis_guard_applied": None,
+        "host_provider": None,
+        "host_thread_ref": None,
+        "host_identity_source": None,
         "evidence_mode": None,
         "support_strategy": None,
         "inspection_scope": None,
@@ -739,13 +757,20 @@ def base_turn_record(
         "published_artifacts_sufficient": None,
         "reference_resolution": None,
         "reference_resolution_summary": None,
+        "source_scope_policy": None,
         "source_escalation_required": None,
         "source_escalation_reason": None,
         "support_basis": None,
         "support_manifest_path": None,
+        "canonical_support_summary": None,
+        "source_scope_satisfied": None,
+        "mixed_support_explainable": None,
+        "primary_issue_code": None,
+        "issue_codes": [],
         "source_escalation_used": False,
         "research_depth": None,
         "bundle_paths": [],
+        "noncanonical_answer_file_path": None,
         "attachments": [],
         "tool_use_audit": None,
         "reconciliation": None,

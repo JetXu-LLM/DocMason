@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 COMMON_TOP_LEVEL_EXCLUDES = {
+    ".docmason",
     ".git",
     ".githooks",
     ".github",
