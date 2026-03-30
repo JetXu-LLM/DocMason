@@ -8,6 +8,7 @@ description: Write bilingual Phase 3 knowledge objects for staged DocMason sourc
 Use this skill when `docmason sync` has prepared staged evidence and the agent must write `knowledge.json`, `summary.md`, or additive `semantic_overlay/<unit-id>.json` sidecars.
 
 This is an internal follow-on workflow behind `knowledge-base-sync`.
+In the normal path, the main agent hands this workflow a bounded governed follow-up packet from the latest sync result before any source-level authoring starts.
 Ordinary users should not need to invoke it by name.
 
 ## Required Capabilities
@@ -20,15 +21,19 @@ If the agent cannot inspect rendered images, stop and explain that the environme
 
 ## Procedure
 
-1. Read `knowledge_base/staging/pending_work.json`.
-2. If a governed Lane B work packet is present under `runtime/control_plane/shared_jobs/<job_id>/lane_b_work.json`, treat that packet as the bounded authoritative source-selection scope for this pass.
-3. If `knowledge_base/staging/hybrid_work.json` exists and contains the staged source you are handling, treat that file as the authoritative hard-artifact overlay queue inside that bounded scope.
-4. Work only on the staged items listed there. Treat each pending source or interaction memory as an independent bounded write scope.
-5. For each pending item, open:
+1. If the current sync result or workflow handoff provides a governed follow-up packet path such as `lane_b_follow_up.work_path`, open that packet first.
+   - prefer the bounded packet path handed off by `knowledge-base-sync`
+   - treat that packet as the authoritative source and unit selection scope for this pass
+   - do not scan shared-job directories to invent a job id when the bounded packet path is already available
+2. Read `knowledge_base/staging/pending_work.json`.
+3. If `knowledge_base/staging/hybrid_work.json` exists, treat that file as the authoritative hard-artifact overlay queue inside the current bounded scope.
+4. Work only on the staged items selected by the governed packet when one exists; otherwise work only on the staged items listed in `pending_work.json`. Treat each pending source or interaction memory as an independent bounded write scope.
+   - when both a governed packet and `hybrid_work.json` are present, use the packet's selected sources and units as the outer boundary and the queued hybrid targets as the inner overlay queue
+5. For each assigned pending item, open:
    - `work_item.json`
    - `source_manifest.json`
    - `evidence_manifest.json`
-   - `knowledge_base/staging/hybrid_work.json` when the sync payload reported `candidate-prepared`
+   - `knowledge_base/staging/hybrid_work.json` when the current sync result reported `candidate-prepared`
    - `artifact_index.json` when present
    - `pdf_document.json` when present
    - `spreadsheet_workbook.json` when present
@@ -48,7 +53,7 @@ If the agent cannot inspect rendered images, stop and explain that the environme
    - a line that mentions the source ID
    - `## English Summary`
    - `## Source-Language Summary`
-9. When the staged source includes high-value hybrid candidates and the environment can inspect renders, write additive `semantic_overlay/<unit-id>.json` sidecars only for the queued units in `hybrid_work.json`.
+9. When the staged source includes high-value hybrid candidates and the environment can inspect renders, write additive `semantic_overlay/<unit-id>.json` sidecars only for units that are inside the current bounded scope and queued in `hybrid_work.json`.
    - prefer overlay work where deterministic structure is already rich but cross-region or multimodal semantics are still missing
    - keep the hard-artifact boundary intact:
      - use the queued `target_artifact_ids`
@@ -76,12 +81,12 @@ If the agent cannot inspect rendered images, stop and explain that the environme
 - If a staged source or interaction memory requires render inspection and the environment cannot inspect renders, stop that item and report the blocker directly.
 - If a cross-source relation is uncertain, omit it rather than guessing.
 - If a chart, table, diagram, or region claim cannot be supported by the published artifacts, write the uncertainty explicitly rather than laundering it through a source-level summary.
-- If `hybrid_work.json` says a source is `candidate-prepared`, do not declare that hybrid lane complete merely because deterministic publication already succeeded.
+- If `hybrid_work.json` says a source is `candidate-prepared`, do not declare the governed follow-up complete merely because deterministic publication already succeeded.
 - Do not publish, validate, or sign off the final sync result from inside this workflow. That judgment belongs to the main agent.
 
 ## Completion Signal
 
-- The workflow is complete when every assigned staged source has updated `knowledge.json` and `summary.md`, or when a concrete capability blocker has been surfaced to the main agent.
+- The workflow is complete when every assigned staged source in the current bounded scope has updated `knowledge.json` and `summary.md`, or when a concrete capability blocker has been surfaced to the main agent.
 
 ## Notes
 

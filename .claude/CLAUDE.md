@@ -17,12 +17,17 @@ Bootstrap, repair, or `docmason sync-adapters` may generate repo-local Claude he
 
 Treat those as generated local helpers, not authored instructions.
 Do not hand-edit them, create global skill links, or maintain parallel skill copies.
+The committed `.claude/settings.json` plus `.claude/hooks/` are the repo's Claude host plumbing.
+They support native capture, audit, and repo-local shim refresh; they are not a replacement for bootstrap or for canonical ordinary ask execution.
+When `.venv` is absent, hook behavior remains best-effort and may only surface bootstrap guidance rather than full workspace capability.
 Do not treat low-level Python helpers in `docmason.ask` as preferred host entrypoints.
 They are internal lifecycle primitives behind the canonical `ask` workflow contract.
 The exact Claude-side execution wiring belongs in the generated adapter layer, not in this committed entry file.
-For ordinary ask execution, rely on the repo-provided Claude adapter guidance,
-generated helpers, and committed hooks rather than reverse engineering
-`ask.py`.
+For ordinary ask execution, rely on the repo-provided Claude adapter guidance
+and generated helpers for routing and callable bindings rather than reverse
+engineering `ask.py`.
+Use committed hooks as Claude-side capture and shim plumbing, not as the
+ordinary ask front door.
 Do not reverse engineer `ask.py` or substitute `retrieve` / `trace` for
 canonical ask completion.
 Do not return a final business answer unless the canonical turn has already reached

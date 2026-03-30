@@ -50,7 +50,7 @@ If the environment cannot inspect the required evidence, stop and explain the bl
      - `spreadsheet_sheet/*.json`
      - `pdf_document.json`
      - `semantic_overlay/*.json` when present
-  - if the composition task still depends on unresolved hard-artifact semantics, the canonical path must enter the governed ask-time multimodal refresh before any source fallback
+   - if the composition task still depends on unresolved hard-artifact semantics, the canonical path must enter the governed ask-time multimodal refresh before any source fallback
      - use `recommended_hybrid_targets` as the only legal narrowing entrypoint
      - write the current-turn `hybrid_refresh_work.json`
      - reuse a matching shared refresh result when the turn is a waiter

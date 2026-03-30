@@ -37,9 +37,9 @@ If the agent cannot run local commands or inspect the resulting artifacts, stop 
    - publish to `knowledge_base/current`
 5. If `sync_status` is `valid` or `warnings`, inspect `hybrid_enrichment`.
    - if `mode` is `not-needed` or `covered`, stop and return the publication result
-   - if the sync payload also includes `lane_b_follow_up.work_path`, treat that governed work packet as the bounded staging-scoped multimodal follow-up for this sync state
-   - prefer the governed `lane_b_follow_up.work_path` packet over consuming the entire queue blindly when it is available
-   - if `mode` is `candidate-prepared` or `partially-covered`, treat `hybrid_work_path` as the authoritative hard-artifact queue
+   - if the sync payload also includes `lane_b_follow_up.work_path`, open that governed work packet first and treat it as the authoritative next step for this sync state
+   - when that governed packet is present, do not consume the broad queue blindly; only fall back to `hybrid_work_path` when no bounded packet was handed off
+   - if `mode` is `candidate-prepared` or `partially-covered` and no governed packet path was handed off, treat `hybrid_work_path` as the authoritative hard-artifact queue
    - do not improvise a second sync path or rewrite deterministic sidecars
    - write only additive `semantic_overlay/` sidecars for units you can support honestly, then rerun `docmason sync --json`
 6. Treat `pending-synthesis` as a compatibility or deliberate manual-mode state, not the normal operator destination.
