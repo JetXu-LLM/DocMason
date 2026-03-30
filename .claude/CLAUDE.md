@@ -22,7 +22,7 @@ They support native capture, audit, and repo-local shim refresh; they are not a 
 When `.venv` is absent, hook behavior remains best-effort and may only surface bootstrap guidance rather than full workspace capability.
 Do not treat low-level Python helpers in `docmason.ask` as preferred host entrypoints.
 They are internal lifecycle primitives behind the canonical `ask` workflow contract.
-The exact Claude-side execution wiring belongs in the generated adapter layer, not in this committed entry file.
+The exact Claude-side ordinary ask callable binding belongs in the generated adapter layer, not in this committed entry file.
 For ordinary ask execution, rely on the repo-provided Claude adapter guidance
 and generated helpers for routing and callable bindings rather than reverse
 engineering `ask.py`.

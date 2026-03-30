@@ -23,6 +23,7 @@ Detailed workflow procedure belongs in `skills/canonical/*/SKILL.md`.
 - It is the user-facing top-level workflow for ordinary natural-language requests.
 - Use it as the default top-level workflow for a new ordinary user request in this workspace unless the request is clearly explicit operator work.
 - `ask` remains the only ordinary natural-language front door.
+- `Plan Mode` or a similar host planning/collaboration mode should not discourage the host from opening canonical `ask` for an ordinary user request; if the current mode still blocks `ask`, the host should use a concise in-band alert or approval question and continue the same user task in the most natural available way rather than silently defaulting to operator-direct or side-path work.
 - Ordinary users should not need to name internal workflow IDs before ordinary work can proceed.
 - Reading `AGENTS.md`, reading a skill, reconciling a native thread, calling internal ask lifecycle helpers, or doing direct `retrieve`, `trace`, or raw-source inspection does not open a canonical ask turn.
 - If the current request has not been opened as a canonical ask turn, do not present raw `retrieve`, `trace`, reconciliation, or helper-driven side-path work as a completed ordinary answer. Surface that boundary instead.

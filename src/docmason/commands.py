@@ -54,7 +54,7 @@ from .project import (
     supported_source_documents,
     write_json,
 )
-from .review import refresh_log_review_summary
+from .review import record_runtime_review_request, refresh_log_review_summary
 from .run_control import record_run_event_for_runs, record_shared_job_settled_once
 from .toolchain import (
     PREPARED_WORKSPACE_PYTHON_BASELINE,
@@ -785,6 +785,70 @@ def make_report(status: str, payload: dict[str, Any], lines: list[str]) -> Comma
     if "status" in payload:
         payload["status"] = status
     return CommandReport(exit_code=exit_code, payload=payload, lines=lines)
+
+
+def bootstrap_workspace_with_launcher(
+    paths: WorkspacePaths | None = None,
+    *,
+    command_runner: CommandRunner = default_runner,
+) -> CommandReport:
+    """Run the canonical zero-to-working bootstrap launcher and normalize its result."""
+    workspace = paths or locate_workspace()
+    launcher_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+    launcher_command = "./scripts/bootstrap-workspace.sh --yes --json"
+    if not launcher_path.exists():
+        missing_payload: dict[str, Any] = {
+            "status": ACTION_REQUIRED,
+            "detail": "The canonical workspace bootstrap launcher is missing.",
+            "launcher_command": launcher_command,
+            "launcher_delegated": True,
+            "next_steps": [manual_workspace_recovery_doc()],
+        }
+        lines: list[str] = [
+            f"Bootstrap launcher status: {ACTION_REQUIRED}",
+            str(missing_payload["detail"]),
+        ]
+        return make_report(ACTION_REQUIRED, missing_payload, lines)
+
+    execution = command_runner(["/bin/bash", str(launcher_path), "--yes", "--json"], workspace.root)
+    payload: dict[str, Any] = {}
+    stdout_text = execution.stdout.strip()
+    if stdout_text:
+        try:
+            decoded = json.loads(stdout_text)
+            if isinstance(decoded, dict):
+                payload = decoded
+        except json.JSONDecodeError:
+            payload = {}
+
+    status = str(payload.get("status") or "")
+    if status not in {READY, DEGRADED, ACTION_REQUIRED}:
+        status = READY if execution.exit_code == 0 else ACTION_REQUIRED
+
+    detail = str(payload.get("detail") or "").strip()
+    if not detail:
+        detail = execution.stderr or stdout_text or "The bootstrap launcher returned no detail."
+
+    normalized_payload = {
+        **payload,
+        "status": status,
+        "detail": detail,
+        "launcher_command": launcher_command,
+        "launcher_delegated": True,
+        "launcher_exit_code": execution.exit_code,
+    }
+    if execution.stderr:
+        normalized_payload["launcher_stderr"] = execution.stderr
+
+    next_steps = normalized_payload.get("next_steps")
+    if not isinstance(next_steps, list):
+        normalized_payload["next_steps"] = []
+
+    lines = [
+        f"Bootstrap launcher status: {status}",
+        detail,
+    ]
+    return make_report(status, normalized_payload, lines)
 
 
 @contextmanager
@@ -2268,29 +2332,40 @@ def doctor_workspace(
             next_step,
         )
     else:
+        repair_count = len(control_plane.get("repair_actions", []))
         add_check(
             "control-plane",
             READY,
             (
                 "No confirmation-required shared control-plane job is currently "
                 "blocking the workspace."
+                + (
+                    f" Recent auto-repairs={repair_count}."
+                    if repair_count
+                    else ""
+                )
             ),
         )
 
     knowledge_base = knowledge_base_snapshot(workspace)
     storage_lifecycle = knowledge_base.get("storage_lifecycle", {})
     if isinstance(storage_lifecycle, dict) and storage_lifecycle:
+        detail = (
+            "Storage lifecycle tracks "
+            f"{storage_lifecycle.get('family_count', 0)} artifact families, "
+            f"{storage_lifecycle.get('published_root_count', 0)} live published root(s), "
+            "and "
+            f"{storage_lifecycle.get('publish_ledger_count', 0)} publish ledger record(s)."
+        )
+        if knowledge_base.get("legacy_archive_detected"):
+            detail += (
+                " Legacy archive storage is still present and will be compacted on the next "
+                "mutating sync."
+            )
         add_check(
             "storage-lifecycle",
             READY,
-            (
-                "Storage lifecycle tracks "
-                f"{storage_lifecycle.get('family_count', 0)} artifact families, "
-                f"{storage_lifecycle.get('pinned_snapshot_count', 0)} pinned snapshot(s), "
-                "and "
-                f"{len(storage_lifecycle.get('eligible_delete_snapshot_ids', []))} "
-                "snapshot(s) eligible for deletion on the next retention pass."
-            ),
+            detail,
         )
     else:
         add_check(
@@ -2415,6 +2490,9 @@ def status_workspace(
             + " active answer-critical job(s)"
         ),
     ]
+    control_plane_repairs = payload.get("control_plane", {}).get("repair_actions", [])
+    if isinstance(control_plane_repairs, list) and control_plane_repairs:
+        lines.append(f"Control-plane repairs: {len(control_plane_repairs)}")
     rebuild_telemetry = payload["knowledge_base"].get("last_sync_rebuild_telemetry", {})
     if isinstance(rebuild_telemetry, dict) and rebuild_telemetry:
         lines.append(
@@ -2442,9 +2520,16 @@ def status_workspace(
         lines.append(
             "Storage lifecycle: "
             f"families={storage_lifecycle.get('family_count', 0)}, "
-            f"pinned_snapshots={storage_lifecycle.get('pinned_snapshot_count', 0)}, "
-            "expiring_snapshots="
-            f"{len(storage_lifecycle.get('eligible_delete_snapshot_ids', []))}"
+            f"publish_model={storage_lifecycle.get('publish_model', 'single-current')}, "
+            f"published_roots={storage_lifecycle.get('published_root_count', 0)}, "
+            "publish_ledger_entries="
+            f"{storage_lifecycle.get('publish_ledger_count', 0)}"
+        )
+    if payload["knowledge_base"].get("legacy_archive_detected"):
+        lines.append(
+            "Legacy publish storage: "
+            f"detected (versions={payload['knowledge_base'].get('legacy_archive_version_count', 0)}); "
+            "the next mutating sync will compact it into single-current mode."
         )
     if pending_actions:
         lines.append(f"Pending actions: {', '.join(pending_actions)}")
@@ -2526,7 +2611,7 @@ def sync_workspace(
                 "next_workflows": [],
                 "next_steps": readiness_next_steps,
                 "rebuild_telemetry": {},
-                "snapshot_retention": {},
+                "publish_storage": {},
                 "lane_b_follow_up": {},
                 "lane_b_follow_up_summary": {},
             }
@@ -2614,7 +2699,7 @@ def sync_workspace(
                 "next_workflows": [],
                 "next_steps": ["Run `docmason sync --yes` to approve and continue."],
                 "rebuild_telemetry": {},
-                "snapshot_retention": {},
+                "publish_storage": {},
                 "lane_b_follow_up": {},
                 "lane_b_follow_up_summary": {},
             }
@@ -2667,7 +2752,7 @@ def sync_workspace(
                     "Wait for the active shared sync job to settle, then retry if needed."
                 ],
                 "rebuild_telemetry": {},
-                "snapshot_retention": {},
+                "publish_storage": {},
                 "lane_b_follow_up": {},
                 "lane_b_follow_up_summary": {},
             }
@@ -2756,7 +2841,7 @@ def sync_workspace(
         "repair_actions": result.get("repair_actions", []),
         "projection_state": result.get("projection_state", {}),
         "rebuild_telemetry": result.get("rebuild_telemetry", {}),
-        "snapshot_retention": result.get("snapshot_retention", {}),
+        "publish_storage": result.get("publish_storage", {}),
         "lane_b_follow_up": result.get("lane_b_follow_up", {}),
         "lane_b_follow_up_summary": result.get("lane_b_follow_up_summary", {}),
         "pending_work_path": pending_work_path,
@@ -3466,7 +3551,7 @@ def sync_adapters(
 
 
 def review_runtime_logs(paths: WorkspacePaths | None = None) -> CommandReport:
-    """Refresh and summarize the current runtime review artifacts."""
+    """Refresh, summarize, and audit one runtime review request."""
     workspace = paths or locate_workspace()
     command_context = _reconcile_command_context(workspace, mutating=False)
     summary = refresh_log_review_summary(workspace)
@@ -3474,10 +3559,17 @@ def review_runtime_logs(paths: WorkspacePaths | None = None) -> CommandReport:
     recent_query_sessions = summary.get("query_sessions", {}).get("recent", [])
     candidates = read_json(workspace.benchmark_candidates_path).get("candidates", [])
     if not recent_conversations and not recent_query_sessions:
+        request_artifact = record_runtime_review_request(
+            workspace,
+            summary=summary,
+            final_status=DEGRADED,
+        )
         payload = {
             "status": DEGRADED,
             "review_summary": summary,
             "benchmark_candidates": {"candidate_count": len(candidates), "candidates": candidates},
+            "review_request_id": request_artifact["request_id"],
+            "review_request_path": request_artifact["artifact_path"],
         }
         lines = [
             f"Runtime review status: {DEGRADED}",
@@ -3494,10 +3586,17 @@ def review_runtime_logs(paths: WorkspacePaths | None = None) -> CommandReport:
         )
         return make_report(DEGRADED, payload, lines)
 
+    request_artifact = record_runtime_review_request(
+        workspace,
+        summary=summary,
+        final_status=READY,
+    )
     payload = {
         "status": READY,
         "review_summary": summary,
         "benchmark_candidates": {"candidate_count": len(candidates), "candidates": candidates},
+        "review_request_id": request_artifact["request_id"],
+        "review_request_path": request_artifact["artifact_path"],
     }
     lines = [
         f"Runtime review status: {READY}",

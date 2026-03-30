@@ -863,9 +863,11 @@ def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
 def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     from .interaction import interaction_ingest_snapshot
     from .project import cached_bootstrap_readiness, knowledge_base_snapshot
+    from .run_control import repair_stale_active_runs
     from .workspace_probe import preview_source_changes
 
     repair_actions = repair_stale_shared_jobs(paths)
+    repair_actions.extend(repair_stale_active_runs(paths))
     environment_state = cached_bootstrap_readiness(paths, require_sync_capability=False)
     sync_environment_state = cached_bootstrap_readiness(paths, require_sync_capability=True)
     ready = bool(environment_state.get("ready"))

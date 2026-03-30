@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .admissibility import evaluate_commit_admissibility
-from .commands import ACTION_REQUIRED, prepare_workspace
+from .commands import ACTION_REQUIRED, bootstrap_workspace_with_launcher, prepare_workspace
 from .commands import sync_workspace as run_sync_command
 from .control_plane import (
     approve_shared_job,
@@ -679,6 +679,8 @@ def _auto_prepare_summary(report: Any) -> dict[str, Any]:
     environment: dict[str, Any] = raw_environment if isinstance(raw_environment, dict) else {}
     return {
         "status": payload.get("status"),
+        "detail": payload.get("detail"),
+        "prepare_status": payload.get("prepare_status"),
         "actions_performed": list(payload.get("actions_performed", [])),
         "actions_skipped": list(payload.get("actions_skipped", [])),
         "next_steps": list(payload.get("next_steps", [])),
@@ -686,6 +688,8 @@ def _auto_prepare_summary(report: Any) -> dict[str, Any]:
         if isinstance(payload.get("control_plane"), dict)
         else {},
         "package_manager": environment.get("package_manager"),
+        "launcher_delegated": bool(payload.get("launcher_delegated")),
+        "launcher_command": payload.get("launcher_command"),
         "manual_recovery_doc": (
             payload.get("manual_recovery_doc")
             or environment.get("manual_recovery_doc")
@@ -714,6 +718,33 @@ def _prepare_with_optional_owner(
         if "unexpected keyword argument" not in str(exc):
             raise
         return prepare_workspace(paths, assume_yes=assume_yes, interactive=interactive)
+
+
+def _prepare_requires_launcher_follow_on(summary: dict[str, Any] | None) -> bool:
+    if not isinstance(summary, dict):
+        return False
+    if str(summary.get("status") or "") != ACTION_REQUIRED:
+        return False
+    if isinstance(summary.get("control_plane"), dict) and summary.get("control_plane"):
+        return False
+    summary_text = " ".join(
+        [
+            str(summary.get("detail") or ""),
+            str(summary.get("prepare_status") or ""),
+            *[
+                str(item)
+                for item in summary.get("next_steps", [])
+                if isinstance(item, str) and item.strip()
+            ],
+        ]
+    )
+    launcher_hints = (
+        "Install Python 3.11 or newer",
+        "Python 3.11 or newer",
+        "No supported Python 3.11+ bootstrap interpreter",
+        "Could not find a supported Python 3.11+ bootstrap interpreter",
+    )
+    return any(hint in summary_text for hint in launcher_hints)
 
 
 def _sync_with_optional_owner(
@@ -750,12 +781,23 @@ def _ensure_workspace_environment(
     reason = str(cached.get("detail") or "The cached bootstrap marker is missing or invalid.")
     report = _prepare_with_optional_owner(
         paths,
-        assume_yes=False,
+        assume_yes=True,
         interactive=False,
         run_id=run_id,
     )
     summary = _auto_prepare_summary(report)
     refreshed = cached_bootstrap_readiness(paths, require_sync_capability=require_sync_capability)
+    if not refreshed["ready"] and _prepare_requires_launcher_follow_on(summary):
+        record_run_event_if_present(
+            paths,
+            run_id=run_id,
+            stage="prepare",
+            event_type="auto-prepare-delegated-launcher",
+            payload={"reason": summary.get("detail"), "launcher": "./scripts/bootstrap-workspace.sh"},
+        )
+        launcher_report = bootstrap_workspace_with_launcher(paths)
+        summary = _auto_prepare_summary(launcher_report)
+        refreshed = cached_bootstrap_readiness(paths, require_sync_capability=require_sync_capability)
     return bool(refreshed["ready"]), refreshed, True, reason, summary
 
 

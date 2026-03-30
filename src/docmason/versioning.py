@@ -1,20 +1,22 @@
-"""Published-snapshot helpers for DocMason knowledge-base publication."""
+"""Published-state helpers for the single-current DocMason KB model."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from .coordination import workspace_lease
-from .project import WorkspacePaths, list_visible_files, read_json, write_json
+from .project import WorkspacePaths, append_jsonl, read_json, write_json
 
-SNAPSHOT_RETENTION_SCHEMA_VERSION = 1
-DEFAULT_UNPINNED_SNAPSHOT_RETENTION_COUNT = 2
-DEFAULT_UNPINNED_SNAPSHOT_RETENTION_DAYS = 3
+PUBLISH_LEDGER_SCHEMA_VERSION = 1
+PUBLISH_DRIVER_SOURCE_DELTA = "source-delta"
+PUBLISH_DRIVER_INTERACTION_PROMOTION = "interaction-promotion"
+PUBLISH_DRIVER_LEGACY_UNKNOWN = "legacy-unknown"
 
 
 def _utc_now() -> str:
@@ -30,7 +32,327 @@ def _parse_timestamp(value: Any) -> datetime | None:
         return None
 
 
-def _snapshot_records(paths: WorkspacePaths) -> list[dict[str, Any]]:
+def _remove_path(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    shutil.rmtree(path)
+
+
+def _relative_path(paths: WorkspacePaths, path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.relative_to(paths.root))
+    except ValueError:
+        return str(path)
+
+
+def _file_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_symlink():
+        try:
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError:
+            return 0
+        if resolved.is_dir():
+            return sum(1 for item in resolved.rglob("*") if item.is_file())
+        return 1
+    if path.is_file():
+        return 1
+    return sum(1 for item in path.rglob("*") if item.is_file())
+
+
+def build_snapshot_id(validation_report: dict[str, Any]) -> str:
+    """Build a logical publish-generation identifier."""
+    source_signature = str(validation_report.get("source_signature") or "unknown")
+    return f"{source_signature[:12]}-{uuid.uuid4().hex[:12]}"
+
+
+def _published_roots(paths: WorkspacePaths) -> list[Path]:
+    if not paths.knowledge_base_published_dir.exists():
+        return []
+    return sorted(
+        path
+        for path in paths.knowledge_base_published_dir.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    )
+
+
+def _current_hidden_publish_root(paths: WorkspacePaths) -> Path | None:
+    current_path = paths.knowledge_base_current_dir
+    if not current_path.is_symlink():
+        return None
+    try:
+        resolved = current_path.resolve(strict=True)
+    except FileNotFoundError:
+        return None
+    if resolved.parent == paths.knowledge_base_published_dir:
+        return resolved
+    return None
+
+
+def _switch_current_to_root(paths: WorkspacePaths, target_root: Path) -> Path | None:
+    current_path = paths.knowledge_base_current_dir
+    temp_link = paths.knowledge_base_dir / f".current-link-{target_root.name}"
+    backup_dir: Path | None = None
+    _remove_path(temp_link)
+    target = Path(os.path.relpath(target_root, paths.knowledge_base_dir))
+    os.symlink(target, temp_link)
+
+    if current_path.exists() and not current_path.is_symlink():
+        backup_dir = paths.knowledge_base_dir / f".legacy-current-backup-{uuid.uuid4().hex[:12]}"
+        _remove_path(backup_dir)
+        os.replace(current_path, backup_dir)
+
+    os.replace(temp_link, current_path)
+    return backup_dir
+
+
+def _normalize_interaction_manifest(root: Path) -> None:
+    interaction_manifest_path = root / "interaction" / "manifest.json"
+    interaction_manifest = read_json(interaction_manifest_path)
+    if not interaction_manifest:
+        return
+    interaction_manifest["pending_entry_count"] = 0
+    interaction_manifest["pending_memory_count"] = 0
+    write_json(interaction_manifest_path, interaction_manifest)
+
+
+def _write_publish_pointer(
+    paths: WorkspacePaths,
+    *,
+    snapshot_id: str,
+    published_at: str,
+    published_source_signature: str | None,
+    published_root: Path,
+) -> None:
+    write_json(
+        paths.current_publish_pointer_path,
+        {
+            "snapshot_id": snapshot_id,
+            "published_root_path": _relative_path(paths, published_root),
+            "published_at": published_at,
+            "published_source_signature": published_source_signature,
+        },
+    )
+
+
+def _prune_published_roots(paths: WorkspacePaths, *, keep_roots: set[Path]) -> list[str]:
+    deleted: list[str] = []
+    for root in _published_roots(paths):
+        if root in keep_roots:
+            continue
+        deleted.append(str(root.name))
+        _remove_path(root)
+    return deleted
+
+
+def publish_ledger_entries(paths: WorkspacePaths) -> list[dict[str, Any]]:
+    """Load the compact logical publish ledger."""
+    if not paths.publish_ledger_path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in paths.publish_ledger_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
+def _ledger_snapshot_ids(paths: WorkspacePaths) -> set[str]:
+    return {
+        str(record.get("snapshot_id"))
+        for record in publish_ledger_entries(paths)
+        if isinstance(record.get("snapshot_id"), str) and record.get("snapshot_id")
+    }
+
+
+def append_publish_ledger_record(
+    paths: WorkspacePaths,
+    *,
+    snapshot_id: str,
+    published_at: str,
+    published_source_signature: str | None,
+    validation_status: str | None,
+    rebuild_cause: str | None,
+    publish_driver: str,
+    legacy_backfilled: bool = False,
+) -> dict[str, Any]:
+    """Append one logical publish-generation record."""
+    payload = {
+        "schema_version": PUBLISH_LEDGER_SCHEMA_VERSION,
+        "recorded_at": _utc_now(),
+        "snapshot_id": snapshot_id,
+        "published_at": published_at,
+        "published_source_signature": published_source_signature,
+        "validation_status": validation_status,
+        "rebuild_cause": rebuild_cause,
+        "publish_driver": publish_driver,
+        "legacy_backfilled": legacy_backfilled,
+    }
+    append_jsonl(paths.publish_ledger_path, payload)
+    return payload
+
+
+def _publish_storage_summary(paths: WorkspacePaths, *, recent_limit: int = 5) -> dict[str, Any]:
+    ledger = publish_ledger_entries(paths)
+    current_manifest = read_json(paths.current_publish_manifest_path)
+    current_pointer = read_json(paths.current_publish_pointer_path)
+    legacy = legacy_publish_storage_state(paths)
+    recent_records = list(reversed(ledger[-recent_limit:]))
+    return {
+        "publish_model": "single-current",
+        "current_snapshot_id": current_manifest.get("snapshot_id")
+        or current_pointer.get("snapshot_id"),
+        "published_root_count": len(_published_roots(paths)),
+        "publish_ledger_count": len(ledger),
+        "recent_publish_snapshot_ids": [
+            record["snapshot_id"]
+            for record in recent_records
+            if isinstance(record.get("snapshot_id"), str) and record.get("snapshot_id")
+        ],
+        "legacy_archive_detected": legacy["detected"],
+        "legacy_archive_version_count": legacy["archive_manifest_count"],
+        "legacy_runtime_files": legacy["legacy_runtime_files"],
+        "legacy_archive_note": legacy.get("note"),
+    }
+
+
+def storage_lifecycle_summary(paths: WorkspacePaths) -> dict[str, Any]:
+    """Return a compact artifact-family lifecycle summary for local workspace storage."""
+
+    publish_storage = _publish_storage_summary(paths)
+
+    def family(
+        *,
+        name: str,
+        path: Path,
+        truth_class: str,
+        retention_unit: str,
+        delete_trigger: str,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "name": name,
+            "path": _relative_path(paths, path),
+            "present": path.exists(),
+            "file_count": _file_count(path),
+            "truth_class": truth_class,
+            "retention_unit": retention_unit,
+            "delete_trigger": delete_trigger,
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    families = [
+        family(
+            name="published-roots",
+            path=paths.knowledge_base_published_dir,
+            truth_class="canonical",
+            retention_unit="publish-root",
+            delete_trigger="next-publish-switch",
+            extra={"root_count": publish_storage["published_root_count"]},
+        ),
+        family(
+            name="current-published",
+            path=paths.knowledge_base_current_dir,
+            truth_class="canonical",
+            retention_unit="publish-surface",
+            delete_trigger="next-publish-switch",
+            extra={"current_snapshot_id": publish_storage["current_snapshot_id"]},
+        ),
+        family(
+            name="staging",
+            path=paths.knowledge_base_staging_dir,
+            truth_class="rebuildable",
+            retention_unit="staging-tree",
+            delete_trigger="next-sync-or-manual-cleanup",
+        ),
+        family(
+            name="publish-ledger",
+            path=paths.publish_ledger_path,
+            truth_class="canonical",
+            retention_unit="publish-generation-record",
+            delete_trigger="manual-runtime-cleanup",
+            extra={"entry_count": publish_storage["publish_ledger_count"]},
+        ),
+        family(
+            name="answers",
+            path=paths.answers_dir,
+            truth_class="canonical",
+            retention_unit="answer-file",
+            delete_trigger="manual-runtime-cleanup",
+        ),
+        family(
+            name="query-sessions",
+            path=paths.query_sessions_dir,
+            truth_class="derived",
+            retention_unit="session-log",
+            delete_trigger="manual-runtime-cleanup",
+        ),
+        family(
+            name="retrieval-traces",
+            path=paths.retrieval_traces_dir,
+            truth_class="derived",
+            retention_unit="trace-log",
+            delete_trigger="manual-runtime-cleanup",
+        ),
+        family(
+            name="review-artifacts",
+            path=paths.review_logs_dir,
+            truth_class="derived",
+            retention_unit="review-artifact",
+            delete_trigger="manual-runtime-cleanup",
+        ),
+        family(
+            name="control-plane",
+            path=paths.control_plane_dir,
+            truth_class="canonical",
+            retention_unit="job-or-state-record",
+            delete_trigger="settlement-or-manual-cleanup",
+        ),
+        family(
+            name="interaction-ingest",
+            path=paths.interaction_ingest_dir,
+            truth_class="transient",
+            retention_unit="ingest-entry",
+            delete_trigger="promotion-or-manual-cleanup",
+        ),
+        family(
+            name="agent-work",
+            path=paths.agent_work_dir,
+            truth_class="transient",
+            retention_unit="work-artifact",
+            delete_trigger="manual-cleanup",
+        ),
+        family(
+            name="eval-artifacts",
+            path=paths.eval_dir,
+            truth_class="derived",
+            retention_unit="eval-run-or-baseline",
+            delete_trigger="manual-cleanup",
+        ),
+    ]
+    return {
+        "family_count": len(families),
+        **publish_storage,
+        "families": families,
+    }
+
+
+def publish_storage_summary(paths: WorkspacePaths) -> dict[str, Any]:
+    """Return the compact publish-storage summary used by status and sync surfaces."""
+    return _publish_storage_summary(paths)
+
+
+def _legacy_snapshot_records(paths: WorkspacePaths) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if not paths.knowledge_base_versions_dir.exists():
         return records
@@ -39,408 +361,254 @@ def _snapshot_records(paths: WorkspacePaths) -> list[dict[str, Any]]:
             continue
         publish_manifest = read_json(snapshot_dir / "publish_manifest.json")
         validation_report = read_json(snapshot_dir / "validation_report.json")
+        if not publish_manifest and not validation_report:
+            continue
         snapshot_id = str(publish_manifest.get("snapshot_id") or snapshot_dir.name)
-        published_at = publish_manifest.get("published_at")
-        published_source_signature = (
-            publish_manifest.get("published_source_signature")
-            or validation_report.get("source_signature")
-        )
         records.append(
             {
                 "snapshot_id": snapshot_id,
-                "path": str(snapshot_dir.relative_to(paths.root)),
                 "directory": snapshot_dir,
-                "published_at": published_at,
-                "published_source_signature": published_source_signature,
-                "validation_status": publish_manifest.get("validation_status"),
+                "published_at": publish_manifest.get("published_at"),
+                "published_source_signature": publish_manifest.get("published_source_signature")
+                or validation_report.get("source_signature"),
+                "validation_status": publish_manifest.get("validation_status")
+                or validation_report.get("status"),
             }
         )
     records.sort(
         key=lambda item: (
             _parse_timestamp(item.get("published_at")) or datetime.min.replace(tzinfo=UTC),
             str(item.get("snapshot_id") or ""),
-        ),
-        reverse=True,
+        )
     )
     return records
 
 
-def _record_snapshot_pin(pin_reasons: dict[str, list[str]], snapshot_id: str, reason: str) -> None:
-    if not snapshot_id or not reason:
-        return
-    reasons = pin_reasons.setdefault(snapshot_id, [])
-    if reason not in reasons:
-        reasons.append(reason)
+def legacy_publish_storage_state(paths: WorkspacePaths) -> dict[str, Any]:
+    """Describe whether the workspace still carries the old archive-retention model."""
+    legacy_runtime_files = [
+        _relative_path(paths, path)
+        for path in (paths.snapshot_retention_state_path, paths.snapshot_pins_path)
+        if path.exists()
+    ]
+    archive_records = _legacy_snapshot_records(paths)
+    detected = (
+        paths.knowledge_base_versions_dir.exists()
+        or bool(legacy_runtime_files)
+        or (
+            paths.knowledge_base_current_dir.is_symlink()
+            and paths.knowledge_base_current_dir.resolve(strict=False).parent
+            == paths.knowledge_base_versions_dir
+        )
+    )
+    note = None
+    if detected:
+        note = (
+            "Legacy archived KB storage is still present and will be compacted on the next "
+            "mutating sync."
+        )
+    return {
+        "detected": detected,
+        "archive_manifest_count": len(archive_records),
+        "archive_snapshot_ids": [
+            record["snapshot_id"]
+            for record in archive_records
+            if isinstance(record.get("snapshot_id"), str)
+        ],
+        "legacy_runtime_files": [value for value in legacy_runtime_files if isinstance(value, str)],
+        "note": note,
+    }
 
 
-def _snapshot_pin_reasons(paths: WorkspacePaths) -> dict[str, list[str]]:
-    pin_reasons: dict[str, list[str]] = {}
+def _current_published_source_dir(paths: WorkspacePaths) -> Path | None:
+    current_path = paths.knowledge_base_current_dir
+    if current_path.is_symlink():
+        try:
+            resolved = current_path.resolve(strict=True)
+        except FileNotFoundError:
+            resolved = None
+        if isinstance(resolved, Path) and resolved.is_dir():
+            return resolved
+    if current_path.exists() and current_path.is_dir():
+        return current_path
 
-    current_pointer = read_json(paths.knowledge_base_dir / "current-pointer.json")
-    current_snapshot_id = str(current_pointer.get("snapshot_id") or "")
-    if current_snapshot_id:
-        _record_snapshot_pin(pin_reasons, current_snapshot_id, "current")
-
-    if paths.runs_dir.exists():
-        for run_state_path in sorted(paths.runs_dir.glob("*/state.json")):
-            run_state = read_json(run_state_path)
-            if not run_state or run_state.get("status") != "active":
-                continue
-            version_context = run_state.get("version_context")
-            if not isinstance(version_context, dict):
-                version_context = {}
-            snapshot_id = str(
-                version_context.get("published_snapshot_id")
-                or run_state.get("published_snapshot_id_used")
-                or ""
-            )
-            if snapshot_id:
-                _record_snapshot_pin(
-                    pin_reasons,
-                    snapshot_id,
-                    f"active-run:{run_state_path.parent.name}",
-                )
-
-    shared_jobs_index = read_json(paths.shared_jobs_index_path)
-    active_by_key = shared_jobs_index.get("active_by_key")
-    if isinstance(active_by_key, dict):
-        for job_id in active_by_key.values():
-            if not isinstance(job_id, str) or not job_id:
-                continue
-            manifest = read_json(paths.shared_jobs_dir / job_id / "manifest.json")
-            if not manifest:
-                continue
-            scope = manifest.get("scope")
-            if not isinstance(scope, dict):
-                scope = {}
-            snapshot_id = str(scope.get("published_snapshot_id") or "")
-            if snapshot_id:
-                job_family = str(manifest.get("job_family") or "shared-job")
-                _record_snapshot_pin(
-                    pin_reasons,
-                    snapshot_id,
-                    f"active-shared-job:{job_family}:{job_id}",
-                )
-
-    if paths.eval_benchmarks_dir.exists():
-        for baseline_path in sorted(paths.eval_benchmarks_dir.glob("*/baseline.json")):
-            baseline = read_json(baseline_path)
-            if not baseline:
-                continue
-            version_context = baseline.get("version_context")
-            if not isinstance(version_context, dict):
-                version_context = {}
-            snapshot_id = str(version_context.get("published_snapshot_id") or "")
-            if snapshot_id:
-                _record_snapshot_pin(
-                    pin_reasons,
-                    snapshot_id,
-                    f"eval-baseline:{baseline_path.parent.name}",
-                )
-
-    manual_pins = read_json(paths.snapshot_pins_path)
-    for item in manual_pins.get("pins", []):
-        if not isinstance(item, dict):
-            continue
-        snapshot_id = str(item.get("snapshot_id") or "")
-        if not snapshot_id:
-            continue
-        pin_kind = str(item.get("pin_kind") or "manual")
-        pin_id = str(item.get("pin_id") or "")
-        label = f"{pin_kind}:{pin_id}" if pin_id else pin_kind
-        _record_snapshot_pin(pin_reasons, snapshot_id, label)
-
-    return pin_reasons
+    current_pointer = read_json(paths.current_publish_pointer_path)
+    snapshot_id = str(current_pointer.get("snapshot_id") or "")
+    if snapshot_id:
+        snapshot_dir = paths.knowledge_version_dir(snapshot_id)
+        if snapshot_dir.exists():
+            return snapshot_dir
+    return None
 
 
-def _snapshot_retention_payload(
+def _current_snapshot_id(paths: WorkspacePaths, *, current_source_dir: Path | None = None) -> str | None:
+    current_manifest = read_json(paths.current_publish_manifest_path)
+    if isinstance(current_manifest.get("snapshot_id"), str) and current_manifest.get("snapshot_id"):
+        return str(current_manifest["snapshot_id"])
+
+    current_pointer = read_json(paths.current_publish_pointer_path)
+    if isinstance(current_pointer.get("snapshot_id"), str) and current_pointer.get("snapshot_id"):
+        return str(current_pointer["snapshot_id"])
+
+    if isinstance(current_source_dir, Path):
+        source_manifest = read_json(current_source_dir / "publish_manifest.json")
+        if isinstance(source_manifest.get("snapshot_id"), str) and source_manifest.get("snapshot_id"):
+            return str(source_manifest["snapshot_id"])
+        if current_source_dir.parent in {
+            paths.knowledge_base_versions_dir,
+            paths.knowledge_base_published_dir,
+        }:
+            return current_source_dir.name
+    return None
+
+
+def _backfill_current_publish_record_if_needed(
     paths: WorkspacePaths,
     *,
-    apply_deletions: bool,
-    persist_state: bool,
-) -> dict[str, Any]:
-    """Build one snapshot-retention decision payload and optionally apply it."""
-    policy = {
-        "schema_version": SNAPSHOT_RETENTION_SCHEMA_VERSION,
-        "max_unpinned_snapshots": DEFAULT_UNPINNED_SNAPSHOT_RETENTION_COUNT,
-        "max_unpinned_age_days": DEFAULT_UNPINNED_SNAPSHOT_RETENTION_DAYS,
-    }
-    pin_reasons = _snapshot_pin_reasons(paths)
-    records = _snapshot_records(paths)
-    now = datetime.now(tz=UTC)
-    decisions: list[dict[str, Any]] = []
-    deleted_snapshot_ids: list[str] = []
-    eligible_delete_snapshot_ids: list[str] = []
-    deletion_failures: list[dict[str, str]] = []
-    retained_snapshot_ids: list[str] = []
-    unpinned_rank = 0
+    snapshot_id: str,
+    current_source_dir: Path,
+) -> dict[str, Any] | None:
+    if snapshot_id in _ledger_snapshot_ids(paths):
+        return None
+    publish_manifest = read_json(current_source_dir / "publish_manifest.json")
+    validation_report = read_json(current_source_dir / "validation_report.json")
+    published_at = str(publish_manifest.get("published_at") or _utc_now())
+    return append_publish_ledger_record(
+        paths,
+        snapshot_id=snapshot_id,
+        published_at=published_at,
+        published_source_signature=publish_manifest.get("published_source_signature")
+        or validation_report.get("source_signature"),
+        validation_status=publish_manifest.get("validation_status")
+        or validation_report.get("status"),
+        rebuild_cause="legacy-unknown",
+        publish_driver=PUBLISH_DRIVER_LEGACY_UNKNOWN,
+        legacy_backfilled=True,
+    )
 
-    for record in records:
+
+def _materialize_current_root_into_single_current_storage(
+    paths: WorkspacePaths,
+    *,
+    current_source_dir: Path,
+    current_snapshot_id: str,
+) -> Path:
+    """Move or copy the live current published tree into `.published/`."""
+    target_root = paths.knowledge_published_root_dir(current_snapshot_id)
+    if current_source_dir == target_root:
+        return target_root
+    _remove_path(target_root)
+    if current_source_dir.parent in {paths.knowledge_base_versions_dir, paths.knowledge_base_dir}:
+        os.replace(current_source_dir, target_root)
+    else:
+        shutil.copytree(current_source_dir, target_root, symlinks=True)
+    return target_root
+
+
+def migrate_legacy_publish_storage(paths: WorkspacePaths) -> dict[str, Any]:
+    """Compact one legacy archive workspace into single-current publish mode."""
+    legacy = legacy_publish_storage_state(paths)
+    if not legacy["detected"]:
+        return {"legacy_detected": False, "migrated": False, "actions": []}
+
+    actions: list[dict[str, Any]] = []
+    ledger_ids = _ledger_snapshot_ids(paths)
+    backfilled_snapshot_ids: list[str] = []
+    for record in _legacy_snapshot_records(paths):
         snapshot_id = str(record.get("snapshot_id") or "")
-        published_at = _parse_timestamp(record.get("published_at"))
-        age_days = (
-            round(max((now - published_at).total_seconds(), 0.0) / 86400.0, 6)
-            if published_at is not None
-            else None
+        if not snapshot_id or snapshot_id in ledger_ids:
+            continue
+        append_publish_ledger_record(
+            paths,
+            snapshot_id=snapshot_id,
+            published_at=str(record.get("published_at") or _utc_now()),
+            published_source_signature=record.get("published_source_signature"),
+            validation_status=record.get("validation_status"),
+            rebuild_cause="legacy-unknown",
+            publish_driver=PUBLISH_DRIVER_LEGACY_UNKNOWN,
+            legacy_backfilled=True,
         )
-        reasons = list(pin_reasons.get(snapshot_id, []))
-        retained = False
-        deleted = False
-        retention_reason = ""
-        if reasons:
-            retained = True
-            retention_reason = "pinned"
-        else:
-            unpinned_rank += 1
-            if unpinned_rank <= DEFAULT_UNPINNED_SNAPSHOT_RETENTION_COUNT:
-                retained = True
-                retention_reason = "recent-count"
-            elif (
-                age_days is not None
-                and age_days <= DEFAULT_UNPINNED_SNAPSHOT_RETENTION_DAYS
-            ):
-                retained = True
-                retention_reason = "recent-age"
-            else:
-                snapshot_dir = record.get("directory")
-                if not apply_deletions:
-                    retention_reason = "expired-unpinned"
-                    eligible_delete_snapshot_ids.append(snapshot_id)
-                elif isinstance(snapshot_dir, Path) and snapshot_dir.exists():
-                    try:
-                        shutil.rmtree(snapshot_dir)
-                        deleted = True
-                        retention_reason = "expired-unpinned"
-                        deleted_snapshot_ids.append(snapshot_id)
-                    except OSError as exc:
-                        retained = True
-                        retention_reason = "delete-failed"
-                        deletion_failures.append(
-                            {
-                                "snapshot_id": snapshot_id,
-                                "detail": str(exc),
-                            }
-                        )
-                else:
-                    deleted = True
-                    retention_reason = "expired-unpinned"
-                    deleted_snapshot_ids.append(snapshot_id)
-        if retained:
-            retained_snapshot_ids.append(snapshot_id)
-        decisions.append(
+        ledger_ids.add(snapshot_id)
+        backfilled_snapshot_ids.append(snapshot_id)
+    if backfilled_snapshot_ids:
+        actions.append(
             {
-                "snapshot_id": snapshot_id,
-                "path": record.get("path"),
-                "published_at": record.get("published_at"),
-                "published_source_signature": record.get("published_source_signature"),
-                "validation_status": record.get("validation_status"),
-                "pin_reasons": reasons,
-                "age_days": age_days,
-                "retained": retained,
-                "deleted": deleted,
-                "retention_reason": retention_reason,
+                "kind": "backfilled-publish-ledger",
+                "snapshot_ids": backfilled_snapshot_ids,
+                "count": len(backfilled_snapshot_ids),
             }
         )
 
-    payload = {
-        "schema_version": SNAPSHOT_RETENTION_SCHEMA_VERSION,
-        "updated_at": _utc_now(),
-        "applied": apply_deletions,
-        "policy": policy,
-        "snapshot_count": len(records),
-        "deleted_count": len(deleted_snapshot_ids),
-        "eligible_delete_snapshot_ids": eligible_delete_snapshot_ids,
-        "pinned_snapshot_count": len(pin_reasons),
-        "retained_snapshot_ids": retained_snapshot_ids,
-        "deleted_snapshot_ids": deleted_snapshot_ids,
-        "deletion_failures": deletion_failures,
-        "snapshots": decisions,
-    }
-    if persist_state:
-        write_json(paths.snapshot_retention_state_path, payload)
-    return payload
+    current_source_dir = _current_published_source_dir(paths)
+    current_snapshot_id = _current_snapshot_id(paths, current_source_dir=current_source_dir)
+    if current_source_dir is not None and current_snapshot_id:
+        _backfill_current_publish_record_if_needed(
+            paths,
+            snapshot_id=current_snapshot_id,
+            current_source_dir=current_source_dir,
+        )
+        target_root = _materialize_current_root_into_single_current_storage(
+            paths,
+            current_source_dir=current_source_dir,
+            current_snapshot_id=current_snapshot_id,
+        )
+        backup_dir = _switch_current_to_root(paths, target_root)
+        _normalize_interaction_manifest(target_root)
+        _write_publish_pointer(
+            paths,
+            snapshot_id=current_snapshot_id,
+            published_at=str(
+                read_json(target_root / "publish_manifest.json").get("published_at") or _utc_now()
+            ),
+            published_source_signature=read_json(target_root / "publish_manifest.json").get(
+                "published_source_signature"
+            ),
+            published_root=target_root,
+        )
+        if backup_dir is not None:
+            _remove_path(backup_dir)
+        deleted_roots = _prune_published_roots(paths, keep_roots={target_root})
+        actions.append(
+            {
+                "kind": "compacted-legacy-current-publish-root",
+                "snapshot_id": current_snapshot_id,
+                "deleted_hidden_root_ids": deleted_roots,
+            }
+        )
 
+    deleted_archive_dirs: list[str] = []
+    if paths.knowledge_base_versions_dir.exists():
+        deleted_archive_dirs = [path.name for path in paths.knowledge_base_versions_dir.iterdir()]
+        shutil.rmtree(paths.knowledge_base_versions_dir)
+        actions.append(
+            {
+                "kind": "deleted-legacy-archive-dir",
+                "path": _relative_path(paths, paths.knowledge_base_versions_dir),
+                "deleted_entry_count": len(deleted_archive_dirs),
+            }
+        )
 
-def snapshot_retention_summary(paths: WorkspacePaths) -> dict[str, Any]:
-    """Return the latest retention summary or a non-mutating preview when absent."""
-    persisted = read_json(paths.snapshot_retention_state_path)
-    if persisted:
-        return persisted
-    return _snapshot_retention_payload(
-        paths,
-        apply_deletions=False,
-        persist_state=False,
-    )
+    retired_files: list[str] = []
+    for legacy_file in (paths.snapshot_retention_state_path, paths.snapshot_pins_path):
+        if legacy_file.exists():
+            retired_files.append(str(legacy_file.relative_to(paths.root)))
+            legacy_file.unlink()
+    if retired_files:
+        actions.append(
+            {
+                "kind": "retired-legacy-runtime-files",
+                "paths": retired_files,
+            }
+        )
 
-
-def apply_snapshot_retention(paths: WorkspacePaths) -> dict[str, Any]:
-    """Apply the minimal snapshot retention policy and persist a decision record."""
-    return _snapshot_retention_payload(
-        paths,
-        apply_deletions=True,
-        persist_state=True,
-    )
-
-
-def storage_lifecycle_summary(paths: WorkspacePaths) -> dict[str, Any]:
-    """Return a compact artifact-family lifecycle summary for local workspace storage."""
-    retention_state = read_json(paths.snapshot_retention_state_path)
-    if not retention_state:
-        retention_state = snapshot_retention_summary(paths)
-
-    def family(
-        *,
-        name: str,
-        path: Path,
-        truth_class: str,
-        retention_unit: str,
-        pin_sources: list[str],
-        delete_trigger: str,
-    ) -> dict[str, Any]:
-        visible_files = list_visible_files(path)
-        return {
-            "name": name,
-            "path": str(path.relative_to(paths.root)),
-            "present": path.exists(),
-            "visible_file_count": len(visible_files),
-            "truth_class": truth_class,
-            "retention_unit": retention_unit,
-            "pin_sources": pin_sources,
-            "delete_trigger": delete_trigger,
-        }
-
-    families = [
-        family(
-            name="snapshots",
-            path=paths.knowledge_base_versions_dir,
-            truth_class="immutable",
-            retention_unit="snapshot",
-            pin_sources=[
-                "current",
-                "active-run",
-                "active-shared-job",
-                "eval-baseline",
-                "manual-pin",
-            ],
-            delete_trigger="snapshot-retention-policy",
-        ),
-        family(
-            name="current-published",
-            path=paths.knowledge_base_current_dir,
-            truth_class="canonical",
-            retention_unit="publish-root",
-            pin_sources=["publish-pointer"],
-            delete_trigger="next-publish-switch",
-        ),
-        family(
-            name="staging",
-            path=paths.knowledge_base_staging_dir,
-            truth_class="rebuildable",
-            retention_unit="staging-tree",
-            pin_sources=[],
-            delete_trigger="next-sync-or-manual-cleanup",
-        ),
-        family(
-            name="answers",
-            path=paths.answers_dir,
-            truth_class="canonical",
-            retention_unit="answer-file",
-            pin_sources=[],
-            delete_trigger="manual-runtime-cleanup",
-        ),
-        family(
-            name="query-sessions",
-            path=paths.query_sessions_dir,
-            truth_class="derived",
-            retention_unit="session-log",
-            pin_sources=[],
-            delete_trigger="manual-runtime-cleanup",
-        ),
-        family(
-            name="retrieval-traces",
-            path=paths.retrieval_traces_dir,
-            truth_class="derived",
-            retention_unit="trace-log",
-            pin_sources=[],
-            delete_trigger="manual-runtime-cleanup",
-        ),
-        family(
-            name="review-artifacts",
-            path=paths.review_logs_dir,
-            truth_class="derived",
-            retention_unit="review-artifact",
-            pin_sources=[],
-            delete_trigger="manual-runtime-cleanup",
-        ),
-        family(
-            name="control-plane",
-            path=paths.control_plane_dir,
-            truth_class="canonical",
-            retention_unit="job-or-state-record",
-            pin_sources=["active-shared-job"],
-            delete_trigger="settlement-or-manual-cleanup",
-        ),
-        family(
-            name="interaction-ingest",
-            path=paths.interaction_ingest_dir,
-            truth_class="transient",
-            retention_unit="ingest-entry",
-            pin_sources=[],
-            delete_trigger="promotion-or-manual-cleanup",
-        ),
-        family(
-            name="agent-work",
-            path=paths.agent_work_dir,
-            truth_class="transient",
-            retention_unit="work-artifact",
-            pin_sources=[],
-            delete_trigger="manual-cleanup",
-        ),
-        family(
-            name="eval-artifacts",
-            path=paths.eval_dir,
-            truth_class="derived",
-            retention_unit="eval-run-or-baseline",
-            pin_sources=["eval-baseline"],
-            delete_trigger="manual-cleanup",
-        ),
-    ]
     return {
-        "family_count": len(families),
-        "pinned_snapshot_count": retention_state.get("pinned_snapshot_count", 0),
-        "eligible_delete_snapshot_ids": retention_state.get(
-            "eligible_delete_snapshot_ids", []
-        ),
-        "families": families,
+        "legacy_detected": True,
+        "migrated": True,
+        "actions": actions,
+        "backfilled_snapshot_ids": backfilled_snapshot_ids,
+        "deleted_archive_dirs": deleted_archive_dirs,
+        "current_snapshot_id": current_snapshot_id,
     }
-
-
-def build_snapshot_id(validation_report: dict[str, Any]) -> str:
-    """Build a deterministic-enough published snapshot identifier."""
-    source_signature = str(validation_report.get("source_signature") or "unknown")
-    return f"{source_signature[:12]}-{uuid.uuid4().hex[:12]}"
-
-
-def activate_snapshot(paths: WorkspacePaths, snapshot_id: str) -> None:
-    """Point the compatibility `knowledge_base/current` path at one immutable snapshot."""
-    snapshot_dir = paths.knowledge_version_dir(snapshot_id)
-    if not snapshot_dir.exists():
-        raise FileNotFoundError(snapshot_dir)
-
-    current_path = paths.knowledge_base_current_dir
-    temp_link = paths.knowledge_base_dir / f".current-link-{snapshot_id}"
-    if temp_link.exists() or temp_link.is_symlink():
-        if temp_link.is_dir() and not temp_link.is_symlink():
-            shutil.rmtree(temp_link)
-        else:
-            temp_link.unlink()
-    target = Path(os.path.relpath(snapshot_dir, paths.knowledge_base_dir))
-    os.symlink(target, temp_link)
-
-    if current_path.exists() and not current_path.is_symlink():
-        legacy_id = f"legacy-current-{uuid.uuid4().hex[:12]}"
-        os.replace(current_path, paths.knowledge_version_dir(legacy_id))
-    os.replace(temp_link, current_path)
 
 
 def publish_staging_snapshot(
@@ -448,24 +616,20 @@ def publish_staging_snapshot(
     *,
     validation_report: dict[str, Any],
     published_at: str,
+    rebuild_cause: str | None,
+    publish_driver: str,
 ) -> dict[str, Any]:
-    """Publish staging into an immutable snapshot and activate it."""
+    """Publish staging into the single-current hidden publish root and switch `current`."""
     snapshot_id = build_snapshot_id(validation_report)
-    snapshot_dir = paths.knowledge_version_dir(snapshot_id)
+    target_root = paths.knowledge_published_root_dir(snapshot_id)
     with workspace_lease(paths, "publish"):
-        paths.knowledge_base_versions_dir.mkdir(parents=True, exist_ok=True)
-        if snapshot_dir.exists():
-            shutil.rmtree(snapshot_dir)
-        shutil.copytree(paths.knowledge_base_staging_dir, snapshot_dir, symlinks=True)
+        paths.knowledge_base_published_dir.mkdir(parents=True, exist_ok=True)
+        previous_hidden_root = _current_hidden_publish_root(paths)
+        _remove_path(target_root)
+        shutil.copytree(paths.knowledge_base_staging_dir, target_root, symlinks=True)
+        _normalize_interaction_manifest(target_root)
 
-        interaction_manifest_path = snapshot_dir / "interaction" / "manifest.json"
-        interaction_manifest = read_json(interaction_manifest_path)
-        if interaction_manifest:
-            interaction_manifest["pending_entry_count"] = 0
-            interaction_manifest["pending_memory_count"] = 0
-            write_json(interaction_manifest_path, interaction_manifest)
-
-        publish_manifest_path = snapshot_dir / "publish_manifest.json"
+        publish_manifest_path = target_root / "publish_manifest.json"
         publish_manifest = read_json(publish_manifest_path)
         publish_manifest["published_at"] = published_at
         publish_manifest["validation_status"] = validation_report["status"]
@@ -473,12 +637,33 @@ def publish_staging_snapshot(
         publish_manifest["published_source_signature"] = validation_report.get("source_signature")
         write_json(publish_manifest_path, publish_manifest)
 
-        pointer_payload = {
-            "snapshot_id": snapshot_id,
-            "snapshot_path": str(snapshot_dir.relative_to(paths.root)),
-            "published_at": published_at,
-            "published_source_signature": validation_report.get("source_signature"),
-        }
-        write_json(paths.knowledge_base_dir / "current-pointer.json", pointer_payload)
-        activate_snapshot(paths, snapshot_id)
+        backup_dir = _switch_current_to_root(paths, target_root)
+        if backup_dir is not None:
+            _remove_path(backup_dir)
+        _write_publish_pointer(
+            paths,
+            snapshot_id=snapshot_id,
+            published_at=published_at,
+            published_source_signature=validation_report.get("source_signature"),
+            published_root=target_root,
+        )
+        keep_roots = {target_root}
+        if previous_hidden_root is not None and previous_hidden_root == target_root:
+            keep_roots.add(previous_hidden_root)
+        _prune_published_roots(paths, keep_roots=keep_roots)
+        append_publish_ledger_record(
+            paths,
+            snapshot_id=snapshot_id,
+            published_at=published_at,
+            published_source_signature=validation_report.get("source_signature"),
+            validation_status=validation_report.get("status"),
+            rebuild_cause=rebuild_cause,
+            publish_driver=publish_driver,
+        )
         return publish_manifest
+
+
+def stale_run_cutoff(now: datetime | None = None) -> datetime:
+    """Return the hard-coded stale-active-run cutoff."""
+    reference = now or datetime.now(tz=UTC)
+    return reference - timedelta(hours=24)

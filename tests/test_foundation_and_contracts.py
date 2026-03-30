@@ -167,7 +167,7 @@ class FoundationAndContractTests(unittest.TestCase):
             "sample_corpus_dir: sample_corpus",
             "knowledge_base_dir: knowledge_base",
             "strategy: heuristic-only",
-            "publish_model: immutable-snapshot-plus-atomic-current-switch",
+            "publish_model: single-current-plus-logical-publish-ledger",
             (
                 "current_completed_phase: "
                 "phase-3-spreadsheet-and-multimodal-evidence-compiler-deepening"
@@ -233,6 +233,10 @@ class FoundationAndContractTests(unittest.TestCase):
             "ordinary natural-language questions still enter through canonical `ask`",
             agents,
         )
+        self.assertIn(
+            "`Plan Mode` or a similar host planning/collaboration mode should not discourage the host from opening canonical `ask` for an ordinary user request;",
+            agents,
+        )
         self.assertNotIn("`docmason _ask`", agents)
         self.assertNotIn("entered honestly", agents)
         self.assertNotIn("pretending ordinary answer completion", agents)
@@ -252,6 +256,10 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("canonical skill at `skills/canonical/ask/SKILL.md`", ask_skill)
         self.assertIn(
             "default top-level workflow for a new ordinary user request",
+            ask_skill,
+        )
+        self.assertIn(
+            "`Plan Mode` or a similar host planning/collaboration mode should not discourage the host from opening canonical `ask` for an ordinary user request;",
             ask_skill,
         )
         self.assertNotIn("`docmason _ask`", ask_skill)

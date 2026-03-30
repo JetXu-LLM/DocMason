@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from docmason.ask import complete_ask_turn, prepare_ask_turn
-from docmason.commands import CommandReport
+from docmason.commands import ACTION_REQUIRED, CommandReport
 from docmason.control_plane import ensure_shared_job, workspace_state_snapshot
 from docmason.conversation import open_conversation_turn, update_conversation_turn
 from docmason.coordination import workspace_lease
@@ -350,9 +350,11 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
     def test_prepare_ask_turn_auto_prepares_workspace_before_auto_sync(self) -> None:
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")
+        prepare_calls: list[dict[str, object]] = []
 
         def fake_prepare(*args: object, **kwargs: object) -> object:
-            del args, kwargs
+            del args
+            prepare_calls.append(dict(kwargs))
             seed_self_contained_bootstrap_state(
                 workspace,
                 prepared_at="2026-03-21T00:00:00Z",
@@ -426,8 +428,131 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.assertEqual(turn["status"], "prepared")
         self.assertTrue(turn["auto_prepare_triggered"])
         self.assertEqual(turn["auto_prepare_summary"]["status"], "ready")
+        self.assertEqual(len(prepare_calls), 1)
+        self.assertTrue(prepare_calls[0]["assume_yes"])
         self.assertTrue(turn["auto_sync_triggered"])
         self.assertFalse(turn["knowledge_base_missing"])
+
+    def test_prepare_ask_turn_delegates_to_launcher_when_prepare_reports_missing_python(self) -> None:
+        workspace = self.make_workspace()
+        self.create_pdf(workspace.source_dir / "example.pdf")
+
+        failed_prepare = type(
+            "PrepareReport",
+            (),
+            {
+                "payload": {
+                    "status": ACTION_REQUIRED,
+                    "detail": "Python 3.10 is below the supported minimum.",
+                    "actions_performed": [],
+                    "actions_skipped": [],
+                    "next_steps": ["Install Python 3.11 or newer and rerun `docmason prepare`."],
+                    "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                    "environment": {
+                        "package_manager": "uv",
+                        "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                    },
+                }
+            },
+        )()
+        launcher_report = CommandReport(
+            0,
+            {
+                "status": "ready",
+                "detail": "Launcher prepared the workspace successfully.",
+                "actions_performed": ["Provisioned repo-local managed Python 3.13."],
+                "actions_skipped": [],
+                "next_steps": [],
+                "launcher_delegated": True,
+                "launcher_command": "./scripts/bootstrap-workspace.sh --yes --json",
+                "environment": {
+                    "package_manager": "uv",
+                    "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                },
+            },
+            [],
+        )
+
+        def fake_sync(_paths: WorkspacePaths, assume_yes: bool = False) -> CommandReport:
+            del assume_yes
+            write_json(
+                workspace.current_publish_manifest_path,
+                {
+                    "snapshot_id": "snapshot-launcher-path",
+                    "published_at": "2026-03-21T00:05:00Z",
+                },
+            )
+            write_json(
+                workspace.sync_state_path,
+                {
+                    "published_source_signature": source_inventory_signature(workspace),
+                    "last_publish_at": "2026-03-21T00:05:00Z",
+                    "last_sync_at": "2026-03-21T00:05:00Z",
+                },
+            )
+            return CommandReport(
+                0,
+                {
+                    "status": "ready",
+                    "sync_status": "valid",
+                    "detail": "Published.",
+                    "published": True,
+                    "change_set": {"stats": {}},
+                    "auto_repairs": {"repair_count": 0},
+                    "auto_authoring": {"authored_count": 0},
+                    "autonomous_steps": [],
+                },
+                [],
+            )
+
+        readiness_states = [
+            {
+                "ready": False,
+                "detail": "The cached bootstrap marker is missing or invalid.",
+                "reason": "missing-bootstrap-state",
+            },
+            {
+                "ready": False,
+                "detail": "The cached bootstrap marker is missing or invalid.",
+                "reason": "missing-bootstrap-state",
+            },
+            {
+                "ready": False,
+                "detail": "The workspace environment is still not ready.",
+                "reason": "environment-not-ready",
+            },
+            {
+                "ready": True,
+                "detail": "The cached bootstrap marker is valid for the current workspace root.",
+                "reason": "cached-ready",
+            },
+            {
+                "ready": True,
+                "detail": "The cached bootstrap marker is valid for the current workspace root.",
+                "reason": "cached-ready",
+            },
+        ]
+
+        with (
+            mock.patch("docmason.ask.prepare_workspace", return_value=failed_prepare),
+            mock.patch("docmason.ask.bootstrap_workspace_with_launcher", return_value=launcher_report) as launcher_mock,
+            mock.patch("docmason.ask.cached_bootstrap_readiness", side_effect=readiness_states),
+            mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-launcher-delegate"}, clear=False),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What do the documents say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        self.assertEqual(turn["status"], "prepared")
+        self.assertTrue(turn["auto_prepare_triggered"])
+        self.assertTrue(turn["auto_prepare_summary"]["launcher_delegated"])
+        launcher_mock.assert_called_once_with(workspace)
 
     def test_prepare_ask_turn_reuses_valid_cached_marker_without_auto_prepare(self) -> None:
         workspace = self.make_workspace()
@@ -784,6 +909,40 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             workspace.shared_jobs_dir / job["manifest"]["job_id"] / "result.json"
         )
         self.assertEqual(settled["status"], "blocked")
+
+    def test_workspace_state_snapshot_abandons_stale_active_run_without_commit_or_live_jobs(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        run_dir = workspace.runs_dir / "run-stale"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        write_json(
+            run_dir / "state.json",
+            {
+                "run_id": "run-stale",
+                "status": "active",
+                "opened_at": "2026-03-20T00:00:00Z",
+                "updated_at": "2026-03-20T00:00:00Z",
+                "attached_shared_job_ids": [],
+                "execution_cost_profile": {},
+                "preanswer_governance_state": None,
+            },
+        )
+        (run_dir / "journal.jsonl").write_text("", encoding="utf-8")
+
+        snapshot = workspace_state_snapshot(workspace)
+        repaired_state = read_json(run_dir / "state.json")
+        journal_text = (run_dir / "journal.jsonl").read_text(encoding="utf-8")
+
+        self.assertEqual(repaired_state["status"], "abandoned")
+        self.assertEqual(repaired_state["abandon_reason"], "stale-active-run-repair")
+        self.assertTrue(
+            any(action["kind"] == "abandoned-stale-active-run" for action in snapshot["repair_actions"])
+        )
+        self.assertIn("stale-active-run-abandoned", journal_text)
 
     def test_prepare_ask_turn_reports_bootstrap_blocker_when_auto_prepare_fails(self) -> None:
         workspace = self.make_workspace()

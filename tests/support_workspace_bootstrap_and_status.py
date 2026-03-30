@@ -34,6 +34,7 @@ from docmason.coordination import LeaseConflictError
 from docmason.project import (
     WorkspacePaths,
     cached_bootstrap_readiness,
+    read_json,
     source_inventory_signature,
     write_json,
 )
@@ -928,12 +929,13 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
     def test_prepare_generates_repo_local_skill_shims(self) -> None:
         workspace = self.make_workspace()
 
-        report = prepare_workspace(
-            workspace,
-            command_runner=self.fake_prepare_runner(workspace),
-            editable_install_probe=self.ready_probe,
-            interactive=False,
-        )
+        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
 
         self.assertIn(
             "Refreshed repo-local skill shims under .agents/skills and .claude/skills.",
@@ -952,12 +954,13 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         workspace.claude_skill_shim_dir.parent.mkdir(parents=True, exist_ok=True)
         os.symlink("../skills", workspace.claude_skill_shim_dir)
 
-        report = prepare_workspace(
-            workspace,
-            command_runner=self.fake_prepare_runner(workspace),
-            editable_install_probe=self.ready_probe,
-            interactive=False,
-        )
+        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
 
         self.assertEqual(report.exit_code, 0)
         self.assertFalse(workspace.claude_skill_shim_dir.is_symlink())
@@ -974,12 +977,13 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         optional_skill.parent.mkdir(parents=True, exist_ok=True)
         optional_skill.write_text("# Public Sample Workspace\n", encoding="utf-8")
 
-        report = prepare_workspace(
-            workspace,
-            command_runner=self.fake_prepare_runner(workspace),
-            editable_install_probe=self.ready_probe,
-            interactive=False,
-        )
+        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
 
         self.assertEqual(report.exit_code, 0)
         codex_shim = workspace.repo_skill_shim_dir / "public-sample-workspace"
@@ -1254,7 +1258,18 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(report.exit_code, 1)
         self.assertEqual(report.payload["stage"], "knowledge-base-invalid")
 
-    def test_status_surfaces_snapshot_retention_preview_without_persisted_state(self) -> None:
+    def test_status_ignores_office_temporary_lock_files_in_source_counts(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        (workspace.source_dir / "deck.pptx").write_text("real deck\n", encoding="utf-8")
+        (workspace.source_dir / "~$deck.pptx").write_text("office lock\n", encoding="utf-8")
+
+        report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+
+        self.assertEqual(report.payload["source_documents"]["counts"]["pptx"], 1)
+        self.assertEqual(report.payload["source_documents"]["tiers"]["office_pdf"]["total"], 1)
+
+    def test_status_surfaces_legacy_publish_storage_note_before_migration(self) -> None:
         workspace = self.make_workspace()
         self.seed_self_contained_bootstrap_state(workspace)
         source_file = workspace.source_dir / "example.pdf"
@@ -1278,7 +1293,6 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             ("snapshot-current", "2026-03-29T01:00:00Z"),
             ("snapshot-recent", "2026-03-28T01:00:00Z"),
             ("snapshot-recent-b", "2026-03-27T01:00:00Z"),
-            ("snapshot-expired", "2026-03-20T01:00:00Z"),
         ):
             snapshot_dir = workspace.knowledge_version_dir(snapshot_id)
             snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -1302,18 +1316,19 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         report = status_workspace(workspace, editable_install_probe=self.ready_probe)
 
         self.assertEqual(report.exit_code, 0)
-        retention = report.payload["knowledge_base"]["snapshot_retention"]
-        self.assertFalse(retention["applied"])
-        self.assertEqual(retention["pinned_snapshot_count"], 1)
-        self.assertIn("snapshot-current", retention["retained_snapshot_ids"])
-        self.assertIn("snapshot-expired", retention["eligible_delete_snapshot_ids"])
+        self.assertEqual(report.payload["knowledge_base"]["publish_model"], "single-current")
+        self.assertTrue(report.payload["knowledge_base"]["legacy_archive_detected"])
+        self.assertEqual(report.payload["knowledge_base"]["legacy_archive_version_count"], 3)
+        self.assertEqual(report.payload["knowledge_base"]["publish_ledger_count"], 0)
         storage_lifecycle = report.payload["knowledge_base"]["storage_lifecycle"]
         self.assertGreater(storage_lifecycle["family_count"], 0)
-        self.assertEqual(storage_lifecycle["pinned_snapshot_count"], 1)
+        self.assertEqual(storage_lifecycle["published_root_count"], 0)
+        self.assertEqual(storage_lifecycle["publish_ledger_count"], 0)
         self.assertIn(
             "Storage lifecycle: ",
             "\n".join(report.lines),
         )
+        self.assertIn("Legacy publish storage: detected", "\n".join(report.lines))
 
     def test_status_surfaces_rebuild_and_lane_b_follow_up_summaries(self) -> None:
         workspace = self.make_workspace()
@@ -1359,6 +1374,65 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "\n".join(report.lines),
         )
         self.assertIn("Lane B follow-up: state=running", "\n".join(report.lines))
+
+    def test_status_reconciles_lane_b_summary_with_settled_shared_job(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        source_file = workspace.source_dir / "example.pdf"
+        source_file.write_text("pdf placeholder\n", encoding="utf-8")
+        current_artifact = workspace.knowledge_base_current_dir / "artifact.md"
+        current_artifact.parent.mkdir(parents=True, exist_ok=True)
+        current_artifact.write_text("compiled knowledge\n", encoding="utf-8")
+        write_json(
+            workspace.sync_state_path,
+            {
+                "published_source_signature": source_inventory_signature(workspace),
+                "last_publish_at": "2026-03-15T01:00:00Z",
+                "last_sync_at": "2026-03-15T01:00:00Z",
+                "lane_b_follow_up_summary": {
+                    "state": "running",
+                    "job_id": "job-lane-b",
+                    "selected_source_count": 2,
+                    "selected_unit_count": 6,
+                    "covered_unit_count": 0,
+                    "blocked_unit_count": 0,
+                    "remaining_unit_count": 6,
+                },
+            },
+        )
+        job = ensure_shared_job(
+            workspace,
+            job_key="lane-b:staging:test",
+            job_family="lane-b",
+            criticality="background",
+            scope={"target": "staging"},
+            input_signature="lane-b:staging:test",
+            owner={"kind": "command", "id": "lane-b:test", "pid": os.getpid()},
+        )
+        from docmason.control_plane import block_shared_job
+
+        block_shared_job(
+            workspace,
+            str(job["manifest"]["job_id"]),
+            result={
+                "selected_unit_count": 6,
+                "covered_unit_count": 2,
+                "blocked_unit_count": 4,
+                "remaining_unit_count": 0,
+            },
+        )
+        state = read_json(workspace.sync_state_path)
+        state["lane_b_follow_up_summary"]["job_id"] = str(job["manifest"]["job_id"])
+        write_json(workspace.sync_state_path, state)
+
+        report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+
+        lane_b = report.payload["knowledge_base"]["lane_b_follow_up"]
+        self.assertEqual(lane_b["state"], "blocked")
+        self.assertEqual(lane_b["covered_unit_count"], 2)
+        self.assertEqual(lane_b["blocked_unit_count"], 4)
+        self.assertEqual(lane_b["remaining_unit_count"], 0)
+        self.assertIn("Lane B follow-up: state=blocked", "\n".join(report.lines))
 
     def test_sync_reports_material_confirmation_payload(self) -> None:
         workspace = self.make_workspace()

@@ -431,6 +431,71 @@ def record_shared_job_settled_once(
         )
 
 
+def repair_stale_active_runs(paths: WorkspacePaths) -> list[dict[str, Any]]:
+    """Auto-abandon leaked active runs that no longer own live work."""
+    from .control_plane import load_shared_job, shared_job_is_active
+    from .conversation import utc_now
+    from .versioning import stale_run_cutoff
+
+    repairs: list[dict[str, Any]] = []
+    cutoff = stale_run_cutoff()
+    if not paths.runs_dir.exists():
+        return repairs
+
+    for state_path in sorted(paths.runs_dir.glob("*/state.json")):
+        run_id = state_path.parent.name
+        state = load_run_state(paths, run_id)
+        if not state or state.get("status") != "active":
+            continue
+
+        opened_at = _parse_timestamp(state.get("opened_at")) or _parse_timestamp(state.get("updated_at"))
+        if opened_at is None or opened_at >= cutoff:
+            continue
+        if read_json(run_commit_path(paths, run_id)):
+            continue
+
+        attached_shared_job_ids = state.get("attached_shared_job_ids", [])
+        active_job_ids = [
+            job_id
+            for job_id in attached_shared_job_ids
+            if isinstance(job_id, str)
+            and job_id
+            and shared_job_is_active(load_shared_job(paths, job_id))
+        ]
+        if active_job_ids:
+            continue
+
+        repaired_at = utc_now()
+        update_run_state(
+            paths,
+            run_id=run_id,
+            updates={
+                "status": "abandoned",
+                "abandoned_at": repaired_at,
+                "abandon_reason": "stale-active-run-repair",
+            },
+        )
+        record_run_event(
+            paths,
+            run_id=run_id,
+            stage="repair",
+            event_type="stale-active-run-abandoned",
+            payload={
+                "opened_at": state.get("opened_at"),
+                "repaired_at": repaired_at,
+                "active_shared_job_ids": active_job_ids,
+            },
+        )
+        repairs.append(
+            {
+                "kind": "abandoned-stale-active-run",
+                "run_id": run_id,
+                "opened_at": state.get("opened_at"),
+            }
+        )
+    return repairs
+
+
 def normalize_run_origin(value: Any) -> str | None:
     """Normalize one run-origin value into the supported contract."""
     if isinstance(value, str) and value in {

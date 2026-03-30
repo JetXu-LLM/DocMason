@@ -16,14 +16,17 @@
     "default_mode": "review-summary"
   },
   "execution_hints": {
-    "mutability": "read-only",
-    "parallelism": "read-only-safe",
-    "background_commands": [],
+    "mutability": "workspace-write",
+    "parallelism": "none",
+    "background_commands": [
+      "docmason workflow runtime-log-review --json"
+    ],
     "must_return_to_main_agent": true
   },
   "handoff": {
     "completion_signal": "Return the operator-facing log review summary and follow-up recommendations to the main agent.",
     "artifacts": [
+      "runtime/logs/review/requests/<request_id>.json",
       "runtime/logs/review/summary.json",
       "runtime/logs/review/benchmark-candidates.json",
       "runtime/logs/query-sessions/<session_id>.json",

@@ -27,7 +27,7 @@ knowledge_base:
   bilingual_outputs: true
   human_readable_views: optional
   preserve_unknown_boundaries: true
-  publish_model: immutable-snapshot-plus-atomic-current-switch
+  publish_model: single-current-plus-logical-publish-ledger
   evidence_retention:
     strategy: adaptive
     render_during_analysis: almost-everything

@@ -1,23 +1,202 @@
-"""Read-only review-summary helpers for DocMason runtime logs."""
+"""Review-summary and request-audit helpers for DocMason runtime logs."""
 
 from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
 from typing import Any
+import uuid
 
 from .control_plane import load_shared_job, load_shared_jobs_index
 from .conversation import (
     LOG_ORIGIN_EVALUATION_SUITE,
     LOG_ORIGIN_INTERACTIVE_ASK,
+    current_host_identity,
+    load_bound_conversation_record_for_host,
     normalize_front_door_state,
     normalize_log_origin,
     semantic_log_context_from_record,
+    utc_now,
 )
-from .project import WorkspacePaths, read_json
+from .project import WorkspacePaths, read_json, write_json
 
 RECENT_LIMIT = 10
 PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+REVIEW_REQUEST_SCHEMA_VERSION = 1
+
+
+def _nonempty_string(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _deduplicated_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _review_request_stable_summary(summary: dict[str, Any], *, final_status: str) -> str:
+    recent_conversations = summary.get("conversations", {}).get("recent", [])
+    recent_query_sessions = summary.get("query_sessions", {}).get("recent", [])
+    recent_retrieval_traces = summary.get("retrieval_traces", {}).get("recent", [])
+    benchmark_candidates = summary.get("benchmark_candidates", {}).get("candidate_cases", [])
+    return (
+        "runtime-log-review "
+        f"status={final_status}; "
+        f"recent_conversations={len(recent_conversations) if isinstance(recent_conversations, list) else 0}; "
+        f"recent_query_sessions={len(recent_query_sessions) if isinstance(recent_query_sessions, list) else 0}; "
+        f"recent_retrieval_traces={len(recent_retrieval_traces) if isinstance(recent_retrieval_traces, list) else 0}; "
+        f"candidate_cases={len(benchmark_candidates) if isinstance(benchmark_candidates, list) else 0}"
+    )
+
+
+def _latest_runtime_review_turn(paths: WorkspacePaths) -> dict[str, Any]:
+    host_identity = current_host_identity()
+    bound = load_bound_conversation_record_for_host(paths, host_identity=host_identity)
+    turns = bound.get("turns", [])
+    if not isinstance(turns, list):
+        return {}
+    for turn in reversed(turns):
+        if not isinstance(turn, dict):
+            continue
+        if normalize_front_door_state(turn.get("front_door_state")) != "canonical-ask":
+            continue
+        question_class = str(turn.get("question_class") or "")
+        inner_workflow_id = str(turn.get("inner_workflow_id") or "")
+        if question_class == "runtime-review" or inner_workflow_id == "runtime-log-review":
+            return {
+                "conversation_id": bound.get("conversation_id"),
+                "turn_id": turn.get("turn_id"),
+                "run_id": turn.get("active_run_id") or turn.get("committed_run_id"),
+                "request_text": turn.get("user_question"),
+                "question_class": turn.get("question_class"),
+                "question_domain": turn.get("question_domain"),
+                "host_provider": host_identity.get("host_provider"),
+                "host_thread_ref": host_identity.get("host_thread_ref"),
+                "host_identity_source": host_identity.get("host_identity_source"),
+            }
+    return {
+        "host_provider": host_identity.get("host_provider"),
+        "host_thread_ref": host_identity.get("host_thread_ref"),
+        "host_identity_source": host_identity.get("host_identity_source"),
+    }
+
+
+def _review_consulted_runtime_ids(summary: dict[str, Any]) -> dict[str, list[str]]:
+    consulted_conversation_ids: list[str] = []
+    consulted_turn_refs: list[str] = []
+    consulted_run_ids: list[str] = []
+    consulted_session_ids: list[str] = []
+    consulted_trace_ids: list[str] = []
+
+    for item in summary.get("committed_turns", {}).get("recent", []):
+        if not isinstance(item, dict):
+            continue
+        conversation_id = _nonempty_string(item.get("conversation_id"))
+        turn_id = _nonempty_string(item.get("turn_id"))
+        run_id = _nonempty_string(item.get("run_id"))
+        if conversation_id is not None:
+            consulted_conversation_ids.append(conversation_id)
+        if conversation_id is not None and turn_id is not None:
+            consulted_turn_refs.append(f"{conversation_id}:{turn_id}")
+        if run_id is not None:
+            consulted_run_ids.append(run_id)
+
+    for item in summary.get("query_sessions", {}).get("recent", []):
+        if not isinstance(item, dict):
+            continue
+        conversation_id = _nonempty_string(item.get("conversation_id"))
+        turn_id = _nonempty_string(item.get("turn_id"))
+        session_id = _nonempty_string(item.get("session_id"))
+        if conversation_id is not None:
+            consulted_conversation_ids.append(conversation_id)
+        if conversation_id is not None and turn_id is not None:
+            consulted_turn_refs.append(f"{conversation_id}:{turn_id}")
+        if session_id is not None:
+            consulted_session_ids.append(session_id)
+
+    for item in summary.get("retrieval_traces", {}).get("recent", []):
+        if not isinstance(item, dict):
+            continue
+        conversation_id = _nonempty_string(item.get("conversation_id"))
+        turn_id = _nonempty_string(item.get("turn_id"))
+        trace_id = _nonempty_string(item.get("trace_id"))
+        session_id = _nonempty_string(item.get("session_id"))
+        if conversation_id is not None:
+            consulted_conversation_ids.append(conversation_id)
+        if conversation_id is not None and turn_id is not None:
+            consulted_turn_refs.append(f"{conversation_id}:{turn_id}")
+        if trace_id is not None:
+            consulted_trace_ids.append(trace_id)
+        if session_id is not None:
+            consulted_session_ids.append(session_id)
+
+    return {
+        "consulted_conversation_ids": _deduplicated_strings(consulted_conversation_ids),
+        "consulted_turn_refs": _deduplicated_strings(consulted_turn_refs),
+        "consulted_run_ids": _deduplicated_strings(consulted_run_ids),
+        "consulted_session_ids": _deduplicated_strings(consulted_session_ids),
+        "consulted_trace_ids": _deduplicated_strings(consulted_trace_ids),
+    }
+
+
+def record_runtime_review_request(
+    paths: WorkspacePaths,
+    *,
+    summary: dict[str, Any],
+    final_status: str,
+    request_text: str | None = None,
+    entry_surface: str | None = None,
+    conversation_id: str | None = None,
+    turn_id: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist one replayable request-level audit artifact for runtime review work."""
+    inferred_context = _latest_runtime_review_turn(paths)
+    request_id = str(uuid.uuid4())
+    stable_summary = _review_request_stable_summary(summary, final_status=final_status)
+    effective_conversation_id = (
+        _nonempty_string(conversation_id) or _nonempty_string(inferred_context.get("conversation_id"))
+    )
+    effective_turn_id = _nonempty_string(turn_id) or _nonempty_string(inferred_context.get("turn_id"))
+    effective_run_id = _nonempty_string(run_id) or _nonempty_string(inferred_context.get("run_id"))
+    effective_request_text = (
+        _nonempty_string(request_text) or _nonempty_string(inferred_context.get("request_text"))
+    )
+    effective_entry_surface = _nonempty_string(entry_surface)
+    if effective_entry_surface is None:
+        effective_entry_surface = (
+            "ask/runtime-log-review" if effective_turn_id is not None else "workflow/runtime-log-review"
+        )
+    consulted_ids = _review_consulted_runtime_ids(summary)
+    artifact = {
+        "schema_version": REVIEW_REQUEST_SCHEMA_VERSION,
+        "request_id": request_id,
+        "recorded_at": utc_now(),
+        "entry_surface": effective_entry_surface,
+        "stable_summary": stable_summary,
+        "final_status": final_status,
+        "host_provider": _nonempty_string(inferred_context.get("host_provider")),
+        "host_thread_ref": _nonempty_string(inferred_context.get("host_thread_ref")),
+        "host_identity_source": _nonempty_string(inferred_context.get("host_identity_source")),
+        "conversation_id": effective_conversation_id,
+        "turn_id": effective_turn_id,
+        "run_id": effective_run_id,
+        "request_text": effective_request_text,
+        "derived_output_paths": [
+            str(paths.review_summary_path.relative_to(paths.root)),
+            str(paths.benchmark_candidates_path.relative_to(paths.root)),
+            str(paths.answer_history_index_path.relative_to(paths.root)),
+        ],
+        "review_summary_generated_at": _nonempty_string(summary.get("generated_at")),
+        **consulted_ids,
+    }
+    artifact_path = paths.review_requests_dir / f"{request_id}.json"
+    write_json(artifact_path, artifact)
+    artifact["artifact_path"] = str(artifact_path.relative_to(paths.root))
+    return artifact
 
 
 def _load_log_payloads(directory: Path) -> list[dict[str, Any]]:

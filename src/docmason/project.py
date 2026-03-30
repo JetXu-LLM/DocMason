@@ -210,6 +210,10 @@ class WorkspacePaths:
         return self.knowledge_base_dir / "current"
 
     @property
+    def knowledge_base_published_dir(self) -> Path:
+        return self.knowledge_base_dir / ".published"
+
+    @property
     def knowledge_base_versions_dir(self) -> Path:
         return self.knowledge_base_dir / "versions"
 
@@ -350,6 +354,10 @@ class WorkspacePaths:
         return self.control_plane_dir / "snapshot_retention.json"
 
     @property
+    def publish_ledger_path(self) -> Path:
+        return self.control_plane_dir / "publish_ledger.jsonl"
+
+    @property
     def projection_state_path(self) -> Path:
         return self.control_plane_dir / "projection_state.json"
 
@@ -404,6 +412,10 @@ class WorkspacePaths:
     @property
     def review_logs_dir(self) -> Path:
         return self.logs_dir / "review"
+
+    @property
+    def review_requests_dir(self) -> Path:
+        return self.review_logs_dir / "requests"
 
     @property
     def review_summary_path(self) -> Path:
@@ -712,6 +724,13 @@ class WorkspacePaths:
     def current_publish_manifest_path(self) -> Path:
         return self.knowledge_base_current_dir / "publish_manifest.json"
 
+    @property
+    def current_publish_pointer_path(self) -> Path:
+        return self.knowledge_base_dir / "current-pointer.json"
+
+    def knowledge_published_root_dir(self, snapshot_id: str) -> Path:
+        return self.knowledge_base_published_dir / snapshot_id
+
     def knowledge_version_dir(self, snapshot_id: str) -> Path:
         return self.knowledge_base_versions_dir / snapshot_id
 
@@ -881,8 +900,18 @@ def source_type_definition(extension: str | None) -> SourceTypeDefinition | None
     return SOURCE_TYPE_DEFINITIONS_BY_EXTENSION.get(extension.lower().lstrip("."))
 
 
+def ignored_live_corpus_path(path: Path) -> bool:
+    """Return whether one live corpus path should be ignored before source typing."""
+    definition = source_type_definition(path.suffix)
+    if definition is None:
+        return False
+    return bool(definition.requires_office_renderer and path.name.startswith("~$"))
+
+
 def source_type_definition_for_path(path: Path) -> SourceTypeDefinition | None:
     """Return the source-type definition for one filesystem path."""
+    if ignored_live_corpus_path(path):
+        return None
     return source_type_definition(path.suffix)
 
 
@@ -955,23 +984,76 @@ def dependency_state(paths: WorkspacePaths) -> dict[str, Any]:
     return read_json(paths.dependency_state_path)
 
 
+def _resolved_lane_b_follow_up_summary(
+    paths: WorkspacePaths,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    raw_summary = state.get("lane_b_follow_up_summary")
+    if not isinstance(raw_summary, dict) or not raw_summary:
+        return {}
+    summary = dict(raw_summary)
+    job_id = summary.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return summary
+
+    from .control_plane import (
+        load_shared_job,
+        load_shared_job_result,
+        shared_job_is_active,
+        shared_job_is_settled,
+    )
+
+    manifest = load_shared_job(paths, job_id)
+    if not manifest:
+        summary["state"] = "missing-shared-job"
+        return summary
+    if shared_job_is_active(manifest):
+        summary["state"] = "running"
+        return summary
+
+    status = str(manifest.get("status") or "")
+    if shared_job_is_settled(manifest):
+        result_payload = load_shared_job_result(paths, job_id)
+        result = (
+            dict(result_payload.get("result", {}))
+            if isinstance(result_payload.get("result"), dict)
+            else {}
+        )
+        if result:
+            summary["covered_unit_count"] = int(
+                result.get("covered_unit_count", summary.get("covered_unit_count", 0)) or 0
+            )
+            summary["blocked_unit_count"] = int(
+                result.get("blocked_unit_count", summary.get("blocked_unit_count", 0)) or 0
+            )
+            summary["remaining_unit_count"] = int(
+                result.get("remaining_unit_count", summary.get("remaining_unit_count", 0)) or 0
+            )
+            summary["selected_unit_count"] = int(
+                result.get("selected_unit_count", summary.get("selected_unit_count", 0)) or 0
+            )
+        if status == "completed":
+            summary["state"] = "covered"
+        elif status:
+            summary["state"] = status
+        return summary
+
+    if status:
+        summary["state"] = status
+    return summary
+
+
 def knowledge_base_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     """Summarize knowledge-base presence and freshness from the filesystem."""
     current_files = list_visible_files(paths.knowledge_base_current_dir)
     staging_files = list_visible_files(paths.knowledge_base_staging_dir)
     state = sync_state(paths)
-    current_pointer = read_json(paths.knowledge_base_dir / "current-pointer.json")
-    retention_state = read_json(paths.snapshot_retention_state_path)
-    storage_lifecycle: dict[str, Any] = {}
-    if not retention_state:
-        from .versioning import snapshot_retention_summary, storage_lifecycle_summary
+    current_pointer = read_json(paths.current_publish_pointer_path)
+    current_manifest = read_json(paths.current_publish_manifest_path)
+    from .versioning import publish_storage_summary, storage_lifecycle_summary
 
-        retention_state = snapshot_retention_summary(paths)
-        storage_lifecycle = storage_lifecycle_summary(paths)
-    else:
-        from .versioning import storage_lifecycle_summary
-
-        storage_lifecycle = storage_lifecycle_summary(paths)
+    publish_storage = publish_storage_summary(paths)
+    storage_lifecycle = storage_lifecycle_summary(paths)
     validation_report = read_json(paths.current_validation_report_path)
     if not validation_report:
         validation_report = read_json(paths.staging_validation_report_path)
@@ -980,7 +1062,9 @@ def knowledge_base_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     )
     present = bool(current_files)
     current_signature = source_inventory_signature(paths)
-    published_signature = state.get("published_source_signature")
+    published_signature = state.get("published_source_signature") or current_manifest.get(
+        "published_source_signature"
+    )
     stale = bool(present and published_signature and published_signature != current_signature)
     stale_reason = "source-drift" if stale else None
     return {
@@ -991,38 +1075,29 @@ def knowledge_base_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
         "staging_path": str(paths.knowledge_base_staging_dir.relative_to(paths.root)),
         "validation_status": validation_status,
         "last_sync_at": state.get("last_sync_at"),
-        "last_publish_at": state.get("last_publish_at"),
+        "last_publish_at": state.get("last_publish_at") or current_manifest.get("published_at"),
         "stale": stale,
         "stale_reason": stale_reason,
         "source_inventory_signature": current_signature,
         "published_source_signature": published_signature,
-        "current_snapshot_id": current_pointer.get("snapshot_id"),
-        "versions_count": len(
-            list(paths.knowledge_base_versions_dir.glob("*/publish_manifest.json"))
-        ),
-        "snapshot_retention": {
-            "applied": retention_state.get("applied", False),
-            "deleted_count": retention_state.get("deleted_count", 0),
-            "eligible_delete_snapshot_ids": retention_state.get(
-                "eligible_delete_snapshot_ids", []
-            ),
-            "pinned_snapshot_count": retention_state.get("pinned_snapshot_count", 0),
-            "retained_snapshot_ids": retention_state.get("retained_snapshot_ids", []),
-            "deleted_snapshot_ids": retention_state.get("deleted_snapshot_ids", []),
-        }
-        if retention_state
-        else {},
+        "publish_model": publish_storage.get("publish_model", "single-current"),
+        "current_snapshot_id": current_manifest.get("snapshot_id")
+        or current_pointer.get("snapshot_id"),
+        "current_publish_root_path": current_pointer.get("published_root_path"),
+        "published_root_count": publish_storage.get("published_root_count", 0),
+        "publish_ledger_count": publish_storage.get("publish_ledger_count", 0),
+        "recent_publish_snapshot_ids": publish_storage.get("recent_publish_snapshot_ids", []),
+        "legacy_archive_detected": publish_storage.get("legacy_archive_detected", False),
+        "legacy_archive_version_count": publish_storage.get("legacy_archive_version_count", 0),
+        "legacy_runtime_files": publish_storage.get("legacy_runtime_files", []),
+        "legacy_archive_note": publish_storage.get("legacy_archive_note"),
         "storage_lifecycle": storage_lifecycle,
         "last_sync_rebuild_telemetry": (
             dict(state.get("rebuild_telemetry", {}))
             if isinstance(state.get("rebuild_telemetry"), dict)
             else {}
         ),
-        "lane_b_follow_up": (
-            dict(state.get("lane_b_follow_up_summary", {}))
-            if isinstance(state.get("lane_b_follow_up_summary"), dict)
-            else {}
-        ),
+        "lane_b_follow_up": _resolved_lane_b_follow_up_summary(paths, state),
     }
 
 

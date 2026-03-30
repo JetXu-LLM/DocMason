@@ -17,7 +17,7 @@
 
 Most workspace AI tools flatten your complex office documents into a single unstructured blob. When you ask a hard question, the answer sounds plausible — but it's impossible to trace back to reality.
 
-**DocMason** is built around a different thesis: **answers must be traceable**. It creates a local, file-based knowledge base over your private decks, spreadsheets, and documents, and lets your AI agent retrieve real evidence bundles with strict source provenance. A local repo, running as a deep-research AI app on Codex — no hidden backends, no cloud ingestion. Just local files and answers you can actually verify.
+**DocMason** is built around a different thesis: **answers must be traceable**. It creates a local, file-based knowledge base over your private decks, spreadsheets, documents, and PDFs, so your AI agent can reason over multimodal PowerPoint, Word, Excel, and PDF evidence instead of a flattened text blob. It then retrieves real evidence bundles with strict source provenance. A local repo, running as a deep-research AI app on Codex — no hidden backends, no cloud ingestion. Just local files and answers you can actually verify.
 
 ## Start Here
 
@@ -53,7 +53,7 @@ DocMason is built for **deep research** over your real work files — where ever
 ![Two ways to reach your first answer](docs/product/readme-first-minute-flow.svg)
 
 - **Path A: Start Small**
-  Drop a handful of work files (`.pptx`, `.docx`, `.xlsx`, PDFs) into the `DocMason/original_doc/` folder. Open the DocMason folder in Codex, and ask your question naturally. DocMason intelligently guides you through environment setup and quietly builds the knowledge base in the background — just approve when prompted.
+  Drop a handful of work files (`.pptx`, `.docx`, `.xlsx`, PDFs) into the `DocMason/original_doc/` folder. Open the DocMason folder in Codex, and ask your question naturally. DocMason intelligently guides you through environment setup and quietly builds the knowledge base in the background — just approve when prompted. After that, you can keep adding or revising files inside `original_doc/`; on the native path, DocMason can quietly and incrementally sync the published knowledge base instead of forcing a full restart.
 
 - **Path B: Stage Entire Folders**
   Drop your massive, department-level folders into `DocMason/original_doc/`. Open the DocMason folder in Codex. Tell Codex:
@@ -74,7 +74,7 @@ DocMason is built for **deep research** over your real work files — where ever
 - **First-Class Deep Text**: `md`, `markdown`, `txt`, `eml` (email)
 - **Lightweight Text**: `mdx`, `yaml`, `yml`, `tex`, `csv`, `tsv`
 
-High-fidelity Office file parsing relies on a lightweight local LibreOffice shim. PDF parsing uses the embedded stack (`PyMuPDF`, `pypdfium2`, `pypdf`, `pillow`). Markdown, plain text, `.eml`, and the lightweight-compatible family do not require LibreOffice.
+High-fidelity Office file parsing relies on a lightweight local LibreOffice shim. PDF parsing uses the embedded stack (`PyMuPDF`, `pypdfium2`, `pypdf`, `pillow`). Together they preserve multimodal structure, layout, and sheet/page context for deeper analysis, not just plain-text extraction. Markdown, plain text, `.eml`, and the lightweight-compatible family do not require LibreOffice.
 
 ## Why This Exists
 
@@ -118,7 +118,7 @@ Your answers come with exact source identity and provenance trace — you can ve
 
 ## What You Get Today
 
-- **Incremental Sync**: Fast updates pushing to your local `knowledge_base/current/`.
+- **Incremental Sync**: Add or revise files in `original_doc/`, and DocMason can quietly rebuild and republish your local `knowledge_base/current/` without forcing a full reset.
 - **Validation-Gated Commits**: Bad data fails the build instead of quietly degrading answers.
 - **Rich Source Parsing**: First-class handling for `.pdf`, `.pptx`, `.xlsx`, `.md`, `.eml`, and more.
 - **Deterministic Retrieval**: Exact provenance trace over published corpora.

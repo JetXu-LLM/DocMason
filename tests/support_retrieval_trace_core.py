@@ -441,6 +441,8 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.assertIn("detect", second.payload["phase_costs"])
         self.assertIn("stage", second.payload["phase_costs"])
         self.assertIn("publish", second.payload["phase_costs"])
+        self.assertEqual(second.payload["publish_storage"]["published_root_count"], 1)
+        self.assertEqual(second.payload["publish_storage"]["publish_ledger_count"], 1)
         self.assertIn("projection_state", second.payload)
         self.assertFalse(second.payload["projection_state"]["dirty"])
         self.assertEqual(second.payload["rebuild_telemetry"]["rebuild_cause"], "none")

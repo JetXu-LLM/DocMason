@@ -77,9 +77,11 @@ The current hybrid queue now distinguishes:
 ### First Run
 
 1. Put private source materials into `original_doc/`.
-2. Run `./scripts/bootstrap-workspace.sh --yes`.
-3. Run `./.venv/bin/python -m docmason sync`.
-4. Ask naturally through `ask`.
+2. For `Path A` or a small first-use corpus, ask naturally through `ask`.
+3. Let the ask path reuse the cached ready marker when it is valid, then attempt silent prepare, and delegate to `./scripts/bootstrap-workspace.sh --yes --json` when in-process prepare cannot honestly finish the workspace.
+4. If you prefer an explicit operator setup path or are following `Path B`, run `./scripts/bootstrap-workspace.sh --yes`.
+5. Run `./.venv/bin/python -m docmason sync` for medium-to-large corpora or whenever governed sync is still required.
+6. Ask naturally through `ask`.
 
 `docmason sync-adapters` is not a required step before every first question.
 Use it when the chosen agent ecosystem needs generated adapter files or when those files are missing or stale.
@@ -172,10 +174,12 @@ artifact-level retrieval or cross-source comparison.
 - `ask` is the user-facing top-level workflow for natural business questions.
 - `grounded-answer` remains the inner specialist workflow for supported answers. It is not a public `docmason answer` command.
 - `runtime-log-review` is an explicit operator workflow for recent activity and failure review. It is not a public `docmason review-logs` command.
+- `runtime-log-review` refreshes derived review-side outputs and writes one replayable request-level audit artifact under `runtime/logs/review/requests/<request_id>.json` for each explicit invocation.
 - `docmason workflow <workflow_id>` is the advanced public workflow surface for explicit workflow execution. It does not replace `ask` as the only natural-language question entry path.
 - Retrieval and trace logs are written locally under `runtime/logs/`.
 - `runtime/logs/review/summary.json` provides a review-friendly summary over recent sessions and degraded cases.
 - `runtime/logs/review/benchmark-candidates.json` suggests future benchmark cases derived from real runtime interactions.
+- `runtime/logs/review/summary.json` and `runtime/logs/review/benchmark-candidates.json` are derived outputs; the per-request audit artifact under `runtime/logs/review/requests/` is the canonical review request record.
 - Pending interaction-derived knowledge remains distinct from authored source documents and may participate in retrieval before sync-time promotion.
 
 ## Deferred Beyond Phase 6 Follow-On

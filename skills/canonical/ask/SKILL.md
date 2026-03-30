@@ -20,6 +20,7 @@ If the request is clearly an explicit setup, status, sync, adapter-maintenance, 
 - Native-thread reconciliation is not legal ask execution.
 - `ask` itself remains the only ordinary natural-language front door.
 - A request counts as ordinary front-door execution only after it has been opened as a canonical ask turn under this workflow.
+- `Plan Mode` or a similar host planning/collaboration mode should not discourage the host from opening canonical `ask` for an ordinary user request; if the current mode still blocks `ask`, the host should use a concise in-band alert or approval question and continue the same user task in the most natural available way rather than silently defaulting to operator-direct or side-path work.
 - Compatible hosts must use the repo-provided host integration surface rather than stitching internal ask helpers or side paths together themselves.
 - Compatible hosts should discover the exact callable binding from `skills/canonical/ask/workflow.json` and any generated adapter guidance for the current workspace instance; this skill defines legality, not host-specific wrapper wiring.
 - Compatible hosts must not treat ad hoc probing of internal ask surfaces, ad hoc Python snippets, or direct lifecycle-helper calls as legal ask entry.

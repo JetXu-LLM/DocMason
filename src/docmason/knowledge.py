@@ -87,6 +87,7 @@ from .retrieval import (
     build_trace_artifacts,
     normalize_filename_stem,
 )
+from .run_control import repair_stale_active_runs
 from .semantic_overlays import (
     collect_semantic_overlay_assets,
     load_semantic_overlays,
@@ -100,7 +101,7 @@ from .source_references import (
     enrich_source_manifest_reference_fields,
 )
 from .text_sources import ParsedUnit, parse_text_source
-from .versioning import apply_snapshot_retention, publish_staging_snapshot
+from .versioning import migrate_legacy_publish_storage, publish_staging_snapshot, publish_storage_summary
 
 PLACEHOLDER_TERMS = ("todo", "tbd", "placeholder", "lorem ipsum", "fill in")
 DOCX_ORDERED_STEP_PATTERN = re.compile(r"^\s*(\d+)(?:[.)-])\s+")
@@ -5850,12 +5851,24 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
     return report
 
 
-def publish_staging(paths: WorkspacePaths, validation_report: dict[str, Any]) -> dict[str, Any]:
-    """Publish the staged knowledge base as an immutable snapshot and activate `current`."""
+def publish_staging(
+    paths: WorkspacePaths,
+    validation_report: dict[str, Any],
+    *,
+    rebuild_telemetry: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish the staged knowledge base into the single-current publish root."""
+    publish_driver = (
+        "interaction-promotion"
+        if rebuild_telemetry.get("interaction_promotion_only")
+        else "source-delta"
+    )
     return publish_staging_snapshot(
         paths,
         validation_report=validation_report,
         published_at=utc_now(),
+        rebuild_cause=str(rebuild_telemetry.get("rebuild_cause") or ""),
+        publish_driver=publish_driver,
     )
 
 
@@ -6235,7 +6248,7 @@ def sync_workspace(
             "publish_skip_reason": None,
             "repair_actions": repair_actions,
             "projection_state": projection_state_summary(paths),
-            "snapshot_retention": {},
+            "publish_storage": {},
             "lane_b_follow_up": {},
         }
 
@@ -6262,7 +6275,7 @@ def sync_workspace(
             "publish_skip_reason": None,
             "repair_actions": repair_actions,
             "projection_state": projection_state_summary(paths),
-            "snapshot_retention": {},
+            "publish_storage": {},
             "lane_b_follow_up": {},
         }
     with workspace_lease(paths, "sync", timeout_seconds=600.0):
@@ -6276,7 +6289,25 @@ def sync_workspace(
                     ),
                 }
             )
+        legacy_migration = migrate_legacy_publish_storage(paths)
+        repair_actions.extend(
+            action
+            for action in legacy_migration.get("actions", [])
+            if isinstance(action, dict)
+        )
+        if legacy_migration.get("migrated"):
+            autonomous_steps.append(
+                {
+                    "step": "publish-storage-migration",
+                    "status": "completed",
+                    "detail": (
+                        "Compacted legacy archived publish storage into the single-current "
+                        "model."
+                    ),
+                }
+            )
         repair_actions.extend(repair_stale_shared_jobs(paths))
+        repair_actions.extend(repair_stale_active_runs(paths))
         detect_started = perf_counter()
         current_signature = source_inventory_signature(paths)
         state = sync_state(paths)
@@ -6524,7 +6555,7 @@ def sync_workspace(
                 "publish_skip_reason": None,
                 "repair_actions": repair_actions,
                 "projection_state": projection_state_summary(paths),
-                "snapshot_retention": {},
+                "publish_storage": {},
                 "lane_b_follow_up": {},
                 "lane_b_follow_up_summary": {},
             }
@@ -6589,7 +6620,7 @@ def sync_workspace(
                 "publish_skip_reason": None,
                 "repair_actions": repair_actions,
                 "projection_state": projection_state_summary(paths),
-                "snapshot_retention": {},
+                "publish_storage": {},
                 "lane_b_follow_up": {},
                 "lane_b_follow_up_summary": {},
             }
@@ -6617,7 +6648,7 @@ def sync_workspace(
         publish_skip_reason: str | None = None
         published_manifest: dict[str, Any] | None = None
         published_signature: str | None = state.get("published_source_signature")
-        snapshot_retention: dict[str, Any] = {}
+        publish_storage: dict[str, Any] = {}
         lane_b_follow_up: dict[str, Any] = {}
         lane_b_follow_up_summary: dict[str, Any] = {}
         if validation_report["status"] in {"valid", "warnings"}:
@@ -6644,7 +6675,11 @@ def sync_workspace(
                 )
             else:
                 publish_started = perf_counter()
-                published_manifest = publish_staging(paths, validation_report)
+                published_manifest = publish_staging(
+                    paths,
+                    validation_report,
+                    rebuild_telemetry=rebuild_telemetry,
+                )
                 phase_costs["publish"] = perf_counter() - publish_started
                 published = True
                 published_signature = current_signature
@@ -6668,7 +6703,7 @@ def sync_workspace(
                         "step": "publish",
                         "status": "completed",
                         "detail": (
-                            "Published an immutable snapshot and activated "
+                            "Published the single current KB root and activated "
                             "`knowledge_base/current`."
                         ),
                     }
@@ -6679,20 +6714,16 @@ def sync_workspace(
                     reason="A knowledge-base publish activated new canonical runtime truth.",
                 )
                 phase_costs["projection_enqueue"] = perf_counter() - projection_started
-            snapshot_retention = apply_snapshot_retention(paths)
+            publish_storage = publish_storage_summary(paths)
             autonomous_steps.append(
                 {
-                    "step": "snapshot-retention",
-                    "status": (
-                        "completed"
-                        if not snapshot_retention.get("deletion_failures")
-                        else "degraded"
-                    ),
+                    "step": "publish-storage",
+                    "status": "completed",
                     "detail": (
-                        "Applied snapshot retention with "
-                        f"deleted_count={snapshot_retention.get('deleted_count', 0)} and "
-                        "pinned_snapshot_count="
-                        f"{snapshot_retention.get('pinned_snapshot_count', 0)}."
+                        "Publish storage is in single-current mode with "
+                        f"published_root_count={publish_storage.get('published_root_count', 0)} "
+                        "and "
+                        f"publish_ledger_count={publish_storage.get('publish_ledger_count', 0)}."
                     ),
                 }
             )
@@ -6796,7 +6827,7 @@ def sync_workspace(
             "publish_skip_reason": publish_skip_reason,
             "repair_actions": repair_actions,
             "projection_state": projection_state_summary(paths),
-            "snapshot_retention": snapshot_retention,
+            "publish_storage": publish_storage,
             "lane_b_follow_up": lane_b_follow_up,
             "lane_b_follow_up_summary": lane_b_follow_up_summary,
         }

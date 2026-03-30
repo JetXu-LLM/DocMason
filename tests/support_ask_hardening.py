@@ -375,6 +375,89 @@ class AskHardeningTests(unittest.TestCase):
         self.assertFalse(general_turn["sync_suggested"])
         self.assertIsNone(general_turn["freshness_notice"])
 
+    def test_review_runtime_logs_writes_request_artifact_for_direct_workflow(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        report = run_workflow("runtime-log-review", paths=workspace)
+
+        self.assertEqual(report.payload["status"], "degraded")
+        request_path = workspace.root / str(report.payload["final_report"]["review_request_path"])
+        artifact = read_json(request_path)
+        self.assertEqual(artifact["entry_surface"], "workflow/runtime-log-review")
+        self.assertIsNone(artifact["request_text"])
+        self.assertEqual(artifact["final_status"], "degraded")
+        self.assertTrue(artifact["stable_summary"])
+        self.assertIn("runtime/logs/review/summary.json", artifact["derived_output_paths"])
+
+    def test_review_runtime_logs_writes_request_artifact_for_ask_routed_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-review-request"}, clear=False):
+            answered = prepare_ask_turn(
+                workspace,
+                question="What does the architecture strategy actually say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+        answer_path = workspace.root / answered["answer_file_path"]
+        answer_path.write_text("The architecture strategy defines the operating model.\n", encoding="utf-8")
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=answered["log_context"],
+        )
+        complete_ask_turn(
+            workspace,
+            conversation_id=answered["conversation_id"],
+            turn_id=answered["turn_id"],
+            inner_workflow_id="grounded-answer",
+            session_ids=[trace["session_id"]],
+            trace_ids=[trace["trace_id"]],
+            answer_file_path=answered["answer_file_path"],
+            response_excerpt="Answered summary.",
+            status="answered",
+        )
+
+        review_question = (
+            "Please review the two most recent canonical ask turns and summarize their failure points."
+        )
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-review-request"}, clear=False):
+            opened = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": review_question,
+                    "semantic_analysis": self.semantic_analysis(
+                        question_class="runtime-review",
+                        question_domain="workspace-corpus",
+                    ),
+                    "host_provider": "codex",
+                    "host_thread_ref": "thread-review-request",
+                    "host_identity_source": "codex_thread_id",
+                },
+                paths=workspace,
+            )
+            report = review_runtime_logs(workspace)
+
+        self.assertEqual(opened["status"], "execute")
+        request_path = workspace.root / str(report.payload["review_request_path"])
+        artifact = read_json(request_path)
+        self.assertEqual(artifact["entry_surface"], "ask/runtime-log-review")
+        self.assertEqual(artifact["request_text"], review_question)
+        self.assertEqual(artifact["conversation_id"], opened["conversation_id"])
+        self.assertEqual(artifact["turn_id"], opened["turn_id"])
+        self.assertIn(answered["conversation_id"], artifact["consulted_conversation_ids"])
+
     def test_visual_odd_question_prefers_published_render_and_structure(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)

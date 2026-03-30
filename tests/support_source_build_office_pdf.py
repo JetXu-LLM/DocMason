@@ -43,7 +43,7 @@ from docmason.knowledge import (
 )
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.semantic_overlays import semantic_overlay_candidates, write_semantic_overlay
-from docmason.versioning import apply_snapshot_retention
+from docmason.versioning import migrate_legacy_publish_storage, publish_ledger_entries
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 
@@ -1407,6 +1407,7 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertTrue(workspace.current_publish_manifest_path.exists())
         self.assertTrue((workspace.knowledge_base_dir / "current-pointer.json").exists())
         self.assertTrue(workspace.knowledge_base_current_dir.is_symlink())
+        self.assertEqual(len(list(workspace.knowledge_base_published_dir.iterdir())), 1)
         self.assertTrue(
             (
                 workspace.knowledge_base_current_dir / "sources" / source_id / "knowledge.json"
@@ -1428,6 +1429,10 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
             current_validation.get("source_signature"),
             current_publish_manifest.get("published_source_signature"),
         )
+        publish_storage = published.payload["publish_storage"]
+        self.assertEqual(publish_storage["publish_model"], "single-current")
+        self.assertEqual(publish_storage["published_root_count"], 1)
+        self.assertEqual(publish_storage["publish_ledger_count"], 1)
 
         status = status_workspace(workspace, editable_install_probe=self.ready_probe)
         self.assertEqual(status.payload["stage"], "knowledge-base-present")
@@ -1522,7 +1527,7 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertEqual(settled["job_id"], follow_up["job_id"])
         self.assertEqual(load_shared_job(workspace, str(follow_up["job_id"]))["status"], "completed")
 
-    def test_snapshot_retention_keeps_current_run_baseline_and_review_pins(self) -> None:
+    def test_legacy_publish_storage_migration_backfills_ledger_and_removes_archives(self) -> None:
         workspace = self.make_workspace()
         self.seed_snapshot_version(
             workspace,
@@ -1548,38 +1553,14 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
             published_at="2026-03-25T00:00:00Z",
             source_signature="sig-review",
         )
-        self.seed_snapshot_version(
-            workspace,
-            snapshot_id="snapshot-recent-a",
-            published_at="2026-03-24T00:00:00Z",
-            source_signature="sig-recent-a",
-        )
-        self.seed_snapshot_version(
-            workspace,
-            snapshot_id="snapshot-recent-b",
-            published_at="2026-03-23T00:00:00Z",
-            source_signature="sig-recent-b",
-        )
-        self.seed_snapshot_version(
-            workspace,
-            snapshot_id="snapshot-expired",
-            published_at="2026-03-10T00:00:00Z",
-            source_signature="sig-expired",
+        current_snapshot_dir = workspace.knowledge_version_dir("snapshot-current")
+        os.symlink(
+            os.path.relpath(current_snapshot_dir, workspace.knowledge_base_dir),
+            workspace.knowledge_base_current_dir,
         )
         write_json(
             workspace.knowledge_base_dir / "current-pointer.json",
             {"snapshot_id": "snapshot-current"},
-        )
-        write_json(
-            workspace.runs_dir / "run-1" / "state.json",
-            {
-                "status": "active",
-                "version_context": {"published_snapshot_id": "snapshot-run"},
-            },
-        )
-        write_json(
-            workspace.eval_baseline_path("broad"),
-            {"version_context": {"published_snapshot_id": "snapshot-baseline"}},
         )
         write_json(
             workspace.snapshot_pins_path,
@@ -1593,21 +1574,35 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
                 ]
             },
         )
-
-        retention = apply_snapshot_retention(workspace)
-
-        self.assertTrue(workspace.knowledge_version_dir("snapshot-current").exists())
-        self.assertTrue(workspace.knowledge_version_dir("snapshot-run").exists())
-        self.assertTrue(workspace.knowledge_version_dir("snapshot-baseline").exists())
-        self.assertTrue(workspace.knowledge_version_dir("snapshot-review").exists())
-        self.assertTrue(workspace.knowledge_version_dir("snapshot-recent-a").exists())
-        self.assertTrue(workspace.knowledge_version_dir("snapshot-recent-b").exists())
-        self.assertFalse(workspace.knowledge_version_dir("snapshot-expired").exists())
-        self.assertIn("snapshot-expired", retention["deleted_snapshot_ids"])
-        review_entry = next(
-            item for item in retention["snapshots"] if item["snapshot_id"] == "snapshot-review"
+        write_json(
+            workspace.snapshot_retention_state_path,
+            {
+                "schema_version": 1,
+                "updated_at": "2026-03-29T00:00:00Z",
+            },
         )
-        self.assertIn("review-case:case-1", review_entry["pin_reasons"])
+
+        migration = migrate_legacy_publish_storage(workspace)
+        ledger = publish_ledger_entries(workspace)
+
+        self.assertTrue(migration["legacy_detected"])
+        self.assertTrue(migration["migrated"])
+        self.assertFalse(workspace.knowledge_base_versions_dir.exists())
+        self.assertFalse(workspace.snapshot_pins_path.exists())
+        self.assertFalse(workspace.snapshot_retention_state_path.exists())
+        self.assertTrue(workspace.knowledge_base_current_dir.is_symlink())
+        self.assertEqual(
+            workspace.knowledge_base_current_dir.resolve().parent,
+            workspace.knowledge_base_published_dir.resolve(),
+        )
+        self.assertEqual(len(list(workspace.knowledge_base_published_dir.iterdir())), 1)
+        self.assertEqual(
+            {entry["snapshot_id"] for entry in ledger},
+            {"snapshot-current", "snapshot-run", "snapshot-baseline", "snapshot-review"},
+        )
+        self.assertTrue(
+            any(action["kind"] == "backfilled-publish-ledger" for action in migration["actions"])
+        )
 
     def test_validate_rejects_placeholder_knowledge(self) -> None:
         workspace = self.make_workspace()

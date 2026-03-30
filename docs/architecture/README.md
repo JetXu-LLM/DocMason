@@ -32,8 +32,9 @@ Phase 6 now implements the stable primitive, workflow-productization, private-fi
 - local Claude adapter generation from canonical sources
 - generated Claude workflow-routing guidance derived from canonical workflow metadata
 - staged knowledge-base artifacts under `knowledge_base/staging/`
-- immutable published snapshots under `knowledge_base/versions/<snapshot_id>/`
+- a single published read surface at `knowledge_base/current/`, backed by one hidden published root under `knowledge_base/.published/`
 - the compatibility publish pointer under `knowledge_base/current/` plus `knowledge_base/current-pointer.json`
+- a compact logical publish ledger under `runtime/control_plane/publish_ledger.jsonl`
 - runtime source identity, dependency, and query-log state under `runtime/`
 - runtime conversation-turn state under `runtime/logs/conversations/`
 - runtime interaction-ingest state, attachments, overlays, and reconciliation manifests under `runtime/interaction-ingest/`
