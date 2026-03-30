@@ -36,6 +36,7 @@ If the request is clearly explicit operator work, route directly instead:
 - refresh the knowledge base -> `skills/canonical/knowledge-base-sync/SKILL.md`
 - review runtime failures or logs -> `skills/canonical/runtime-log-review/SKILL.md`
 - refresh generated adapters -> `skills/canonical/adapter-sync/SKILL.md`
+- update a generated release bundle in place -> `docmason update-core`
 
 All other workflows are inner, follow-on, or explicit operator workflows; they are not the default top-level path for a new ordinary user request.
 

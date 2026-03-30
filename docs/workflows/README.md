@@ -14,9 +14,10 @@ The public command surface now includes a deterministic substrate plus one advan
 - `docmason trace`
 - `docmason validate-kb`
 - `docmason sync-adapters`
+- `docmason update-core`
 - `docmason workflow`
 
-All nine commands support `--json`.
+All ten commands support `--json`.
 The deterministic substrate remains compact, while `docmason workflow` is the advanced execution entry for explicit workflow-level operator and agent use.
 
 ## Workflow Layers

@@ -3359,6 +3359,82 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(completed["release_entry_notice"], "DocMason update available: v0.2.0.")
         self.assertEqual(completed["release_entry_status"]["distribution_channel"], "clean")
 
+    def test_hidden_ask_finalize_ignores_release_entry_failures(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.seed_release_bundle(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": (
+                    'Using only the document "Campaign Planning Brief", summarize the '
+                    "architecture strategy in 3 bullet points."
+                ),
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-release-fail-silent",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The architecture strategy defines the operating model.\n",
+            encoding="utf-8",
+        )
+
+        def fake_complete(*args: object, **kwargs: object) -> dict[str, object]:
+            del args
+            update_conversation_turn(
+                workspace,
+                conversation_id=str(kwargs["conversation_id"]),
+                turn_id=str(kwargs["turn_id"]),
+                updates={
+                    "committed_run_id": str(opened["run_id"]),
+                    "answer_file_path": str(opened["answer_file_path"]),
+                    "answer_state": "grounded",
+                    "support_basis": "kb-grounded",
+                    "response_excerpt": "The architecture strategy defines the operating model.",
+                    "session_ids": [],
+                    "trace_ids": [],
+                },
+            )
+            return {"committed_run_id": str(opened["run_id"])}
+
+        with mock.patch(
+            "docmason.host_integration.complete_ask_turn",
+            side_effect=fake_complete,
+        ):
+            with mock.patch(
+                "docmason.host_integration.maybe_run_release_entry_check",
+                side_effect=OSError("state write failed"),
+            ):
+                completed = handle_hidden_ask_request(
+                    {
+                        "action": "finalize",
+                        "conversation_id": opened["conversation_id"],
+                        "turn_id": opened["turn_id"],
+                        "answer_file_path": opened["answer_file_path"],
+                        "response_excerpt": "The architecture strategy defines the operating model.",
+                    },
+                    paths=workspace,
+                )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(
+            completed["answer_text"],
+            "The architecture strategy defines the operating model.",
+        )
+        self.assertIsNone(completed["release_entry_notice"])
+        self.assertIsNone(completed["release_entry_status"])
+        self.assertEqual(
+            answer_path.read_text(encoding="utf-8"),
+            "The architecture strategy defines the operating model.\n",
+        )
+
     def test_recommended_hybrid_targets_do_not_fall_back_to_unmatched_units(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)

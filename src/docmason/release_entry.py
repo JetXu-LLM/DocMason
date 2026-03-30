@@ -17,6 +17,7 @@ RELEASE_CLIENT_SCHEMA_VERSION = 1
 RELEASE_ENTRY_REQUEST_SCHEMA_VERSION = 1
 RELEASE_ENTRY_RESPONSE_SCHEMA_VERSION = 1
 RELEASE_ENTRY_AUTO_TRIGGER = "ask-auto"
+RELEASE_ENTRY_MANUAL_UPDATE_TRIGGER = "update-core"
 RELEASE_ENTRY_DISABLED_SOURCE_REPO = "source-repo"
 RELEASE_ENTRY_DISABLED_DNT = "dnt"
 RELEASE_ENTRY_DISABLED_LOCAL_CONFIG = "local-config"
@@ -280,6 +281,30 @@ def _prepared_release_client_state(
     return state
 
 
+def release_entry_bundle_config(paths: WorkspacePaths) -> dict[str, Any]:
+    """Return the effective release-entry bundle configuration for this workspace."""
+    return _release_entry_bundle_config(paths)
+
+
+def prepare_release_client_state(
+    paths: WorkspacePaths,
+    *,
+    automatic_check_enabled_default: bool,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Load or initialize the persisted local release-entry state."""
+    return _prepared_release_client_state(
+        paths,
+        automatic_check_enabled_default=automatic_check_enabled_default,
+        now=_current_time(now=now),
+    )
+
+
+def persist_release_client_state(paths: WorkspacePaths, state: dict[str, Any]) -> None:
+    """Persist one normalized release-entry client state payload."""
+    _persist_release_client_state(paths, state)
+
+
 def _release_entry_request_payload(
     *,
     distribution_channel: str,
@@ -323,17 +348,55 @@ def _parsed_release_entry_response(payload: Any) -> dict[str, Any]:
     }
 
 
+def request_release_entry_service(
+    service_url: str,
+    *,
+    distribution_channel: str,
+    current_version: str,
+    installation_hash: str,
+    trigger: str,
+    timeout_seconds: float = DEFAULT_RELEASE_ENTRY_TIMEOUT_SECONDS,
+    urlopen: Any | None = None,
+) -> dict[str, Any]:
+    """Call the bounded release-entry service and return parsed release metadata."""
+    request = urllib.request.Request(
+        service_url,
+        data=_release_entry_request_payload(
+            distribution_channel=distribution_channel,
+            current_version=current_version,
+            installation_hash=installation_hash,
+            trigger=trigger,
+        ),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    effective_urlopen = urlopen or urllib.request.urlopen
+    with effective_urlopen(request, timeout=timeout_seconds) as response:
+        response_body = response.read().decode("utf-8")
+    parsed = _parsed_release_entry_response(json.loads(response_body))
+    if not parsed:
+        raise ValueError("Release-entry service returned an invalid response.")
+    return parsed
+
+
 def _release_entry_notice(
     *,
     current_version: str,
     latest_version: str,
     release_url: str | None,
 ) -> str:
-    target = release_url or "the DocMason releases page"
     return (
         "DocMason update available: "
         f"{latest_version} (current bundle: {current_version}). "
-        f"Download the latest release from {target} when convenient."
+        "Run `docmason update-core` to apply the latest clean core."
+        + (
+            f" Manual download remains available from {release_url}."
+            if release_url
+            else ""
+        )
     )
 
 
@@ -386,25 +449,16 @@ def maybe_run_release_entry_check(
     _persist_release_client_state(paths, state)
     result["attempted"] = True
 
-    request = urllib.request.Request(
-        service_url,
-        data=_release_entry_request_payload(
+    try:
+        parsed = request_release_entry_service(
+            service_url,
             distribution_channel=distribution_channel,
             current_version=current_version,
             installation_hash=str(state["installation_hash"]),
             trigger=trigger,
-        ),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    effective_urlopen = urlopen or urllib.request.urlopen
-    try:
-        with effective_urlopen(request, timeout=timeout_seconds) as response:
-            response_body = response.read().decode("utf-8")
-        parsed = _parsed_release_entry_response(json.loads(response_body))
+            timeout_seconds=timeout_seconds,
+            urlopen=urlopen,
+        )
     except (
         OSError,
         ValueError,

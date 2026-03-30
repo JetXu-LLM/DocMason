@@ -18,6 +18,7 @@ The public command surface now includes:
 - `docmason trace`
 - `docmason validate-kb`
 - `docmason sync-adapters`
+- `docmason update-core`
 - `docmason workflow`
 
 Phase 4b intentionally does not add public `docmason answer` or `docmason review-logs` commands.

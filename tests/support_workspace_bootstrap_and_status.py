@@ -343,6 +343,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "trace": ["trace", "--source-id", "source-1", "--json"],
             "validate-kb": ["validate-kb", "--json", "--target", "staging"],
             "sync-adapters": ["sync-adapters", "--json", "--target", "claude"],
+            "update-core": ["update-core", "--json", "--bundle", "bundle.zip"],
         }
         for command, argv in command_arguments.items():
             with self.subTest(command=command):
@@ -360,6 +361,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "trace": CommandReport(2, {"status": DEGRADED, "trace_mode": "answer-first"}, []),
             "validate-kb": CommandReport(0, {"status": READY, "validation_status": "valid"}, []),
             "sync-adapters": CommandReport(0, {"status": READY, "target": "claude"}, []),
+            "update-core": CommandReport(0, {"status": READY, "update_core_status": "updated"}, []),
         }
         patch_targets = {
             "prepare": "docmason.cli.prepare_workspace",
@@ -370,6 +372,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "trace": "docmason.cli.trace_knowledge",
             "validate-kb": "docmason.cli.validate_knowledge_base",
             "sync-adapters": "docmason.cli.sync_adapters",
+            "update-core": "docmason.cli.update_core_workspace",
         }
         arguments = {
             "prepare": ["prepare", "--json", "--yes"],
@@ -380,6 +383,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "trace": ["trace", "--source-id", "source-1", "--json"],
             "validate-kb": ["validate-kb", "--json"],
             "sync-adapters": ["sync-adapters", "--json"],
+            "update-core": ["update-core", "--json"],
         }
         for command, target in patch_targets.items():
             with self.subTest(command=command), mock.patch(target, return_value=reports[command]):

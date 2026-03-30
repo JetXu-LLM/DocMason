@@ -9,7 +9,7 @@ The worker has two jobs only:
 
 1. accept one bounded bundle client request after canonical ask completion
 2. expose the current release metadata for that bundle channel while recording one deduplicated
-   daily-activity event
+   daily-activity event for both bounded auto-check and explicit `docmason update-core` calls
 
 It is intentionally not part of the product truth surface.
 It does not receive corpus data, file metadata, query text, answer text, source locators,

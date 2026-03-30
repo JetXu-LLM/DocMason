@@ -124,6 +124,25 @@ class ReleaseEntryWorkerContractTests(unittest.TestCase):
         self.assertTrue(current_release["asset_url"].endswith("/DocMason-demo-ico-gcs.zip"))
         self.assertTrue(current_release["update_available"])
 
+    def test_manual_update_trigger_uses_the_same_collector_contract(self) -> None:
+        connection = self.make_connection()
+        self.publish_release(connection)
+        response = record_release_entry_check(
+            connection,
+            {
+                "schema_version": 1,
+                "distribution_channel": "clean",
+                "source_version": "v0.1.0",
+                "installation_hash": "hash-update-core",
+                "trigger": "update-core",
+            },
+            now=datetime(2026, 3, 30, 15, 0, tzinfo=UTC),
+        )
+        current_release = response["current_release"]
+        self.assertEqual(current_release["distribution_channel"], "clean")
+        self.assertEqual(current_release["latest_version"], "v0.2.0")
+        self.assertTrue(current_release["asset_url"].endswith("/DocMason-clean.zip"))
+
 
 if __name__ == "__main__":
     unittest.main()

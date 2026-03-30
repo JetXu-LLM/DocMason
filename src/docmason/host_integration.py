@@ -210,7 +210,10 @@ def _host_turn_payload(
     release_entry_notice = None
     release_entry_status = None
     if include_release_entry and user_reply_allowed:
-        release_entry = maybe_run_release_entry_check(paths)
+        try:
+            release_entry = maybe_run_release_entry_check(paths)
+        except Exception:
+            release_entry = {"notice": None, "release_entry_status": None}
         release_entry_notice = _nonempty_string(release_entry.get("notice"))
         release_entry_status = release_entry.get("release_entry_status")
         if answer_text is not None and release_entry_notice is not None:

@@ -47,6 +47,7 @@ class FoundationAndContractTests(unittest.TestCase):
             ROOT / "scripts" / "update-docmason-core.py",
             ROOT / "scripts" / "check-repo-safety.py",
             ROOT / "scripts" / "install-git-hooks.sh",
+            ROOT / "planning" / "2026-03-30-update-core-cli-tech-spec.md",
             ROOT / ".githooks" / "README.md",
             ROOT / ".githooks" / "pre-commit",
             ROOT / ".githooks" / "pre-push",
@@ -66,6 +67,7 @@ class FoundationAndContractTests(unittest.TestCase):
             ROOT / "src" / "docmason" / "operator_eval.py",
             ROOT / "src" / "docmason" / "release_entry.py",
             ROOT / "src" / "docmason" / "release_entry_service.py",
+            ROOT / "src" / "docmason" / "update_core.py",
             ROOT / "src" / "docmason" / "transcript.py",
             ROOT / "skills" / "canonical" / "ask" / "SKILL.md",
             ROOT / "skills" / "canonical" / "ask" / "workflow.json",
@@ -221,18 +223,25 @@ class FoundationAndContractTests(unittest.TestCase):
 
         self.assertIn("`ask` remains the only ordinary natural-language front door", agents)
         self.assertIn(
-            "default top-level workflow for a new ordinary user request in this workspace unless the request is clearly explicit operator work",
+            "default top-level workflow for a new ordinary user request in this workspace "
+            "unless the request is clearly explicit operator work",
             agents,
         )
         self.assertIn("`ask` is the canonical skill at `skills/canonical/ask/SKILL.md`", agents)
-        self.assertIn("user-facing top-level workflow for ordinary natural-language requests", agents)
+        self.assertIn(
+            "user-facing top-level workflow for ordinary natural-language requests",
+            agents,
+        )
         self.assertIn("`rg --files`", agents)
         self.assertIn("do not guess how this repository should map onto your platform", agents)
         self.assertIn("what you are, or which assistant is operating here", agents)
         self.assertIn("canonical self-reference contract", agents)
         self.assertIn("Final user-facing replies should normally match the user's language", agents)
         self.assertIn("Do not commit or expose private corpus inputs", agents)
-        self.assertIn("inspect the matching canonical skill instead of guessing from memory", agents)
+        self.assertIn(
+            "inspect the matching canonical skill instead of guessing from memory",
+            agents,
+        )
         self.assertIn("after resolving symlinks", agents)
         self.assertIn(
             "Use the smallest evidence scope that is sufficient to answer correctly and truthfully",
@@ -243,7 +252,8 @@ class FoundationAndContractTests(unittest.TestCase):
             agents,
         )
         self.assertIn(
-            "`Plan Mode` or a similar host planning/collaboration mode should not discourage the host from opening canonical `ask` for an ordinary user request;",
+            "`Plan Mode` or a similar host planning/collaboration mode should not discourage "
+            "the host from opening canonical `ask` for an ordinary user request;",
             agents,
         )
         self.assertNotIn("`docmason _ask`", agents)
@@ -268,7 +278,8 @@ class FoundationAndContractTests(unittest.TestCase):
             ask_skill,
         )
         self.assertIn(
-            "`Plan Mode` or a similar host planning/collaboration mode should not discourage the host from opening canonical `ask` for an ordinary user request;",
+            "`Plan Mode` or a similar host planning/collaboration mode should not discourage "
+            "the host from opening canonical `ask` for an ordinary user request;",
             ask_skill,
         )
         self.assertNotIn("`docmason _ask`", ask_skill)
@@ -291,11 +302,13 @@ class FoundationAndContractTests(unittest.TestCase):
             ask_skill,
         )
         self.assertNotIn(
-            "if canonical ask cannot be opened honestly, stop at that boundary instead of routing ad hoc from native-thread or raw-tool state",
+            "if canonical ask cannot be opened honestly, stop at that boundary instead of "
+            "routing ad hoc from native-thread or raw-tool state",
             ask_skill,
         )
         self.assertNotIn(
-            "upgrade that live turn into canonical ask ownership when reconciliation created it first",
+            "upgrade that live turn into canonical ask ownership when reconciliation "
+            "created it first",
             ask_skill,
         )
         self.assertNotIn("recommended_hybrid_targets", ask_skill)

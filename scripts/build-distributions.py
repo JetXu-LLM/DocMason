@@ -25,6 +25,7 @@ COMMON_TOP_LEVEL_EXCLUDES = {
     "build",
     "dist",
     "evals",
+    "ops",
     "planning",
     "sample_corpus",
     "tests",

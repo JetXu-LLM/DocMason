@@ -62,6 +62,7 @@ Generated release bundles now carry a bounded release-entry contract:
 - only canonical `ask` completion can auto-trigger the network call
 - automatic checks run at most once every 20 hours
 - the source repository and fresh clone paths stay automatic-network disabled
+- `docmason update-core` is the explicit in-place core update path for generated bundles
 
 Each generated bundle includes:
 
@@ -73,14 +74,20 @@ The network payload is intentionally narrow:
 - `distribution_channel`
 - `source_version`
 - `installation_hash`
-- `trigger = ask-auto`
+- `trigger`
 
 It never includes corpus content, paths, file names, query text, answer text, source locators,
 environment variables, secrets, machine fingerprints, or IP-derived identifiers.
 
 `DO_NOT_TRACK=1` disables the automatic update check completely.
 Users may also set `automatic_check_enabled` to `false` in `runtime/state/release-client.json`.
+An explicit `docmason update-core` command still contacts the release-entry service, because it is
+a direct user-requested update action rather than a background automatic check.
 
 When a newer bundle release is known, the host-visible final ask reply may include one short update
 reminder.
 The canonical answer file under `runtime/answers/` remains unchanged.
+When the user explicitly updates, DocMason downloads the latest generated clean core, verifies the
+published checksum, preserves local workspace state such as `original_doc/`, `knowledge_base/`,
+`runtime/`, `adapters/`, `.docmason/`, and `.agents/`, and replaces the remaining top-level core
+surface in place.

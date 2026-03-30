@@ -32,7 +32,7 @@ from .control_plane import (
     sync_input_signature,
     workspace_state_snapshot,
 )
-from .coordination import LeaseConflictError
+from .coordination import LeaseConflictError, workspace_lease
 from .project import (
     BOOTSTRAP_STATE_SCHEMA_VERSION,
     MINIMUM_PYTHON,
@@ -62,6 +62,7 @@ from .toolchain import (
     inspect_entrypoint,
     inspect_toolchain,
 )
+from .update_core import UPDATE_CORE_STATUS_ALREADY_CURRENT, UpdateCoreError, perform_update_core
 from .workflows import (
     WorkflowMetadata,
     WorkflowMetadataError,
@@ -2573,7 +2574,8 @@ def status_workspace(
     if payload["knowledge_base"].get("legacy_archive_detected"):
         lines.append(
             "Legacy publish storage: "
-            f"detected (versions={payload['knowledge_base'].get('legacy_archive_version_count', 0)}); "
+            "detected (versions="
+            f"{payload['knowledge_base'].get('legacy_archive_version_count', 0)}); "
             "the next mutating sync will compact it into single-current mode."
         )
     if pending_actions:
@@ -3592,6 +3594,78 @@ def sync_adapters(
         "Generated files: " + ", ".join(payload["generated_files"]),
         "Source inputs: " + ", ".join(payload["source_inputs"]),
     ]
+    return make_report(READY, payload, lines)
+
+
+def update_core_workspace(
+    paths: WorkspacePaths | None = None,
+    *,
+    bundle: Path | None = None,
+) -> CommandReport:
+    """Apply the latest generated clean core onto the current release bundle workspace."""
+    workspace = paths or locate_workspace()
+    command_context = _reconcile_command_context(workspace, mutating=True)
+    if command_context["state"] == "blocked":
+        return _mutating_command_coordination_report(
+            command_name="Update-core status",
+            status_field="update_core_status",
+            coordination=command_context["coordination"],
+        )
+    try:
+        with workspace_lease(workspace, "update-core", timeout_seconds=30.0):
+            payload = perform_update_core(workspace, bundle_path=bundle)
+    except LeaseConflictError as exc:
+        return _mutating_command_coordination_report(
+            command_name="Update-core status",
+            status_field="update_core_status",
+            coordination=_coordination_from_lease_conflict(exc, state="blocked"),
+        )
+    except UpdateCoreError as exc:
+        status = DEGRADED if exc.payload.get("core_updated") else ACTION_REQUIRED
+        payload = {
+            "status": status,
+            "update_core_status": exc.code,
+            "detail": exc.detail,
+            "next_steps": exc.next_steps,
+            **exc.payload,
+        }
+        lines = [
+            f"Update-core status: {status}",
+            exc.detail,
+        ]
+        if exc.next_steps:
+            lines.append(f"Next steps: {', '.join(deduplicate(exc.next_steps))}")
+        _apply_coordination_warning(
+            payload=payload,
+            lines=lines,
+            coordination=command_context["coordination"],
+        )
+        return make_report(status, payload, lines)
+
+    payload["status"] = READY
+    latest_version = payload.get("latest_version") or payload.get("applied_version")
+    if payload.get("update_core_status") == UPDATE_CORE_STATUS_ALREADY_CURRENT:
+        lines = [
+            f"Update-core status: {READY}",
+            f"Current bundle is already up to date at {latest_version}.",
+        ]
+    else:
+        lines = [
+            f"Update-core status: {READY}",
+            (
+                "Applied clean core update: "
+                f"{payload.get('current_version')} -> {payload.get('applied_version')}."
+            ),
+            (
+                "Preserved paths: "
+                + ", ".join(str(item) for item in payload.get("preserved_paths", []))
+            ),
+        ]
+    _apply_coordination_warning(
+        payload=payload,
+        lines=lines,
+        coordination=command_context["coordination"],
+    )
     return make_report(READY, payload, lines)
 
 

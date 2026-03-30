@@ -16,6 +16,7 @@ from .commands import (
     sync_adapters,
     sync_workspace,
     trace_knowledge,
+    update_core_workspace,
     validate_knowledge_base,
 )
 from .host_integration import run_hidden_ask_cli
@@ -167,6 +168,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Adapter target to generate. DocMason currently supports `claude` only.",
     )
 
+    update_core_parser = subparsers.add_parser(
+        "update-core",
+        help="Update a generated clean/demo bundle in place while preserving local workspace data.",
+    )
+    update_core_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON output.",
+    )
+    update_core_parser.add_argument(
+        "--bundle",
+        help=(
+            "Apply a local generated clean bundle zip instead of downloading the latest "
+            "clean core."
+        ),
+    )
+
     workflow_parser = subparsers.add_parser(
         "workflow",
         help="Execute a supported advanced workflow surface.",
@@ -228,6 +246,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return emit_report(validate_knowledge_base(target=args.target), as_json=args.json)
     if args.command == "sync-adapters":
         return emit_report(sync_adapters(target=args.target), as_json=args.json)
+    if args.command == "update-core":
+        from pathlib import Path
+
+        bundle = Path(args.bundle).resolve() if args.bundle else None
+        return emit_report(update_core_workspace(bundle=bundle), as_json=args.json)
     if args.command == "workflow":
         return emit_report(run_workflow(args.workflow_id), as_json=args.json)
     if args.command == "_hook":

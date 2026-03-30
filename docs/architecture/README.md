@@ -28,7 +28,7 @@ Phase 6 now implements the stable primitive, workflow-productization, private-fi
 - canonical public workflows under `skills/canonical/`
 - per-workflow execution metadata under `skills/canonical/*/workflow.json`
 - the user-facing `ask` workflow as the default natural entry surface
-- the `docmason` CLI for `prepare`, `doctor`, `status`, `sync`, `retrieve`, `trace`, `validate-kb`, and `sync-adapters`
+- the `docmason` CLI for `prepare`, `doctor`, `status`, `sync`, `retrieve`, `trace`, `validate-kb`, `sync-adapters`, and `update-core`
 - local Claude adapter generation from canonical sources
 - generated Claude workflow-routing guidance derived from canonical workflow metadata
 - staged knowledge-base artifacts under `knowledge_base/staging/`
