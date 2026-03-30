@@ -1687,6 +1687,16 @@ def _effective_source_ids_from_reference(
         return explicit_source_ids
     if not isinstance(reference_resolution, dict):
         return []
+    compare_source_ids = [
+        source_id
+        for source_id in reference_resolution.get("declared_compare_source_ids", [])
+        if isinstance(source_id, str) and source_id.strip()
+    ]
+    if (
+        str(reference_resolution.get("scope_mode") or "global") == "compare"
+        and compare_source_ids
+    ):
+        return list(dict.fromkeys(compare_source_ids))
     resolved_source_id = reference_resolution.get("resolved_source_id")
     source_match_status = str(reference_resolution.get("source_match_status") or "none")
     unit_match_status = str(reference_resolution.get("unit_match_status") or "none")
@@ -2149,12 +2159,41 @@ def _recommended_hybrid_targets(
     *,
     target: str,
     results: list[dict[str, Any]],
+    reference_resolution: dict[str, Any] | None = None,
+    source_scope_policy: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     hybrid_work = current_hybrid_work(paths, target=target)
     source_lookup = {
         str(source.get("source_id")): source
         for source in hybrid_work.get("sources", [])
         if isinstance(source, dict) and isinstance(source.get("source_id"), str)
+    }
+    effective_reference_resolution = (
+        dict(reference_resolution) if isinstance(reference_resolution, dict) else {}
+    )
+    effective_source_scope_policy = (
+        dict(source_scope_policy) if isinstance(source_scope_policy, dict) else {}
+    )
+    resolved_source_id = (
+        str(effective_reference_resolution.get("resolved_source_id"))
+        if isinstance(effective_reference_resolution.get("resolved_source_id"), str)
+        else None
+    )
+    resolved_unit_id = (
+        str(effective_reference_resolution.get("resolved_unit_id"))
+        if isinstance(effective_reference_resolution.get("resolved_unit_id"), str)
+        else None
+    )
+    resolved_unit_status = str(effective_reference_resolution.get("unit_match_status") or "none")
+    scope_mode = str(effective_source_scope_policy.get("scope_mode") or "global")
+    compare_target_source_ids = {
+        source_id
+        for source_id in (
+            effective_source_scope_policy.get("compare_target_source_ids", [])
+            if isinstance(effective_source_scope_policy.get("compare_target_source_ids"), list)
+            else effective_reference_resolution.get("declared_compare_source_ids", [])
+        )
+        if isinstance(source_id, str) and source_id
     }
     targets: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -2163,6 +2202,12 @@ def _recommended_hybrid_targets(
             continue
         source_id = result.get("source_id")
         if not isinstance(source_id, str) or source_id not in source_lookup:
+            continue
+        if (
+            scope_mode == "compare"
+            and compare_target_source_ids
+            and source_id not in compare_target_source_ids
+        ):
             continue
         source_packet = source_lookup[source_id]
         matched_unit_ids = {
@@ -2190,11 +2235,15 @@ def _recommended_hybrid_targets(
                 for artifact_id in candidate.get("target_artifact_ids", [])
                 if isinstance(artifact_id, str)
             }
-            matched_candidate = (
-                unit_id in matched_unit_ids
-                or bool(candidate_artifact_ids & matched_artifact_ids)
+            matched_unit = unit_id in matched_unit_ids
+            matched_artifact = bool(candidate_artifact_ids & matched_artifact_ids)
+            matched_reference_target = bool(
+                source_id == resolved_source_id
+                and resolved_unit_id is not None
+                and resolved_unit_status in {"exact", "approximate"}
+                and unit_id == resolved_unit_id
             )
-            if not matched_candidate and targets:
+            if not (matched_unit or matched_artifact or matched_reference_target):
                 continue
             key = (source_id, unit_id)
             if key in seen:
@@ -2202,10 +2251,12 @@ def _recommended_hybrid_targets(
             seen.add(key)
             selection_reason = (
                 "Matched hard artifacts from the top published retrieval bundle."
-                if candidate_artifact_ids & matched_artifact_ids
+                if matched_artifact
+                else "Matched the referenced unit that still needs governed hybrid coverage."
+                if matched_reference_target
                 else "Matched units still have uncovered hybrid slots."
-                if unit_id in matched_unit_ids
-                else "Top-ranked source still has uncovered hybrid slots."
+                if matched_unit
+                else "Matched compare-scoped source evidence that still has uncovered hybrid slots."
             )
             targets.append(
                 {
@@ -3972,15 +4023,6 @@ def trace_answer_text(
         coverage_ratio = support_term_coverage(segment, top_result)
         direct_support_score = result_direct_support_score(top_result) if top_result else 0.0
         grounding_status = groundedness_from_result(top_result, segment_text=segment)
-        if (
-            str(effective_source_scope_policy.get("scope_mode") or "global") == "compare"
-            and grounding_status == "grounded"
-            and len(
-                {item.get("source_id") for item in admitted_results if item.get("source_id")}
-            )
-            < 2
-        ):
-            grounding_status = "partially-grounded"
         scope_satisfied = segment_scope_satisfied(
             source_scope_policy=effective_source_scope_policy,
             supporting_source_ids=supporting_source_ids,
@@ -4085,12 +4127,22 @@ def trace_answer_text(
         and int(canonical_support_summary["segment_truth_counts"]["unresolved"]) > 0
     ):
         kb_answer_state = "partially-grounded"
+    canonical_scope_mode = str(canonical_support_summary.get("scope_mode") or "global")
     if (
-        str(canonical_support_summary.get("scope_mode") or "global")
-        in {"source-scoped-soft", "source-scoped-hard"}
+        canonical_scope_mode in {"source-scoped-soft", "source-scoped-hard"}
         and not canonical_support_summary.get("source_scope_satisfied")
     ):
         kb_answer_state = "unresolved"
+    compare_resolution_status = str(
+        canonical_support_summary.get("compare_resolution_status") or "none"
+    )
+    if canonical_scope_mode == "compare":
+        if not canonical_support_summary.get("source_scope_satisfied"):
+            kb_answer_state = "unresolved"
+        elif compare_resolution_status == "approximate" and kb_answer_state == "grounded":
+            kb_answer_state = "partially-grounded"
+        elif compare_resolution_status == "unresolved":
+            kb_answer_state = "unresolved"
     answer_state = final_answer_state(
         kb_answer_state=kb_answer_state,
         answer_text=answer_text,
@@ -4126,6 +4178,8 @@ def trace_answer_text(
         paths,
         target=target,
         results=trace_supporting_results,
+        reference_resolution=effective_reference_resolution,
+        source_scope_policy=effective_source_scope_policy,
     )
     render_inspection_required = combined_render_requirement(
         kb_render_required=kb_render_required,
@@ -4602,34 +4656,6 @@ def trace_session(
             results=trace_supporting_results,
             evidence_requirements=effective_evidence_requirements,
         )
-        recommended_hybrid_targets = _recommended_hybrid_targets(
-            paths,
-            target=target,
-            results=trace_supporting_results,
-        )
-        supporting_source_ids = session_payload.get("supporting_source_ids")
-        supporting_unit_ids = session_payload.get("supporting_unit_ids")
-        supporting_artifact_ids = session_payload.get("supporting_artifact_ids")
-        supporting_overlay_unit_ids = session_payload.get("supporting_overlay_unit_ids")
-        if (
-            not isinstance(supporting_source_ids, list)
-            or not isinstance(
-                supporting_unit_ids,
-                list,
-            )
-            or not isinstance(supporting_artifact_ids, list)
-            or not isinstance(
-                supporting_overlay_unit_ids,
-                list,
-            )
-        ):
-            (
-                supporting_source_ids,
-                supporting_unit_ids,
-                supporting_artifact_ids,
-                supporting_overlay_unit_ids,
-            ) = supporting_ids_from_segments(segment_traces)
-        trace_id = str(uuid.uuid4())
         source_scope_policy = (
             session_payload.get("source_scope_policy")
             if isinstance(session_payload.get("source_scope_policy"), dict)
@@ -4658,6 +4684,42 @@ def trace_session(
                 )
             )
         )
+        recommended_hybrid_targets = _recommended_hybrid_targets(
+            paths,
+            target=target,
+            results=trace_supporting_results,
+            reference_resolution=(
+                session_payload.get("reference_resolution")
+                if isinstance(session_payload.get("reference_resolution"), dict)
+                else None
+            ),
+            source_scope_policy=(
+                source_scope_policy if isinstance(source_scope_policy, dict) else None
+            ),
+        )
+        supporting_source_ids = session_payload.get("supporting_source_ids")
+        supporting_unit_ids = session_payload.get("supporting_unit_ids")
+        supporting_artifact_ids = session_payload.get("supporting_artifact_ids")
+        supporting_overlay_unit_ids = session_payload.get("supporting_overlay_unit_ids")
+        if (
+            not isinstance(supporting_source_ids, list)
+            or not isinstance(
+                supporting_unit_ids,
+                list,
+            )
+            or not isinstance(supporting_artifact_ids, list)
+            or not isinstance(
+                supporting_overlay_unit_ids,
+                list,
+            )
+        ):
+            (
+                supporting_source_ids,
+                supporting_unit_ids,
+                supporting_artifact_ids,
+                supporting_overlay_unit_ids,
+            ) = supporting_ids_from_segments(segment_traces)
+        trace_id = str(uuid.uuid4())
         canonical_support_summary = build_canonical_support_summary(
             source_scope_policy=source_scope_policy,
             segment_traces=segment_traces,
@@ -4668,12 +4730,22 @@ def trace_session(
             and int(canonical_support_summary["segment_truth_counts"]["unresolved"]) > 0
         ):
             answer_state = "partially-grounded"
+        canonical_scope_mode = str(canonical_support_summary.get("scope_mode") or "global")
         if (
-            str(canonical_support_summary.get("scope_mode") or "global")
-            in {"source-scoped-soft", "source-scoped-hard"}
+            canonical_scope_mode in {"source-scoped-soft", "source-scoped-hard"}
             and not canonical_support_summary.get("source_scope_satisfied")
         ):
             answer_state = "unresolved"
+        compare_resolution_status = str(
+            canonical_support_summary.get("compare_resolution_status") or "none"
+        )
+        if canonical_scope_mode == "compare":
+            if not canonical_support_summary.get("source_scope_satisfied"):
+                answer_state = "unresolved"
+            elif compare_resolution_status == "approximate" and answer_state == "grounded":
+                answer_state = "partially-grounded"
+            elif compare_resolution_status == "unresolved":
+                answer_state = "unresolved"
         issue_codes = trace_issue_codes(
             answer_state=answer_state,
             canonical_support_summary=canonical_support_summary,

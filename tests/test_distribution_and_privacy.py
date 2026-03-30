@@ -10,6 +10,9 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from docmason.project import WorkspacePaths
+from docmason.release_entry import release_entry_snapshot
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -67,6 +70,8 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                     "test-build",
                     "--github-repo",
                     "example/DocMason",
+                    "--update-service-url",
+                    "https://updates.example.invalid/v1/check",
                     "--source-commit",
                     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
                     "--source-ref",
@@ -93,6 +98,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             self.assertIn(".github/copilot-instructions.md", names)
             self.assertIn("distribution-manifest.json", names)
             self.assertIn("original_doc/.gitkeep", names)
+            self.assertIn("runtime/state/release-client.json", names)
             self.assertNotIn(".github/workflows/release-distributions.yml", names)
             self.assertNotIn("tests/test_foundation_and_contracts.py", names)
             self.assertNotIn("sample_corpus/README.md", names)
@@ -100,6 +106,19 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             self.assertEqual(clean_manifest["distribution_channel"], "clean")
             self.assertEqual(clean_manifest["asset_name"], "DocMason-clean.zip")
             self.assertEqual(clean_manifest["source_repo"], "example/DocMason")
+            self.assertEqual(
+                clean_manifest["release_entry"]["update_service_url"],
+                "https://updates.example.invalid/v1/check",
+            )
+            self.assertEqual(
+                clean_manifest["release_entry"]["automatic_check_scope"],
+                "canonical-ask",
+            )
+            self.assertEqual(
+                clean_manifest["release_entry"]["automatic_check_cooldown_hours"],
+                20,
+            )
+            self.assertTrue(clean_manifest["release_entry"]["automatic_check_enabled_by_default"])
             self.assertEqual(
                 clean_manifest["source_commit"],
                 "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -112,6 +131,10 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             self.assertEqual(manifest["distribution_channel"], "demo-ico-gcs")
             self.assertEqual(manifest["asset_name"], "DocMason-demo-ico-gcs.zip")
             self.assertEqual(manifest["source_version"], "test-build")
+            self.assertEqual(
+                manifest["release_entry"]["distribution_channel"],
+                "demo-ico-gcs",
+            )
             self.assertEqual(
                 manifest["source_commit"],
                 "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -128,6 +151,12 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             self.assertNotIn("tests/test_foundation_and_contracts.py", names)
             self.assertNotIn("sample_corpus/README.md", names)
             self.assertNotIn("skills/optional/public-sample-workspace/SKILL.md", names)
+
+    def test_source_repo_release_entry_remains_disabled_by_default(self) -> None:
+        snapshot = release_entry_snapshot(WorkspacePaths(root=ROOT))
+        self.assertFalse(snapshot["bundle_detected"])
+        self.assertFalse(snapshot["effective_enabled"])
+        self.assertEqual(snapshot["disabled_reason"], "source-repo")
 
     def test_update_docmason_core_preserves_local_workspace_data(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:

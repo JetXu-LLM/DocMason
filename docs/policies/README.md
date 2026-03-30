@@ -22,3 +22,7 @@ Current policy priorities:
 - no new public commands merely to mirror every agent-facing workflow
 
 As the repository matures, this section should grow into more detailed operating, privacy, and maintenance policies.
+
+Current policy documents:
+
+- [Release Entry And Networking](release-entry-and-networking.md)

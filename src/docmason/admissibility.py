@@ -418,6 +418,30 @@ def evaluate_commit_admissibility(
             "The final canonical support does not satisfy the turn's source scope."
         )
         issue_codes.append("source-scope-missing-target-support")
+    compare_scope = str(trace_summary.get("scope_mode") or "global") == "compare"
+    compare_resolution_status = str(trace_summary.get("compare_resolution_status") or "none")
+    if compare_scope and answer_state == "grounded":
+        if compare_resolution_status == "approximate":
+            issues.append(
+                "Compare-scoped grounded answers may not overstate approximate declared "
+                "source resolution as exact support."
+            )
+            issue_codes.append("compare-source-approximate")
+        elif compare_resolution_status == "unresolved":
+            issues.append(
+                "Compare-scoped grounded answers may not overstate unresolved declared "
+                "source resolution as exact support."
+            )
+            issue_codes.append("compare-source-unresolved")
+    if (
+        compare_scope
+        and answer_state in {"grounded", "partially-grounded"}
+        and not bool(trace_summary.get("source_scope_satisfied"))
+    ):
+        issues.append(
+            "The final canonical compare support does not cover the declared comparison sources."
+        )
+        issue_codes.append("compare-source-coverage-missing")
     if (
         support_basis == "mixed"
         and trace_summary

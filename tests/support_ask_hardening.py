@@ -34,7 +34,12 @@ from docmason.conversation import load_turn_record, update_conversation_turn
 from docmason.front_controller import write_hybrid_refresh_work
 from docmason.host_integration import handle_hidden_ask_request
 from docmason.project import WorkspacePaths, read_json, write_json
-from docmason.retrieval import retrieve_corpus, trace_answer_file, trace_session
+from docmason.retrieval import (
+    _recommended_hybrid_targets,
+    retrieve_corpus,
+    trace_answer_file,
+    trace_session,
+)
 from docmason.review import refresh_log_review_summary
 from docmason.run_control import (
     load_run_state,
@@ -107,6 +112,47 @@ class AskHardeningTests(unittest.TestCase):
         seed_self_contained_bootstrap_state(
             workspace,
             prepared_at="2026-03-17T00:00:00Z",
+        )
+
+    def seed_release_bundle(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        distribution_channel: str = "clean",
+        source_version: str = "v0.1.0",
+        update_service_url: str = "https://updates.example.invalid/v1/check",
+    ) -> None:
+        write_json(
+            workspace.distribution_manifest_path,
+            {
+                "distribution_channel": distribution_channel,
+                "asset_name": "DocMason-clean.zip",
+                "source_version": source_version,
+                "source_repo": "example/DocMason",
+                "release_entry": {
+                    "schema_version": 1,
+                    "update_service_url": update_service_url,
+                    "distribution_channel": distribution_channel,
+                    "automatic_check_scope": "canonical-ask",
+                    "automatic_check_cooldown_hours": 20,
+                    "automatic_check_enabled_by_default": True,
+                    "asset_name": "DocMason-clean.zip",
+                },
+            },
+        )
+        write_json(
+            workspace.release_client_state_path,
+            {
+                "schema_version": 1,
+                "automatic_check_enabled": True,
+                "installation_hash": None,
+                "created_at": None,
+                "last_check_attempted_at": None,
+                "next_eligible_at": None,
+                "last_known_latest_version": None,
+                "last_notified_version": None,
+                "last_check_status": None,
+            },
         )
 
     def run_host_snippet(
@@ -3200,6 +3246,401 @@ class AskHardeningTests(unittest.TestCase):
             "already-committed-canonical-turn",
         )
         self.assertFalse(failed["user_reply_allowed"])
+
+    def test_hidden_ask_open_does_not_run_release_entry_check(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.seed_release_bundle(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch(
+            "docmason.host_integration.maybe_run_release_entry_check"
+        ) as release_entry_check:
+            opened = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": (
+                        'Using only the document "Campaign Planning Brief", summarize the '
+                        "architecture strategy in 3 bullet points."
+                    ),
+                    "host_provider": "codex",
+                    "host_thread_ref": "thread-hidden-release-open",
+                    "host_identity_source": "codex_thread_id",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(opened["status"], "execute")
+        release_entry_check.assert_not_called()
+
+    def test_hidden_ask_finalize_appends_release_entry_notice_without_mutating_answer_file(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.seed_release_bundle(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": (
+                    'Using only the document "Campaign Planning Brief", summarize the '
+                    "architecture strategy in 3 bullet points."
+                ),
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-release-finalize",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(opened["status"], "execute")
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The architecture strategy defines the operating model.\n",
+            encoding="utf-8",
+        )
+
+        def fake_complete(*args: object, **kwargs: object) -> dict[str, object]:
+            del args
+            update_conversation_turn(
+                workspace,
+                conversation_id=str(kwargs["conversation_id"]),
+                turn_id=str(kwargs["turn_id"]),
+                updates={
+                    "committed_run_id": str(opened["run_id"]),
+                    "answer_file_path": str(opened["answer_file_path"]),
+                    "answer_state": "grounded",
+                    "support_basis": "kb-grounded",
+                    "response_excerpt": "The architecture strategy defines the operating model.",
+                    "session_ids": [],
+                    "trace_ids": [],
+                },
+            )
+            return {"committed_run_id": str(opened["run_id"])}
+
+        with mock.patch(
+            "docmason.host_integration.complete_ask_turn",
+            side_effect=fake_complete,
+        ) as complete_turn:
+            with mock.patch(
+                "docmason.host_integration.maybe_run_release_entry_check",
+                return_value={
+                    "notice": "DocMason update available: v0.2.0.",
+                    "release_entry_status": {
+                        "bundle_detected": True,
+                        "effective_enabled": True,
+                        "distribution_channel": "clean",
+                    },
+                },
+            ) as release_entry_check:
+                completed = handle_hidden_ask_request(
+                    {
+                        "action": "finalize",
+                        "conversation_id": opened["conversation_id"],
+                        "turn_id": opened["turn_id"],
+                        "answer_file_path": opened["answer_file_path"],
+                        "response_excerpt": "The architecture strategy defines the operating model.",
+                    },
+                    paths=workspace,
+                )
+
+        complete_turn.assert_called_once()
+        release_entry_check.assert_called_once()
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(
+            answer_path.read_text(encoding="utf-8"),
+            "The architecture strategy defines the operating model.\n",
+        )
+        self.assertIn("DocMason update available", completed["answer_text"])
+        self.assertEqual(completed["release_entry_notice"], "DocMason update available: v0.2.0.")
+        self.assertEqual(completed["release_entry_status"]["distribution_channel"], "clean")
+
+    def test_recommended_hybrid_targets_do_not_fall_back_to_unmatched_units(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        hybrid_work_path = workspace.hybrid_work_path("current")
+        hybrid_work_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(
+            hybrid_work_path,
+            {
+                "generated_at": "2026-03-30T00:00:00Z",
+                "target": "current",
+                "sources": [
+                    {
+                        "source_id": "source-page-scope",
+                        "units": [
+                            {
+                                "unit_id": "page-020",
+                                "coverage_status": "candidate-prepared",
+                                "target_artifact_ids": ["artifact-020"],
+                                "required_overlay_slots": ["ocr"],
+                                "target_focus_render_assets": [],
+                                "target_render_assets": [],
+                            },
+                            {
+                                "unit_id": "page-039",
+                                "coverage_status": "candidate-prepared",
+                                "target_artifact_ids": ["artifact-039"],
+                                "required_overlay_slots": ["ocr"],
+                                "target_focus_render_assets": [],
+                                "target_render_assets": [],
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+
+        targets = _recommended_hybrid_targets(
+            workspace,
+            target="current",
+            results=[
+                {
+                    "source_id": "source-page-scope",
+                    "matched_units": [{"unit_id": "page-039"}],
+                    "matched_artifacts": [],
+                }
+            ],
+            reference_resolution={
+                "resolved_source_id": "source-page-scope",
+                "resolved_unit_id": "page-039",
+                "unit_match_status": "exact",
+            },
+            source_scope_policy={
+                "scope_mode": "source-scoped-soft",
+                "target_source_id": "source-page-scope",
+            },
+        )
+
+        self.assertEqual([item["unit_id"] for item in targets], ["page-039"])
+
+    def test_retrieve_corpus_compare_scopes_to_declared_sources_only(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.create_pdf(workspace.source_dir / "c.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(pending.payload["sync_status"], "pending-synthesis")
+        source_ids = [item["source_id"] for item in pending.payload["pending_sources"]]
+        self.assertEqual(len(source_ids), 3)
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / source_ids[0],
+            title="Campaign Planning Brief",
+            summary="A strategy deck about architecture and operating model.",
+            key_point="The strategy defines an architecture operating model.",
+            claim="The architecture deck connects strategy to implementation.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / source_ids[1],
+            title="Campaign Evaluation Plan",
+            summary="A delivery timeline and companion planning document.",
+            key_point="The timeline explains rollout milestones.",
+            claim="The timeline complements the architecture strategy.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / source_ids[2],
+            title="Regional Budget Memo",
+            summary="A finance memo about regional cost controls.",
+            key_point="The memo focuses on budget controls.",
+            claim="The memo does not discuss architecture strategy.",
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        retrieval = retrieve_corpus(
+            workspace,
+            query=(
+                'Compare "Campaign Planning Brief" versus '
+                '"Campaign Evaluation Plan" on architecture strategy.'
+            ),
+            top=5,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=True,
+            question_domain="workspace-corpus",
+        )
+
+        self.assertEqual(retrieval["source_scope_policy"]["scope_mode"], "compare")
+        self.assertEqual(retrieval["reference_resolution"]["compare_resolution_status"], "exact")
+        self.assertCountEqual(
+            retrieval["source_scope_policy"]["compare_target_source_ids"],
+            source_ids[:2],
+        )
+        self.assertTrue(retrieval["results"])
+        self.assertTrue(
+            all(result["source_id"] in set(source_ids[:2]) for result in retrieval["results"])
+        )
+
+    def test_trace_answer_file_marks_unresolved_compare_scope_without_fake_exactness(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-compare-unresolved"},
+            clear=False,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question='Compare "Campaign Planning Brief" versus "Zebra Ledger".',
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            (
+                "Campaign Planning Brief contains architecture guidance, but the second "
+                "requested comparison source could not be verified in the published corpus."
+            ),
+            encoding="utf-8",
+        )
+
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=3,
+            log_context=turn["log_context"],
+        )
+
+        self.assertEqual(trace["source_scope_policy"]["scope_mode"], "compare")
+        self.assertEqual(trace["reference_resolution"]["compare_resolution_status"], "unresolved")
+        self.assertFalse(trace["canonical_support_summary"]["source_scope_satisfied"])
+        self.assertEqual(trace["answer_state"], "unresolved")
+        self.assertIn("compare-source-unresolved", trace["issue_codes"])
+
+    def test_hidden_ask_finalize_returns_waiting_state_without_release_entry(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.seed_release_bundle(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-waiting",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        def fake_complete(*args: object, **kwargs: object) -> dict[str, object]:
+            del args
+            update_conversation_turn(
+                workspace,
+                conversation_id=str(kwargs["conversation_id"]),
+                turn_id=str(kwargs["turn_id"]),
+                updates={
+                    "status": "waiting-shared-job",
+                    "turn_state": "waiting-shared-job",
+                    "freshness_notice": "The ask is waiting on a governed multimodal refresh.",
+                    "hybrid_refresh_triggered": True,
+                    "hybrid_refresh_job_ids": ["job-hidden-wait"],
+                    "attached_shared_job_ids": ["job-hidden-wait"],
+                    "hybrid_refresh_summary": {"mode": "ask-hybrid"},
+                },
+            )
+            return {"status": "waiting-shared-job"}
+
+        with mock.patch(
+            "docmason.host_integration.complete_ask_turn",
+            side_effect=fake_complete,
+        ) as complete_turn:
+            with mock.patch(
+                "docmason.host_integration.maybe_run_release_entry_check"
+            ) as release_entry_check:
+                waiting = handle_hidden_ask_request(
+                    {
+                        "action": "finalize",
+                        "conversation_id": opened["conversation_id"],
+                        "turn_id": opened["turn_id"],
+                        "answer_file_path": opened["answer_file_path"],
+                        "response_excerpt": "The ask is waiting on a governed multimodal refresh.",
+                    },
+                    paths=workspace,
+                )
+
+        complete_turn.assert_called_once()
+        release_entry_check.assert_not_called()
+        self.assertEqual(waiting["status"], "waiting-shared-job")
+        self.assertFalse(waiting["user_reply_allowed"])
+        self.assertIsNone(waiting["answer_text"])
+        self.assertEqual(waiting["next_step"], "wait-for-shared-job")
+        self.assertEqual(waiting["canonical_turn_state"], "waiting-shared-job")
+        self.assertEqual(waiting["log_context"]["conversation_id"], opened["conversation_id"])
+
+    def test_hidden_ask_progress_settles_waiting_turn_and_restores_execute_state(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-progress",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        begin_lane_c_shared_refresh(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+            run_id=str(opened["run_id"]),
+            query="What does the campaign planning brief say?",
+            recommended_targets=[
+                {
+                    "source_id": source_ids[0],
+                    "required_overlay_slots": ["diagram-summary"],
+                    "target_artifact_ids": [],
+                }
+            ],
+        )
+
+        progressed = handle_hidden_ask_request(
+            {
+                "action": "progress",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "completion_status": "covered",
+                "hybrid_refresh_summary": {"covered_source_count": 1},
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(progressed["status"], "execute")
+        self.assertFalse(progressed["user_reply_allowed"])
+        self.assertEqual(progressed["next_step"], "continue-inner-workflow")
+        self.assertEqual(progressed["canonical_turn_state"], "prepared")
+        self.assertEqual(progressed["log_context"]["turn_id"], opened["turn_id"])
+        live_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertEqual(live_turn["status"], "prepared")
+        self.assertEqual(live_turn["hybrid_refresh_completion_status"], "covered")
 
 
 if __name__ == "__main__":

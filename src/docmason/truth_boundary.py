@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 SOURCE_SCOPED_MODES = frozenset({"source-scoped-soft", "source-scoped-hard"})
+TARGETED_SCOPE_MODES = frozenset({*SOURCE_SCOPED_MODES, "compare"})
 COMPARE_HINT_PATTERN = re.compile(r"\b(compare|comparison|versus|vs\.?|difference|between)\b", re.I)
 SINGLE_SOURCE_HINT_PATTERN = re.compile(
     (
@@ -93,6 +94,29 @@ def build_source_scope_policy(
     compare_scope = is_compare_scope(question)
     source_match_status = str(resolution.get("source_match_status") or "none")
     source_narrowing_allowed = bool(resolution.get("source_narrowing_allowed"))
+    compare_target_source_ids = _deduplicate_strings(
+        resolution.get("declared_compare_source_ids", [])
+        if isinstance(resolution.get("declared_compare_source_ids"), list)
+        else []
+    )
+    compare_target_source_refs = _deduplicate_strings(
+        resolution.get("declared_compare_source_refs", [])
+        if isinstance(resolution.get("declared_compare_source_refs"), list)
+        else []
+    )
+    raw_compare_expected_count = resolution.get("declared_compare_expected_count")
+    compare_expected_source_count = (
+        int(raw_compare_expected_count)
+        if isinstance(raw_compare_expected_count, int)
+        else (2 if compare_scope else 0)
+    )
+    raw_compare_missing_count = resolution.get("declared_compare_missing_count")
+    compare_missing_source_count = (
+        int(raw_compare_missing_count)
+        if isinstance(raw_compare_missing_count, int)
+        else max(compare_expected_source_count - len(compare_target_source_ids), 0)
+    )
+    compare_resolution_status = _nonempty_string(resolution.get("compare_resolution_status"))
 
     if compare_scope:
         scope_mode = "compare"
@@ -113,9 +137,14 @@ def build_source_scope_policy(
         "hard_boundary_on_missing_source": bool(
             hard_boundary and target_source_id is None and scope_mode == "source-scoped-hard"
         ),
-        "require_target_source_per_supported_segment": scope_mode in SOURCE_SCOPED_MODES,
-        "require_target_source_in_final_support": scope_mode in SOURCE_SCOPED_MODES,
-        "allow_pending_interaction_direct_support": scope_mode not in SOURCE_SCOPED_MODES,
+        "require_target_source_per_supported_segment": scope_mode in TARGETED_SCOPE_MODES,
+        "require_target_source_in_final_support": scope_mode in TARGETED_SCOPE_MODES,
+        "allow_pending_interaction_direct_support": scope_mode == "global",
+        "compare_target_source_ids": compare_target_source_ids,
+        "compare_target_source_refs": compare_target_source_refs,
+        "compare_expected_source_count": compare_expected_source_count,
+        "compare_missing_source_count": compare_missing_source_count,
+        "compare_resolution_status": compare_resolution_status,
     }
 
 
@@ -173,8 +202,15 @@ def result_is_canonical_support(
         return False
     scope_mode = str(policy.get("scope_mode") or "global")
     target_source_id = _nonempty_string(policy.get("target_source_id"))
+    compare_target_source_ids = {
+        value
+        for value in policy.get("compare_target_source_ids", [])
+        if isinstance(value, str) and value
+    }
     if scope_mode in SOURCE_SCOPED_MODES and target_source_id is not None:
         return str(result.get("source_id") or "") == target_source_id
+    if scope_mode == "compare" and compare_target_source_ids:
+        return str(result.get("source_id") or "") in compare_target_source_ids
     return True
 
 
@@ -187,6 +223,20 @@ def segment_scope_satisfied(
     """Return whether one segment satisfies the turn-level source scope."""
     policy = dict(source_scope_policy) if isinstance(source_scope_policy, dict) else {}
     scope_mode = str(policy.get("scope_mode") or "global")
+    if scope_mode == "compare":
+        compare_target_source_ids = {
+            value
+            for value in policy.get("compare_target_source_ids", [])
+            if isinstance(value, str) and value
+        }
+        if grounding_status == "abstained":
+            return True
+        supporting = {
+            value for value in (supporting_source_ids or []) if isinstance(value, str) and value
+        }
+        if compare_target_source_ids:
+            return bool(supporting & compare_target_source_ids)
+        return len(supporting) >= 2
     if scope_mode not in SOURCE_SCOPED_MODES:
         return True
     if grounding_status == "abstained":
@@ -258,6 +308,40 @@ def build_canonical_support_summary(
             supporting_source_ids=segment.get("supporting_source_ids", []),
             grounding_status=grounding_status,
         )
+    compare_target_source_ids = _deduplicate_strings(
+        policy.get("compare_target_source_ids", [])
+        if isinstance(policy.get("compare_target_source_ids"), list)
+        else []
+    )
+    compare_target_source_refs = _deduplicate_strings(
+        policy.get("compare_target_source_refs", [])
+        if isinstance(policy.get("compare_target_source_refs"), list)
+        else []
+    )
+    raw_compare_expected_count = policy.get("compare_expected_source_count")
+    compare_expected_source_count = (
+        int(raw_compare_expected_count)
+        if isinstance(raw_compare_expected_count, int)
+        else (2 if str(policy.get("scope_mode") or "global") == "compare" else 0)
+    )
+    compare_supported_source_ids = (
+        [
+            source_id
+            for source_id in _deduplicate_strings(supporting_source_ids)
+            if source_id in set(compare_target_source_ids)
+        ]
+        if compare_target_source_ids
+        else []
+    )
+    if str(policy.get("scope_mode") or "global") == "compare":
+        covered_count = len(compare_supported_source_ids)
+        if not compare_target_source_ids:
+            covered_count = len(_deduplicate_strings(supporting_source_ids))
+        scope_satisfied = scope_satisfied and covered_count >= max(
+            2 if compare_expected_source_count <= 0 else compare_expected_source_count,
+            len(compare_target_source_ids) if compare_target_source_ids else 0,
+        )
+    raw_compare_missing_source_count = policy.get("compare_missing_source_count")
     return {
         "scope_mode": str(policy.get("scope_mode") or "global"),
         "target_source_id": _nonempty_string(policy.get("target_source_id")),
@@ -273,6 +357,17 @@ def build_canonical_support_summary(
             "unresolved": unresolved,
         },
         "mixed_support_explainable": mixed_support_explainable,
+        "compare_target_source_ids": compare_target_source_ids,
+        "compare_target_source_refs": compare_target_source_refs,
+        "compare_expected_source_count": compare_expected_source_count,
+        "compare_supported_source_ids": compare_supported_source_ids,
+        "compare_supported_source_count": len(compare_supported_source_ids),
+        "compare_resolution_status": _nonempty_string(policy.get("compare_resolution_status")),
+        "compare_missing_source_count": (
+            raw_compare_missing_source_count
+            if isinstance(raw_compare_missing_source_count, int)
+            else max(compare_expected_source_count - len(compare_target_source_ids), 0)
+        ),
     }
 
 
@@ -296,11 +391,17 @@ def trace_issue_codes(
         issue_codes.append("published-artifacts-gap")
     if source_escalation_required is True:
         issue_codes.append("source-escalation-required")
-    if (
-        str(summary.get("scope_mode") or "global") in SOURCE_SCOPED_MODES
-        and not bool(summary.get("source_scope_satisfied"))
-    ):
+    scope_mode = str(summary.get("scope_mode") or "global")
+    if scope_mode in SOURCE_SCOPED_MODES and not bool(summary.get("source_scope_satisfied")):
         issue_codes.append("source-scope-missing-target-support")
+    if scope_mode == "compare" and not bool(summary.get("source_scope_satisfied")):
+        issue_codes.append("compare-source-coverage-missing")
+    compare_resolution_status = str(summary.get("compare_resolution_status") or "none")
+    if scope_mode == "compare":
+        if compare_resolution_status == "approximate":
+            issue_codes.append("compare-source-approximate")
+        elif compare_resolution_status == "unresolved":
+            issue_codes.append("compare-source-unresolved")
     segment_truth_counts = summary.get("segment_truth_counts")
     if (
         answer_state == "grounded"

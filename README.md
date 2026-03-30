@@ -34,7 +34,7 @@ The fastest public proof today uses the ICO + GCS demo corpus compiled from offi
 > "Across the ICO and GCS materials, what are the main rollout risks, and which sources support them?"
 
 **What good looks like:**
-- The answer synthesizes overlapping governance risks instead of echoing documents one by one.
+- **Cross-Document Reasoning:** The answer synthesizes overlapping governance risks instead of echoing documents one by one.
 - The answer explicitly points to the exact document origin, instead of blurring the corpus into one anonymous narrative.
 - **The answer is inherently traceable** — providing the real evidence bundles so you can verify the root context.
 
@@ -78,13 +78,14 @@ High-fidelity Office file parsing relies on a lightweight local LibreOffice shim
 
 ## Why This Exists
 
-Most document AI tools map complex corporate files into flat, unreadable text strings. They strip out critical structural meaning:
+Most document AI tools map complex corporate files into flat, unreadable text strings. They strip out critical structural and formatting semantics:
 
-- **Slide Decks**: Visual layout and positional logic are discarded.
-- **Spreadsheets**: Row/column relationships are lost.
-- **Multi-Part Proposals**: Disconnected, leaving cross-referential depth missing.
+- **Slide Decks**: Visual layout, presenter notes, and chart-text relationships are discarded.
+- **Spreadsheets**: Multi-sheet references and nested tables break existing parsers.
+- **Format-as-Semantics**: Critical signals (like red text for "Risk" or indentation for hierarchies) are erased.
+- **Cross-Document Reasoning**: Multi-part proposals are disconnected, making global synthesis impossible.
 
-DocMason addresses this by forcing AI to respect original document structure. It produces deterministic file-based evidence, runs strong offline retrieval and trace algorithms, and validates the resulting knowledge base through strict code rules — all locally, with nothing leaving your machine. The repo holds the truth. The agent does the reasoning.
+DocMason addresses this by forcing AI to respect original document structure and visual semantics. It produces deterministic file-based evidence, runs strong offline retrieval and trace algorithms, and validates the resulting knowledge base through strict code rules — all locally, with nothing leaving your machine. The repo holds the truth. The agent does the reasoning.
 
 ## Getting Started on macOS
 
@@ -136,7 +137,7 @@ DocMason is designed to run entirely over local files. Here's exactly what that 
 **All AI inference traffic** is handled by your chosen host agent (Codex, Claude Code, etc.) — DocMason itself makes zero model API calls. The network behavior of your AI agent is governed by that agent's own privacy and telemetry policy.
 
 **The only network request DocMason may make:**
-A future release will include an optional version update check against the public GitHub release. This check will transmit no corpus data, no file information, and no query content. It will respect `DO_NOT_TRACK=1` and can be explicitly disabled via DocMason configuration. Full technical details will be documented before the feature ships.
+Generated `clean` and `demo-ico-gcs` release bundles may perform one bounded update check after canonical `ask` completion, at most once every 20 hours. This check is disabled in the source repository and fresh-clone paths. It sends only the bundle channel, bundle version, a random local installation hash, and a fixed trigger marker so DocMason can both detect updates and count one daily active bundle installation. It never sends corpus data, file names, file paths, query text, answer text, source locators, environment variables, secrets, machine fingerprints, or IP-derived identifiers. It respects `DO_NOT_TRACK=1` and can be disabled by editing `runtime/state/release-client.json`. See [Release Entry And Networking](docs/policies/release-entry-and-networking.md).
 
 **Your responsibility:**
 - Configure your host agent's telemetry and privacy settings according to your own standards.

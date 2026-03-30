@@ -67,6 +67,23 @@ EXPLICIT_SOURCE_REQUEST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 QUOTED_SOURCE_PATH_PATTERN = re.compile(r"(?P<quote>[\"'`])(original_doc/.+?)(?P=quote)")
+QUOTED_TEXT_PATTERN = re.compile(r"(?P<quote>[\"'`])(?P<text>.+?)(?P=quote)")
+COMPARE_CLAUSE_PATTERN = re.compile(
+    r"\bcompare\s+(?P<left>.+?)\s+(?:versus|vs\.?|and)\s+(?P<right>.+)",
+    re.IGNORECASE,
+)
+COMPARE_BETWEEN_PATTERN = re.compile(
+    r"\b(?:difference\s+between|between)\s+(?P<left>.+?)\s+and\s+(?P<right>.+)",
+    re.IGNORECASE,
+)
+COMPARE_TRAILING_CONTEXT_PATTERN = re.compile(
+    r"\s+(?:on|about|regarding|with\s+respect\s+to|in\s+terms\s+of|across)\s+.+$",
+    re.IGNORECASE,
+)
+LEADING_SOURCE_LABEL_PATTERN = re.compile(
+    r"^(?:the\s+)?(?:document|deck|file|proposal|spreadsheet|sheet|email|message|eml|attachment)\s+",
+    re.IGNORECASE,
+)
 SINGLE_SOURCE_REQUEST_PATTERN = re.compile(
     (
         r"\b(using only|use only|only the document|only the deck|only the file|"
@@ -604,6 +621,75 @@ def extract_requested_source_text(query: str) -> str | None:
     return None
 
 
+def extract_declared_compare_source_texts(query: str) -> list[str]:
+    """Extract deterministically declared compare-source texts when the query provides them."""
+    if not isinstance(query, str) or not query.strip():
+        return []
+    if not COMPARATIVE_HINT_PATTERN.search(query):
+        return []
+
+    def _normalize_compare_clause_text(
+        value: str,
+        *,
+        trim_trailing_context: bool,
+        allow_single_token: bool,
+    ) -> str | None:
+        candidate = _nonempty_string(value)
+        if candidate is None:
+            return None
+        if trim_trailing_context:
+            candidate = COMPARE_TRAILING_CONTEXT_PATTERN.sub("", candidate)
+        candidate = LEADING_SOURCE_LABEL_PATTERN.sub("", candidate)
+        candidate = candidate.strip(" \"'`.,:;?!")
+        normalized = _nonempty_string(candidate)
+        if normalized is None:
+            return None
+        if allow_single_token:
+            return normalized
+        tokens = tokenize_text(normalized)
+        if normalized.startswith("original_doc/") or "/" in normalized or "." in normalized:
+            return normalized
+        if len(tokens) >= 2:
+            return normalized
+        return None
+
+    def _extract_compare_clause_side(
+        value: str,
+        *,
+        trim_trailing_context: bool,
+    ) -> str | None:
+        quoted_candidates = [
+            normalized
+            for match in QUOTED_TEXT_PATTERN.finditer(value)
+            if (
+                normalized := _normalize_compare_clause_text(
+                    match.group("text"),
+                    trim_trailing_context=False,
+                    allow_single_token=True,
+                )
+            )
+            is not None
+        ]
+        if quoted_candidates:
+            return quoted_candidates[0]
+        return _normalize_compare_clause_text(
+            value,
+            trim_trailing_context=trim_trailing_context,
+            allow_single_token=False,
+        )
+
+    clause_match = COMPARE_BETWEEN_PATTERN.search(query) or COMPARE_CLAUSE_PATTERN.search(query)
+    if clause_match is None:
+        return []
+    left = _extract_compare_clause_side(clause_match.group("left"), trim_trailing_context=False)
+    right = _extract_compare_clause_side(clause_match.group("right"), trim_trailing_context=True)
+    return _deduplicate_strings([
+        candidate
+        for candidate in [left, right]
+        if candidate is not None
+    ])
+
+
 def question_has_single_source_constraint(query: str) -> bool:
     """Return whether the question explicitly requires a single source."""
     if not isinstance(query, str) or not query.strip():
@@ -919,6 +1005,277 @@ def _clear_source_winner(
     return (top_score - second_score) >= 8.0 or top_score >= (second_score * 1.25)
 
 
+def _compare_source_status(candidate: dict[str, Any]) -> str:
+    return "exact" if bool(candidate.get("exact_source_match")) else "approximate"
+
+
+def _build_source_candidate(
+    source: dict[str, Any],
+    *,
+    source_query: str,
+    query: str,
+    units_by_source: dict[str, list[dict[str, Any]]],
+    parsed_locator: dict[str, Any],
+) -> dict[str, Any] | None:
+    source_id = source.get("source_id")
+    if not isinstance(source_id, str):
+        return None
+    if str(source.get("source_family") or "corpus") != "corpus":
+        return None
+    best_score = 0.0
+    best_basis: str | None = None
+    matched_alias: str | None = None
+    exact_match = False
+    for alias in source.get("path_aliases", []):
+        if not isinstance(alias, str):
+            continue
+        match = _source_alias_match(source_query, alias, weight=90.0, basis="path-alias")
+        if match is None:
+            continue
+        alias_score, alias_basis = match
+        if alias_score > best_score:
+            best_score = alias_score
+            best_basis = alias_basis
+            matched_alias = alias
+            exact_match = alias_basis.startswith("exact-")
+    for alias in source.get("title_aliases", []):
+        if not isinstance(alias, str):
+            continue
+        match = _source_alias_match(source_query, alias, weight=72.0, basis="title-alias")
+        if match is None:
+            continue
+        alias_score, alias_basis = match
+        if alias_score > best_score:
+            best_score = alias_score
+            best_basis = alias_basis
+            matched_alias = alias
+            exact_match = alias_basis.startswith("exact-")
+    best_unit, unit_candidates = _pick_best_unit_candidate(
+        query,
+        units_by_source.get(source_id, []),
+        parsed_locator=parsed_locator,
+    )
+    if best_score <= 0 and best_unit is None:
+        return None
+    return {
+        "source_id": source_id,
+        "source_score": best_score,
+        "score": best_score + (float(best_unit["score"]) if best_unit is not None else 0.0),
+        "exact_source_match": exact_match,
+        "match_basis": [best_basis] if best_basis else [],
+        "matched_alias": matched_alias,
+        "best_unit": best_unit,
+        "candidate_unit_ids": [
+            item["unit_id"]
+            for item in unit_candidates[:3]
+            if isinstance(item.get("unit_id"), str)
+        ],
+        "current_path": source.get("current_path"),
+        "title": source.get("title"),
+    }
+
+
+def _resolve_declared_compare_source(
+    requested_source_text: str,
+    *,
+    normalized_source_records: list[dict[str, Any]],
+    units_by_source: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    parsed_locator = _parse_locator_hints(requested_source_text)
+    candidates = [
+        candidate
+        for source in normalized_source_records
+        if (
+            candidate := _build_source_candidate(
+                source,
+                source_query=requested_source_text,
+                query=requested_source_text,
+                units_by_source=units_by_source,
+                parsed_locator=parsed_locator,
+            )
+        )
+        is not None
+    ]
+    candidates.sort(key=_combined_candidate_sort_key)
+    exact_candidates = [item for item in candidates if item.get("exact_source_match")]
+    chosen: dict[str, Any] | None = None
+    status = "unresolved"
+    if exact_candidates:
+        top_exact = exact_candidates[0]
+        second_exact = exact_candidates[1] if len(exact_candidates) > 1 else None
+        if _clear_source_winner(top_exact, second_exact):
+            chosen = top_exact
+            status = "exact"
+    if chosen is None and candidates:
+        approximate_candidates = [
+            item for item in candidates if float(item.get("source_score", 0.0)) > 0.0
+        ]
+        if approximate_candidates:
+            top_approx = approximate_candidates[0]
+            second_approx = (
+                approximate_candidates[1] if len(approximate_candidates) > 1 else None
+            )
+            if _clear_source_winner(top_approx, second_approx):
+                chosen = top_approx
+                status = "approximate"
+    return {
+        "requested_source_text": requested_source_text,
+        "source_match_status": status,
+        "resolved_source_id": (
+            _nonempty_string(chosen.get("source_id")) if isinstance(chosen, dict) else None
+        ),
+        "match_basis": (
+            _string_list(chosen.get("match_basis")) if isinstance(chosen, dict) else []
+        ),
+        "candidate_source_ids": [
+            candidate["source_id"]
+            for candidate in candidates[:3]
+            if isinstance(candidate.get("source_id"), str)
+        ],
+        "target_source_ref": (
+            format_user_visible_source_ref(
+                title=(chosen.get("title") if isinstance(chosen.get("title"), str) else None),
+                current_path=(
+                    chosen.get("current_path")
+                    if isinstance(chosen.get("current_path"), str)
+                    else None
+                ),
+            )
+            if isinstance(chosen, dict)
+            else None
+        ),
+    }
+
+
+def _declared_compare_sources(
+    query: str,
+    *,
+    normalized_source_records: list[dict[str, Any]],
+    units_by_source: dict[str, list[dict[str, Any]]],
+    source_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not COMPARATIVE_HINT_PATTERN.search(query):
+        return []
+
+    declared_source_texts = extract_declared_compare_source_texts(query)
+    if declared_source_texts:
+        return [
+            _resolve_declared_compare_source(
+                requested_source_text,
+                normalized_source_records=normalized_source_records,
+                units_by_source=units_by_source,
+            )
+            for requested_source_text in declared_source_texts
+        ]
+
+    ranked_candidates = [
+        item
+        for item in source_candidates
+        if bool(item.get("exact_source_match")) or float(item.get("source_score", 0.0)) > 0.0
+    ]
+    ranked_candidates.sort(key=_combined_candidate_sort_key)
+    declared: list[dict[str, Any]] = []
+    seen_source_ids: set[str] = set()
+    for candidate in ranked_candidates:
+        source_id = _nonempty_string(candidate.get("source_id"))
+        if source_id is None or source_id in seen_source_ids:
+            continue
+        seen_source_ids.add(source_id)
+        declared.append(
+            {
+                "source_id": source_id,
+                "source_match_status": _compare_source_status(candidate),
+                "match_basis": _string_list(candidate.get("match_basis")),
+                "target_source_ref": format_user_visible_source_ref(
+                    title=(
+                        candidate.get("title")
+                        if isinstance(candidate.get("title"), str)
+                        else None
+                    ),
+                    current_path=(
+                        candidate.get("current_path")
+                        if isinstance(candidate.get("current_path"), str)
+                        else None
+                    ),
+                )
+                or _nonempty_string(candidate.get("current_path")),
+                "requested_source_text": _nonempty_string(candidate.get("matched_alias")),
+            }
+        )
+        if len(declared) >= 2:
+            break
+    return declared
+
+
+def _apply_compare_resolution(
+    result: dict[str, Any],
+    *,
+    query: str,
+    normalized_source_records: list[dict[str, Any]],
+    units_by_source: dict[str, list[dict[str, Any]]],
+    source_candidates: list[dict[str, Any]],
+) -> None:
+    declared_sources = _declared_compare_sources(
+        query,
+        normalized_source_records=normalized_source_records,
+        units_by_source=units_by_source,
+        source_candidates=source_candidates,
+    )
+    expected_count = (
+        len(declared_sources)
+        if declared_sources
+        else (2 if COMPARATIVE_HINT_PATTERN.search(query) else 0)
+    )
+    compare_source_ids = _deduplicate_strings([
+        item["resolved_source_id"]
+        for item in declared_sources
+        if isinstance(item.get("resolved_source_id"), str)
+    ])
+    compare_source_refs = _deduplicate_strings([
+        item["target_source_ref"]
+        for item in declared_sources
+        if isinstance(item.get("target_source_ref"), str)
+    ])
+    if expected_count <= 0:
+        result["declared_compare_sources"] = []
+        result["declared_compare_source_ids"] = []
+        result["declared_compare_source_refs"] = []
+        result["declared_compare_expected_count"] = 0
+        result["declared_compare_missing_count"] = 0
+        result["compare_resolution_status"] = None
+        return
+    missing_count = max(expected_count - len(compare_source_ids), 0)
+    if len(compare_source_ids) >= expected_count and all(
+        item.get("source_match_status") == "exact" for item in declared_sources[:expected_count]
+    ):
+        compare_status = "exact"
+    elif len(compare_source_ids) >= expected_count:
+        compare_status = "approximate"
+    else:
+        compare_status = "unresolved"
+    result["declared_compare_sources"] = declared_sources
+    result["declared_compare_source_ids"] = compare_source_ids
+    result["declared_compare_source_refs"] = compare_source_refs
+    result["declared_compare_expected_count"] = expected_count
+    result["declared_compare_missing_count"] = missing_count
+    result["compare_resolution_status"] = compare_status
+    result["status"] = compare_status
+    if compare_status == "approximate":
+        result["continued_with_best_effort"] = True
+        result["unresolved_reason"] = "compare-soft-approximation"
+        result["notice_text"] = (
+            "I isolated the comparison scope, but at least one requested source was only an "
+            "approximate published match. I am continuing with explicit approximation truth."
+        )
+    elif compare_status == "unresolved":
+        result["continued_with_best_effort"] = True
+        result["unresolved_reason"] = "compare-source-unresolved"
+        result["notice_text"] = (
+            "I could not isolate every requested comparison source clearly. I am continuing "
+            "with explicit unresolved comparison truth instead of treating the scope as exact."
+        )
+
+
 def _pick_best_unit_candidate(
     query: str,
     units: list[dict[str, Any]],
@@ -974,66 +1331,20 @@ def resolve_reference_query(
         else query
     )
     parsed_locator = _parse_locator_hints(query)
-    source_candidates: list[dict[str, Any]] = []
-    for source in normalized_source_records:
-        source_id = source.get("source_id")
-        if not isinstance(source_id, str):
-            continue
-        if str(source.get("source_family") or "corpus") != "corpus":
-            continue
-        best_score = 0.0
-        best_basis: str | None = None
-        matched_alias: str | None = None
-        exact_match = False
-        for alias in source.get("path_aliases", []):
-            if not isinstance(alias, str):
-                continue
-            match = _source_alias_match(source_query, alias, weight=90.0, basis="path-alias")
-            if match is None:
-                continue
-            alias_score, alias_basis = match
-            if alias_score > best_score:
-                best_score = alias_score
-                best_basis = alias_basis
-                matched_alias = alias
-                exact_match = alias_basis.startswith("exact-")
-        for alias in source.get("title_aliases", []):
-            if not isinstance(alias, str):
-                continue
-            match = _source_alias_match(source_query, alias, weight=72.0, basis="title-alias")
-            if match is None:
-                continue
-            alias_score, alias_basis = match
-            if alias_score > best_score:
-                best_score = alias_score
-                best_basis = alias_basis
-                matched_alias = alias
-                exact_match = alias_basis.startswith("exact-")
-        best_unit, unit_candidates = _pick_best_unit_candidate(
-            query,
-            units_by_source.get(source_id, []),
-            parsed_locator=parsed_locator,
+    source_candidates = [
+        candidate
+        for source in normalized_source_records
+        if (
+            candidate := _build_source_candidate(
+                source,
+                source_query=source_query,
+                query=query,
+                units_by_source=units_by_source,
+                parsed_locator=parsed_locator,
+            )
         )
-        if best_score <= 0 and best_unit is None:
-            continue
-        source_candidates.append(
-            {
-                "source_id": source_id,
-                "source_score": best_score,
-                "score": best_score + (float(best_unit["score"]) if best_unit is not None else 0.0),
-                "exact_source_match": exact_match,
-                "match_basis": [best_basis] if best_basis else [],
-                "matched_alias": matched_alias,
-                "best_unit": best_unit,
-                "candidate_unit_ids": [
-                    item["unit_id"]
-                    for item in unit_candidates[:3]
-                    if isinstance(item.get("unit_id"), str)
-                ],
-                "current_path": source.get("current_path"),
-                "title": source.get("title"),
-            }
-        )
+        is not None
+    ]
 
     source_candidates.sort(key=_combined_candidate_sort_key)
     document_ref_detected = bool(requested_source_text) or _document_ref_detected(
@@ -1073,6 +1384,12 @@ def resolve_reference_query(
         "hard_boundary": False,
         "target_source_ref": None,
         "analysis_guard_applied": False,
+        "declared_compare_sources": [],
+        "declared_compare_source_ids": [],
+        "declared_compare_source_refs": [],
+        "declared_compare_expected_count": 0,
+        "declared_compare_missing_count": 0,
+        "compare_resolution_status": None,
     }
     if not detected:
         return result
@@ -1240,6 +1557,14 @@ def resolve_reference_query(
                 "I did not find a clear document or locator match. "
                 "I am continuing with the closest published evidence."
             )
+    if COMPARATIVE_HINT_PATTERN.search(query):
+        _apply_compare_resolution(
+            result,
+            query=query,
+            normalized_source_records=normalized_source_records,
+            units_by_source=units_by_source,
+            source_candidates=source_candidates,
+        )
     result["scope_mode"] = (
         "compare"
         if COMPARATIVE_HINT_PATTERN.search(query)

@@ -40,6 +40,7 @@ jobs:
           python scripts/build-distributions.py \
             --version "${{ steps.version.outputs.value }}" \
             --github-repo "${{ github.repository }}" \
+            --update-service-url "${{ secrets.DOCMASON_RELEASE_ENTRY_PUBLIC_URL }}" \
             --source-commit "${{ github.sha }}" \
             --source-ref "${{ github.ref }}"
       - name: Upload workflow artifacts
@@ -61,3 +62,48 @@ jobs:
             dist/DocMason-clean.zip.sha256
             dist/DocMason-demo-ico-gcs.zip
             dist/DocMason-demo-ico-gcs.zip.sha256
+      - name: Publish release-entry metadata
+        if: (github.event_name == 'push' || inputs.publish_release) && secrets.DOCMASON_RELEASE_ENTRY_ADMIN_URL != '' && secrets.DOCMASON_RELEASE_ENTRY_ADMIN_TOKEN != ''
+        env:
+          RELEASE_ENTRY_ADMIN_URL: ${{ secrets.DOCMASON_RELEASE_ENTRY_ADMIN_URL }}
+          RELEASE_ENTRY_ADMIN_TOKEN: ${{ secrets.DOCMASON_RELEASE_ENTRY_ADMIN_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.value }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from datetime import UTC, datetime
+
+          payload = {
+              "schema_version": 1,
+              "release_version": os.environ["RELEASE_VERSION"],
+              "published_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+              "release_url": os.environ["RELEASE_URL"],
+              "channels": [
+                  {
+                      "distribution_channel": "clean",
+                      "asset_name": "DocMason-clean.zip",
+                      "asset_url": f"{os.environ['RELEASE_URL'].replace('/tag/', '/download/')}/DocMason-clean.zip",
+                  },
+                  {
+                      "distribution_channel": "demo-ico-gcs",
+                      "asset_name": "DocMason-demo-ico-gcs.zip",
+                      "asset_url": f"{os.environ['RELEASE_URL'].replace('/tag/', '/download/')}/DocMason-demo-ico-gcs.zip",
+                  },
+              ],
+          }
+          request = urllib.request.Request(
+              os.environ["RELEASE_ENTRY_ADMIN_URL"],
+              data=(json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {os.environ['RELEASE_ENTRY_ADMIN_TOKEN']}",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=10) as response:
+              body = response.read().decode("utf-8")
+          print(body)
+          PY

@@ -54,6 +54,7 @@ from .project import (
     supported_source_documents,
     write_json,
 )
+from .release_entry import release_entry_snapshot
 from .review import record_runtime_review_request, refresh_log_review_summary
 from .run_control import record_run_event_for_runs, record_shared_job_settled_once
 from .toolchain import (
@@ -1268,6 +1269,34 @@ def source_document_tier_counts(source_counts: dict[str, int]) -> dict[str, dict
     return grouped
 
 
+def _release_entry_status_line(snapshot: dict[str, Any]) -> str:
+    """Render one concise human-readable release-entry summary line."""
+    if not snapshot:
+        return "Release entry: unavailable"
+    if not snapshot.get("bundle_detected"):
+        return "Release entry: disabled (source-repo)"
+    state = "enabled" if snapshot.get("effective_enabled") else "disabled"
+    parts = [f"Release entry: {state}"]
+    disabled_reason = snapshot.get("disabled_reason")
+    if isinstance(disabled_reason, str) and disabled_reason:
+        parts.append(f"reason={disabled_reason}")
+    channel = snapshot.get("distribution_channel")
+    if isinstance(channel, str) and channel:
+        parts.append(f"channel={channel}")
+    current_version = snapshot.get("current_version")
+    if isinstance(current_version, str) and current_version:
+        parts.append(f"current={current_version}")
+    latest_version = snapshot.get("last_known_latest_version")
+    if isinstance(latest_version, str) and latest_version:
+        parts.append(f"latest={latest_version}")
+    next_eligible_at = snapshot.get("next_eligible_at")
+    if isinstance(next_eligible_at, str) and next_eligible_at:
+        parts.append(f"next-eligible={next_eligible_at}")
+    if snapshot.get("update_available"):
+        parts.append("update-available=yes")
+    return ", ".join(parts)
+
+
 def workspace_stage(
     paths: WorkspacePaths,
     *,
@@ -1282,6 +1311,7 @@ def workspace_stage(
     adapters = adapter_snapshot(paths)
     interaction = _interaction_ingest_snapshot(paths)
     control_plane = workspace_state_snapshot(paths)
+    release_entry = release_entry_snapshot(paths)
     claude = adapters["claude"]
     active_confirmation_jobs = [
         job
@@ -1338,6 +1368,7 @@ def workspace_stage(
         "interaction_ingest": interaction,
         "control_plane": control_plane,
         "adapters": adapters,
+        "release_entry": release_entry,
         "pending_actions": deduplicate(pending_actions),
     }
     return stage, environment["ready"], payload, environment, kb, deduplicate(pending_actions)
@@ -2375,6 +2406,18 @@ def doctor_workspace(
             "Inspect `knowledge_base/` state and rerun `docmason doctor`.",
         )
 
+    release_entry = release_entry_snapshot(workspace)
+    release_entry_detail = _release_entry_status_line(release_entry)
+    if release_entry.get("effective_enabled"):
+        add_check("release-entry", READY, release_entry_detail)
+    elif (
+        release_entry.get("bundle_detected")
+        and release_entry.get("disabled_reason") == "bundle-unconfigured"
+    ):
+        add_check("release-entry", DEGRADED, release_entry_detail)
+    else:
+        add_check("release-entry", READY, release_entry_detail)
+
     overall = READY
     if any(check["status"] == ACTION_REQUIRED for check in checks):
         overall = ACTION_REQUIRED
@@ -2388,6 +2431,7 @@ def doctor_workspace(
         "status": overall,
         "environment": environment,
         "knowledge_base": knowledge_base,
+        "release_entry": release_entry,
         "checks": checks,
         "supported_inputs": list(SUPPORTED_INPUTS),
         "supported_input_tiers": supported_input_tiers(),
@@ -2489,6 +2533,7 @@ def status_workspace(
             )
             + " active answer-critical job(s)"
         ),
+        _release_entry_status_line(payload.get("release_entry", {})),
     ]
     control_plane_repairs = payload.get("control_plane", {}).get("repair_actions", [])
     if isinstance(control_plane_repairs, list) and control_plane_repairs:

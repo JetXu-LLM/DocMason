@@ -52,6 +52,10 @@ BUNDLE_CHANNELS = {
 
 PROTECTED_PATHS = ["original_doc", "knowledge_base", "runtime", "adapters"]
 EXACT_PATH_EXCLUDES = {"scripts/install-git-hooks.sh"}
+RELEASE_ENTRY_SCHEMA_VERSION = 1
+RELEASE_ENTRY_STATE_SCHEMA_VERSION = 1
+DEFAULT_RELEASE_ENTRY_SCOPE = "canonical-ask"
+DEFAULT_RELEASE_ENTRY_COOLDOWN_HOURS = 20
 
 
 def utc_now() -> str:
@@ -131,6 +135,7 @@ def stage_bundle(
     version: str,
     channel: str,
     github_repo: str | None,
+    update_service_url: str | None,
     source_commit: str | None,
     source_ref: str | None,
 ) -> None:
@@ -158,12 +163,42 @@ def stage_bundle(
             {
                 "distribution_channel": config["distribution_name"],
                 "asset_name": config["asset_name"],
+                "release_entry": {
+                    "schema_version": RELEASE_ENTRY_SCHEMA_VERSION,
+                    "update_service_url": update_service_url,
+                    "distribution_channel": config["distribution_name"],
+                    "automatic_check_scope": DEFAULT_RELEASE_ENTRY_SCOPE,
+                    "automatic_check_cooldown_hours": DEFAULT_RELEASE_ENTRY_COOLDOWN_HOURS,
+                    "automatic_check_enabled_by_default": True,
+                    "asset_name": config["asset_name"],
+                },
                 "source_version": version,
                 "source_repo": github_repo,
                 "source_commit": source_commit,
                 "source_ref": source_ref,
                 "generated_at": utc_now(),
                 "protected_paths": PROTECTED_PATHS,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    release_client_state_path = staging_root / "runtime" / "state" / "release-client.json"
+    release_client_state_path.parent.mkdir(parents=True, exist_ok=True)
+    release_client_state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": RELEASE_ENTRY_STATE_SCHEMA_VERSION,
+                "automatic_check_enabled": True,
+                "installation_hash": None,
+                "created_at": None,
+                "last_check_attempted_at": None,
+                "next_eligible_at": None,
+                "last_known_latest_version": None,
+                "last_notified_version": None,
+                "last_check_status": None,
             },
             indent=2,
             sort_keys=True,
@@ -212,6 +247,14 @@ def parse_args() -> argparse.Namespace:
         help="GitHub repository slug to embed in bundle manifests, for example owner/DocMason.",
     )
     parser.add_argument(
+        "--update-service-url",
+        default=None,
+        help=(
+            "Bounded release-entry update-check endpoint embedded into release bundles. "
+            "When omitted, automatic bundle update checks remain unconfigured."
+        ),
+    )
+    parser.add_argument(
         "--source-commit",
         default=None,
         help="Git commit hash recorded in bundle manifests. Defaults to the current checkout HEAD.",
@@ -246,6 +289,7 @@ def main() -> int:
                 version=args.version,
                 channel=channel,
                 github_repo=args.github_repo,
+                update_service_url=args.update_service_url or None,
                 source_commit=source_commit,
                 source_ref=source_ref,
             )

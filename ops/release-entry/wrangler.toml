@@ -1,0 +1,10 @@
+name = "docmason-release-entry"
+main = "worker.js"
+compatibility_date = "2026-03-30"
+workers_dev = true
+preview_urls = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "docmason-release-entry"
+database_id = "d2de882c-bc6d-4ed2-97e5-fad7ce955711"

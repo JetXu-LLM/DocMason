@@ -444,6 +444,110 @@ class ReferenceResolutionTests(unittest.TestCase):
             all(item["source_id"] == deck_source_id for item in report.payload["results"])
         )
 
+    def test_compare_query_preserves_declared_source_records_from_unquoted_titles(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "current_path": "original_doc/a.pdf",
+                "title": "Campaign Planning Brief",
+                "prior_paths": [],
+                "path_history": [],
+            },
+            {
+                "source_id": "source-002",
+                "source_family": "corpus",
+                "current_path": "original_doc/b.pdf",
+                "title": "Architecture Strategy Companion",
+                "prior_paths": [],
+                "path_history": [],
+            },
+        ]
+
+        result = resolve_reference_query(
+            (
+                "compare Campaign Planning Brief and Architecture Strategy Companion on "
+                "architecture strategy"
+            ),
+            source_records=source_records,
+            unit_records=[],
+        )
+
+        self.assertEqual(result["scope_mode"], "compare")
+        self.assertEqual(result["compare_resolution_status"], "exact")
+        self.assertEqual(result["declared_compare_expected_count"], 2)
+        self.assertEqual(
+            [item["requested_source_text"] for item in result["declared_compare_sources"]],
+            ["Campaign Planning Brief", "Architecture Strategy Companion"],
+        )
+        self.assertEqual(
+            [item["source_match_status"] for item in result["declared_compare_sources"]],
+            ["exact", "exact"],
+        )
+        self.assertEqual(
+            [item["resolved_source_id"] for item in result["declared_compare_sources"]],
+            ["source-001", "source-002"],
+        )
+        self.assertEqual(result["declared_compare_source_ids"], ["source-001", "source-002"])
+
+    def test_compare_query_preserves_unresolved_declared_source_record(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "current_path": "original_doc/a.pdf",
+                "title": "Campaign Planning Brief",
+                "prior_paths": [],
+                "path_history": [],
+            },
+            {
+                "source_id": "source-002",
+                "source_family": "corpus",
+                "current_path": "original_doc/b.pdf",
+                "title": "Architecture Strategy Companion",
+                "prior_paths": [],
+                "path_history": [],
+            },
+        ]
+
+        result = resolve_reference_query(
+            'Compare "Campaign Planning Brief" versus "Zebra Ledger" on architecture strategy.',
+            source_records=source_records,
+            unit_records=[],
+        )
+
+        self.assertEqual(result["scope_mode"], "compare")
+        self.assertEqual(result["compare_resolution_status"], "unresolved")
+        self.assertEqual(result["declared_compare_expected_count"], 2)
+        self.assertEqual(result["declared_compare_missing_count"], 1)
+        self.assertEqual(result["declared_compare_source_ids"], ["source-001"])
+        self.assertEqual(
+            [item["requested_source_text"] for item in result["declared_compare_sources"]],
+            ["Campaign Planning Brief", "Zebra Ledger"],
+        )
+        self.assertEqual(
+            [item["source_match_status"] for item in result["declared_compare_sources"]],
+            ["exact", "unresolved"],
+        )
+        self.assertEqual(
+            [item["resolved_source_id"] for item in result["declared_compare_sources"]],
+            ["source-001", None],
+        )
+        self.assertEqual(
+            result["declared_compare_sources"][0]["candidate_source_ids"],
+            ["source-001"],
+        )
+        self.assertEqual(
+            result["declared_compare_sources"][1]["candidate_source_ids"],
+            [],
+        )
+        self.assertTrue(
+            str(result["declared_compare_sources"][0]["target_source_ref"]).startswith(
+                "Campaign Planning Brief"
+            )
+        )
+        self.assertIsNone(result["declared_compare_sources"][1]["target_source_ref"])
+
     def test_compare_query_does_not_hard_filter_to_one_resolved_source(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -460,7 +564,11 @@ class ReferenceResolutionTests(unittest.TestCase):
         )
 
         self.assertEqual(report.exit_code, 0)
-        self.assertEqual(report.payload["filters"]["source_ids"], [])
+        self.assertEqual(len(report.payload["filters"]["source_ids"]), 2)
+        self.assertCountEqual(
+            report.payload["filters"]["source_ids"],
+            report.payload["reference_resolution"]["declared_compare_source_ids"],
+        )
         self.assertFalse(report.payload["reference_resolution"]["source_narrowing_allowed"])
         self.assertGreaterEqual(len(report.payload["results"]), 2)
 
@@ -480,7 +588,11 @@ class ReferenceResolutionTests(unittest.TestCase):
         )
 
         self.assertEqual(report.exit_code, 0)
-        self.assertEqual(report.payload["filters"]["source_ids"], [])
+        self.assertEqual(len(report.payload["filters"]["source_ids"]), 2)
+        self.assertCountEqual(
+            report.payload["filters"]["source_ids"],
+            report.payload["reference_resolution"]["declared_compare_source_ids"],
+        )
         self.assertFalse(report.payload["reference_resolution"]["source_narrowing_allowed"])
         self.assertGreaterEqual(len(report.payload["results"]), 2)
 

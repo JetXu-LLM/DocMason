@@ -190,6 +190,10 @@ class WorkspacePaths:
     root: Path
 
     @property
+    def distribution_manifest_path(self) -> Path:
+        return self.root / "distribution-manifest.json"
+
+    @property
     def planning_dir(self) -> Path:
         return self.root / "planning"
 
@@ -384,6 +388,10 @@ class WorkspacePaths:
     @property
     def host_identity_bindings_path(self) -> Path:
         return self.state_dir / "host-identity-bindings.json"
+
+    @property
+    def release_client_state_path(self) -> Path:
+        return self.state_dir / "release-client.json"
 
     @property
     def logs_dir(self) -> Path:
