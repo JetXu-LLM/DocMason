@@ -26,8 +26,8 @@ from docmason.commands import (
     doctor_workspace,
     prepare_workspace,
     status_workspace,
-    sync_workspace,
     sync_adapters,
+    sync_workspace,
 )
 from docmason.control_plane import ensure_shared_job, load_shared_job, sync_input_signature
 from docmason.coordination import LeaseConflictError
@@ -141,7 +141,9 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                         stdout=json.dumps(
                             {
                                 "ready": True,
-                                "detail": "PDF rendering and extraction dependencies are available.",
+                                "detail": (
+                                    "PDF rendering and extraction dependencies are available."
+                                ),
                                 "missing": [],
                             }
                         ),
@@ -185,14 +187,21 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         python_path.parent.mkdir(parents=True, exist_ok=True)
         python_path.write_text(
             "#!/bin/sh\n"
-            f"export PYTHONPATH={shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+            "export PYTHONPATH="
+            f"{shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
             f"exec {shlex.quote(sys.executable)} \"$@\"\n",
             encoding="utf-8",
         )
         python_path.chmod(python_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         workspace.toolchain_python_current_dir.parent.mkdir(parents=True, exist_ok=True)
-        if workspace.toolchain_python_current_dir.exists() or workspace.toolchain_python_current_dir.is_symlink():
-            if workspace.toolchain_python_current_dir.is_dir() and not workspace.toolchain_python_current_dir.is_symlink():
+        if (
+            workspace.toolchain_python_current_dir.exists()
+            or workspace.toolchain_python_current_dir.is_symlink()
+        ):
+            if (
+                workspace.toolchain_python_current_dir.is_dir()
+                and not workspace.toolchain_python_current_dir.is_symlink()
+            ):
                 shutil.rmtree(workspace.toolchain_python_current_dir)
             else:
                 workspace.toolchain_python_current_dir.unlink()
@@ -236,7 +245,8 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         external_python.parent.mkdir(parents=True, exist_ok=True)
         external_python.write_text(
             "#!/bin/sh\n"
-            f"export PYTHONPATH={shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+            "export PYTHONPATH="
+            f"{shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
             f"exec {shlex.quote(sys.executable)} \"$@\"\n",
             encoding="utf-8",
         )
@@ -285,7 +295,9 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 "python_executable": str(managed_python),
                 "venv_python": ".venv/bin/python",
                 "editable_install": True,
-                "editable_install_detail": "Editable install resolves to the workspace source tree.",
+                "editable_install_detail": (
+                    "Editable install resolves to the workspace source tree."
+                ),
                 "python_baseline": "3.13",
                 "toolchain_root": ".docmason/toolchain",
                 "toolchain_mode": "repo-local-managed",
@@ -443,7 +455,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             seen_commands.append(command_list)
             return self.fake_prepare_runner(workspace)(command_list, cwd)
 
-        with mock.patch("docmason.commands.find_uv_binary", return_value=str(workspace.toolchain_bootstrap_uv)):
+        with mock.patch(
+            "docmason.commands.find_uv_binary",
+            return_value=str(workspace.toolchain_bootstrap_uv),
+        ):
             report = prepare_workspace(
                 workspace,
                 command_runner=runner,
@@ -705,7 +720,9 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         self.assertTrue(marker_path.read_text(encoding="utf-8").strip())
 
-    def test_inspect_toolchain_distinguishes_shared_host_bootstrap_from_legacy_external(self) -> None:
+    def test_inspect_toolchain_distinguishes_shared_host_bootstrap_from_legacy_external(
+        self,
+    ) -> None:
         workspace = self.make_workspace()
 
         shared_host_toolchain = inspect_toolchain(workspace, editable_install=False)
@@ -852,7 +869,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             report.payload["control_plane"]["confirmation_kind"],
             "high-intrusion-prepare",
         )
-        self.assertIn("Prepare the workspace now?", report.payload["control_plane"]["confirmation_prompt"])
+        self.assertIn(
+            "Prepare the workspace now?",
+            report.payload["control_plane"]["confirmation_prompt"],
+        )
         self.assertEqual(
             report.payload["next_steps"][0],
             "Run `docmason prepare --yes` to approve and continue.",
@@ -1063,6 +1083,8 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(statuses["editable-install"], ACTION_REQUIRED)
         self.assertEqual(statuses["source-corpus"], DEGRADED)
         self.assertEqual(statuses["claude-adapter"], READY)
+        self.assertEqual(statuses["storage-lifecycle"], READY)
+        self.assertGreater(report.payload["knowledge_base"]["storage_lifecycle"]["family_count"], 0)
 
     def test_doctor_keeps_manual_recovery_hidden_for_routine_prepare_issues(self) -> None:
         workspace = self.make_workspace()
@@ -1231,6 +1253,112 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
         self.assertEqual(report.exit_code, 1)
         self.assertEqual(report.payload["stage"], "knowledge-base-invalid")
+
+    def test_status_surfaces_snapshot_retention_preview_without_persisted_state(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        source_file = workspace.source_dir / "example.pdf"
+        source_file.write_text("pdf placeholder\n", encoding="utf-8")
+        current_artifact = workspace.knowledge_base_current_dir / "artifact.md"
+        current_artifact.parent.mkdir(parents=True, exist_ok=True)
+        current_artifact.write_text("compiled knowledge\n", encoding="utf-8")
+        write_json(
+            workspace.sync_state_path,
+            {
+                "published_source_signature": source_inventory_signature(workspace),
+                "last_publish_at": "2026-03-15T01:00:00Z",
+                "last_sync_at": "2026-03-15T01:00:00Z",
+            },
+        )
+        write_json(
+            workspace.knowledge_base_dir / "current-pointer.json",
+            {"snapshot_id": "snapshot-current"},
+        )
+        for snapshot_id, published_at in (
+            ("snapshot-current", "2026-03-29T01:00:00Z"),
+            ("snapshot-recent", "2026-03-28T01:00:00Z"),
+            ("snapshot-recent-b", "2026-03-27T01:00:00Z"),
+            ("snapshot-expired", "2026-03-20T01:00:00Z"),
+        ):
+            snapshot_dir = workspace.knowledge_version_dir(snapshot_id)
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                snapshot_dir / "publish_manifest.json",
+                {
+                    "snapshot_id": snapshot_id,
+                    "published_at": published_at,
+                    "validation_status": "valid",
+                    "published_source_signature": f"sig-{snapshot_id}",
+                },
+            )
+            write_json(
+                snapshot_dir / "validation_report.json",
+                {
+                    "status": "valid",
+                    "source_signature": f"sig-{snapshot_id}",
+                },
+            )
+
+        report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+
+        self.assertEqual(report.exit_code, 0)
+        retention = report.payload["knowledge_base"]["snapshot_retention"]
+        self.assertFalse(retention["applied"])
+        self.assertEqual(retention["pinned_snapshot_count"], 1)
+        self.assertIn("snapshot-current", retention["retained_snapshot_ids"])
+        self.assertIn("snapshot-expired", retention["eligible_delete_snapshot_ids"])
+        storage_lifecycle = report.payload["knowledge_base"]["storage_lifecycle"]
+        self.assertGreater(storage_lifecycle["family_count"], 0)
+        self.assertEqual(storage_lifecycle["pinned_snapshot_count"], 1)
+        self.assertIn(
+            "Storage lifecycle: ",
+            "\n".join(report.lines),
+        )
+
+    def test_status_surfaces_rebuild_and_lane_b_follow_up_summaries(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        source_file = workspace.source_dir / "example.pdf"
+        source_file.write_text("pdf placeholder\n", encoding="utf-8")
+        current_artifact = workspace.knowledge_base_current_dir / "artifact.md"
+        current_artifact.parent.mkdir(parents=True, exist_ok=True)
+        current_artifact.write_text("compiled knowledge\n", encoding="utf-8")
+        write_json(
+            workspace.sync_state_path,
+            {
+                "published_source_signature": source_inventory_signature(workspace),
+                "last_publish_at": "2026-03-15T01:00:00Z",
+                "last_sync_at": "2026-03-15T01:00:00Z",
+                "rebuild_telemetry": {
+                    "rebuild_cause": "artifact-contract-backfill",
+                    "dirty_source_count": 0,
+                    "contract_backfill_source_count": 1,
+                    "interaction_promotion_only": False,
+                    "scoped_contract_repair_used": True,
+                },
+                "lane_b_follow_up_summary": {
+                    "state": "running",
+                    "selected_source_count": 1,
+                    "selected_unit_count": 3,
+                    "covered_unit_count": 1,
+                    "blocked_unit_count": 0,
+                    "remaining_unit_count": 2,
+                },
+            },
+        )
+
+        report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+
+        self.assertEqual(
+            report.payload["knowledge_base"]["last_sync_rebuild_telemetry"]["rebuild_cause"],
+            "artifact-contract-backfill",
+        )
+        self.assertEqual(report.payload["knowledge_base"]["lane_b_follow_up"]["state"], "running")
+        self.assertIn(
+            "Last sync rebuild: cause=artifact-contract-backfill",
+            "\n".join(report.lines),
+        )
+        self.assertIn("Lane B follow-up: state=running", "\n".join(report.lines))
 
     def test_sync_reports_material_confirmation_payload(self) -> None:
         workspace = self.make_workspace()

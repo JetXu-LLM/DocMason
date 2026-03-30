@@ -984,6 +984,15 @@ class CommittedBootstrapperFilesTests(unittest.TestCase):
         content = path.read_text(encoding="utf-8")
         self.assertIn("@../adapters/claude/project-memory.md", content)
 
+    def test_committed_claude_md_keeps_hidden_ask_out_of_entry_text(self) -> None:
+        path = ROOT / ".claude" / "CLAUDE.md"
+        content = path.read_text(encoding="utf-8")
+        self.assertIn("generated helpers", content)
+        self.assertIn("committed hooks", content)
+        self.assertNotIn("`docmason _ask`", content)
+        self.assertNotIn("docmason.ask.prepare_ask_turn()", content)
+        self.assertNotIn("docmason.ask.complete_ask_turn()", content)
+
     def test_committed_settings_json_exists(self) -> None:
         path = ROOT / ".claude" / "settings.json"
         self.assertTrue(path.exists(), ".claude/settings.json should be committed")

@@ -37,6 +37,8 @@ If the agent cannot run local commands or inspect the resulting artifacts, stop 
    - publish to `knowledge_base/current`
 5. If `sync_status` is `valid` or `warnings`, inspect `hybrid_enrichment`.
    - if `mode` is `not-needed` or `covered`, stop and return the publication result
+   - if the sync payload also includes `lane_b_follow_up.work_path`, treat that governed work packet as the bounded staging-scoped multimodal follow-up for this sync state
+   - prefer the governed `lane_b_follow_up.work_path` packet over consuming the entire queue blindly when it is available
    - if `mode` is `candidate-prepared` or `partially-covered`, treat `hybrid_work_path` as the authoritative hard-artifact queue
    - do not improvise a second sync path or rewrite deterministic sidecars
    - write only additive `semantic_overlay/` sidecars for units you can support honestly, then rerun `docmason sync --json`
@@ -55,7 +57,7 @@ If the agent cannot run local commands or inspect the resulting artifacts, stop 
 
 ## Completion Signal
 
-- The workflow is complete when `docmason sync --json` returns a final publication outcome for the current workspace state and any remaining hybrid state is either honestly covered, explicitly blocked, or explicitly surfaced as pending follow-up.
+- The workflow is complete when `docmason sync --json` returns a final publication outcome for the current workspace state and any remaining hybrid state is either honestly covered, explicitly blocked, or explicitly surfaced through the governed follow-up packet and control-plane state.
 
 ## Notes
 

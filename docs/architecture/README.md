@@ -24,7 +24,7 @@ Key architectural commitments:
 
 Phase 6 now implements the stable primitive, workflow-productization, private-first evaluation, and natural-intent routing layers through:
 
-- `AGENTS.md` as the first-contact repository contract for agents
+- `AGENTS.md` as the minimal top-level routing contract for agents
 - canonical public workflows under `skills/canonical/`
 - per-workflow execution metadata under `skills/canonical/*/workflow.json`
 - the user-facing `ask` workflow as the default natural entry surface

@@ -5,7 +5,9 @@ description: Accept an ordinary user question inside a DocMason workspace, route
 
 # Ask
 
-Use this workflow as the default entry surface for ordinary user questions inside a valid DocMason workspace.
+`ask` is the canonical skill at `skills/canonical/ask/SKILL.md`.
+It is the user-facing top-level workflow for ordinary natural-language requests.
+Use this skill as the default top-level workflow for a new ordinary user request in this workspace unless the request is clearly explicit operator work.
 
 The user should be able to ask naturally.
 They should not need to name internal workflow IDs or repository mechanics first.
@@ -16,11 +18,20 @@ If the request is clearly an explicit setup, status, sync, adapter-maintenance, 
 
 - Reading this skill is not legal ask execution.
 - Native-thread reconciliation is not legal ask execution.
-- Only canonical ask runtime ownership counts as ordinary front-door execution.
+- `ask` itself remains the only ordinary natural-language front door.
+- A request counts as ordinary front-door execution only after it has been opened as a canonical ask turn under this workflow.
+- Compatible hosts must use the repo-provided host integration surface rather than stitching internal ask helpers or side paths together themselves.
+- Compatible hosts must not treat ad hoc probing of internal ask surfaces, ad hoc Python snippets, or direct lifecycle-helper calls as legal ask entry.
 - Direct evidence commands such as public `retrieve` or `trace` remain legal operator tools, but they do not complete the ordinary ask contract by themselves.
 
 `ask` owns front-door legality, same-turn governance, workspace gating, and routing.
 The routed inner workflow owns the deeper evidence loop.
+
+## Turn Terms
+
+- `native turn` means the host's own chat turn before DocMason opens canonical ask handling.
+- `canonical ask turn` means the governed DocMason turn for the current request.
+- `runtime ownership` means the current request has been opened into that canonical ask turn and is now governed by DocMason.
 
 ## Required Capabilities
 
@@ -38,20 +49,22 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - reuse the live turn when the same question is continuing
    - when the same live turn and the same active run are re-entered, reuse the existing governed preanswer result instead of restarting preanswer governance
    - return in the user's language unless they ask for another language
-2. Use the repository helpers in `docmason.ask`, `docmason.front_controller`, and `docmason.conversation` to:
-   - reconcile any active native thread
-   - keep native reconciliation in the native ledger and interaction-ingest path by default
-   - open or reuse the canonical turn
-   - for adapter-owned or compatible host execution, use the repo-provided hidden canonical ask integration path rather than calling lifecycle helpers directly
-   - keep canonical ask truth separate from native-ledger audit truth unless an explicit bridge or promotion is required
-   - obtain the canonical answer-file path or composition bundle path
-   - pass an agent-authored `semantic_analysis`
-   - preserve flat semantic fields such as `question_class`, `question_domain`, `support_strategy`, and `analysis_origin`
-   - keep one concise `route_reason`
-   - set `needs_latest_workspace_state` when fresh local workspace truth is actually required
-   - include compact `evidence_requirements` when odd or artifact-sensitive questions need channel guidance
-   - resolve user-native source references when the user names a document, path, page, slide, sheet, heading, or similar locator
-3. Choose the narrowest honest evidence basis before choosing workflow detail.
+2. Use the repository helpers in `docmason.ask`, `docmason.front_controller`, and `docmason.conversation` for two responsibilities:
+   - open or reuse the canonical ask turn:
+     - reconcile any active native thread
+     - keep native reconciliation in the native ledger and interaction-ingest path by default
+     - open or reuse the canonical turn
+     - for adapter-owned or compatible host execution, use the repo-provided host integration surface rather than direct internal helper calls or ad hoc snippets
+     - keep canonical ask truth separate from native-ledger audit truth unless an explicit bridge or promotion is required
+   - preserve the required turn state and metadata:
+     - obtain the canonical answer-file path or composition bundle path
+     - pass an agent-authored `semantic_analysis`
+     - preserve flat semantic fields such as `question_class`, `question_domain`, `support_strategy`, and `analysis_origin`
+     - keep one concise `route_reason`
+     - set `needs_latest_workspace_state` when fresh local workspace truth is actually required
+     - include compact `evidence_requirements` when odd or artifact-sensitive questions need channel guidance
+     - resolve user-native source references when the user names a document, path, page, slide, sheet, heading, or similar locator
+3. Choose the smallest evidence basis that can support the answer correctly and truthfully before choosing workflow detail.
    - `workspace-corpus` -> KB-first
    - `composition` -> KB-first with explicit evidence planning
    - `external-factual` -> web-first
@@ -74,6 +87,7 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - if the same-session turn is already `prepared`, `awaiting-confirmation`, or `waiting-shared-job`, prefer reusing that governed state over rerunning shared-state mutation
    - while a turn is in `waiting-shared-job` or `awaiting-confirmation`, do not bypass the governed path by answering from `original_doc/`, `knowledge_base/staging/`, or `.staging-build`
 5. Route to the narrowest inner workflow that matches the ask.
+   - after the canonical ask turn is open, the workflow must choose the most appropriate one of the following 5 inner workflows and continue through that path
    - direct supported answer -> `grounded-answer`
    - evidence-backed drafting, planning, or research -> `grounded-composition`
    - evidence-only request -> `retrieval-workflow`
@@ -81,7 +95,8 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - runtime review request -> `runtime-log-review`
 6. Route into the chosen inner workflow and let it own the evidence loop.
    - keep workspace commands sequential inside the live turn
-   - do not treat `retrieve`, `trace`, or direct helper calls as a substitute for canonical ordinary ask execution
+   - keep the same canonical turn ownership through the inner workflow instead of reopening the question from side paths
+   - do not treat `retrieve`, `trace`, direct helper calls, ad hoc internal-surface probing, or raw-source inspection as a substitute for canonical ordinary ask execution
    - use published KB artifacts first when they already expose the needed evidence channels
    - treat the published KB as the primary evidence surface: inspect retrieved text, structure, notes, media, and artifact metadata first, then inspect cited `focus_render_assets` or render spans when the question is genuinely visual or layout-sensitive, and only then consider governed refresh or source fallback
    - keep approximate or unresolved reference notices explicit
@@ -114,8 +129,8 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 
 ## Notes
 
-- `ask` is the user-facing top-level workflow surface.
-- A reconciled native turn is not yet a legal canonical ask turn until runtime ownership is opened explicitly.
+- `ask` is the canonical skill at `skills/canonical/ask/SKILL.md` and the user-facing top-level workflow surface.
+- A reconciled native turn is still only host-side context until the matching canonical ask turn has been opened.
 - Native reconciliation does not write canonical conversation truth by default; it lands in native ledger and interaction-ingest first.
 - Canonical ask may later link to native-ledger evidence through explicit promotion or bridge metadata when the governed path requires it.
 - `grounded-answer` and `grounded-composition` remain inner specialist workflows.

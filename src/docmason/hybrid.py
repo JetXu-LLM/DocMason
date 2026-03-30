@@ -6,6 +6,7 @@ import hashlib
 import json
 import tempfile
 from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -660,6 +661,142 @@ def select_lane_b_batch(
             }
         )
     return selected_sources
+
+
+def lane_b_batch_signature(selected_sources: list[dict[str, Any]]) -> str:
+    """Return a stable signature for one bounded Lane B batch."""
+    normalized_sources: list[dict[str, Any]] = []
+    for source in selected_sources:
+        if not isinstance(source, dict):
+            continue
+        normalized_units: list[dict[str, Any]] = []
+        for unit in source.get("units", []):
+            if not isinstance(unit, dict):
+                continue
+            normalized_units.append(
+                {
+                    "unit_id": unit.get("unit_id"),
+                    "priority": unit.get("priority"),
+                    "required_overlay_slots": sorted(
+                        slot
+                        for slot in unit.get("required_overlay_slots", [])
+                        if isinstance(slot, str) and slot
+                    ),
+                    "target_artifact_ids": sorted(
+                        artifact_id
+                        for artifact_id in unit.get("target_artifact_ids", [])
+                        if isinstance(artifact_id, str) and artifact_id
+                    ),
+                }
+            )
+        normalized_sources.append(
+            {
+                "source_id": source.get("source_id"),
+                "source_fingerprint": source.get("source_fingerprint"),
+                "units": normalized_units,
+            }
+        )
+    return _stable_hash(normalized_sources)
+
+
+def lane_b_work_path(paths: WorkspacePaths, *, job_id: str) -> Path:
+    """Return the canonical work-packet path for one governed Lane B batch."""
+    return paths.shared_jobs_dir / job_id / "lane_b_work.json"
+
+
+def write_lane_b_work_packet(
+    paths: WorkspacePaths,
+    *,
+    job_id: str,
+    target: str,
+    staging_source_signature: str,
+    selected_sources: list[dict[str, Any]],
+) -> str:
+    """Persist the bounded staging-scoped Lane B work packet for a host agent."""
+    work_path = lane_b_work_path(paths, job_id=job_id)
+    write_json(
+        work_path,
+        {
+            "generated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+            "job_id": job_id,
+            "target": target,
+            "staging_source_signature": staging_source_signature,
+            "hybrid_work_path": str(paths.hybrid_work_path(target).relative_to(paths.root)),
+            "selection_limits": dict(LANE_B_NORMAL_LIMITS),
+            "selected_source_ids": [
+                source_id
+                for source_id in [source.get("source_id") for source in selected_sources]
+                if isinstance(source_id, str) and source_id
+            ],
+            "sources": [source for source in selected_sources if isinstance(source, dict)],
+        },
+    )
+    return str(work_path.relative_to(paths.root))
+
+
+def lane_b_batch_progress(
+    hybrid_work: dict[str, Any],
+    *,
+    selected_sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize whether one bounded Lane B batch is still unresolved."""
+    unit_status_lookup: dict[tuple[str, str], str] = {}
+    for source in hybrid_work.get("sources", []):
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("source_id") or "")
+        if not source_id:
+            continue
+        for unit in source.get("units", []):
+            if not isinstance(unit, dict):
+                continue
+            unit_id = str(unit.get("unit_id") or "")
+            if not unit_id:
+                continue
+            unit_status_lookup[(source_id, unit_id)] = str(
+                unit.get("coverage_status") or "candidate-prepared"
+            )
+
+    covered_unit_count = 0
+    blocked_unit_count = 0
+    remaining_unit_count = 0
+    unresolved_units: list[dict[str, str]] = []
+    selected_unit_count = 0
+    for source in selected_sources:
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("source_id") or "")
+        if not source_id:
+            continue
+        for unit in source.get("units", []):
+            if not isinstance(unit, dict):
+                continue
+            unit_id = str(unit.get("unit_id") or "")
+            if not unit_id:
+                continue
+            selected_unit_count += 1
+            coverage_status = unit_status_lookup.get((source_id, unit_id), "missing")
+            if coverage_status == "covered":
+                covered_unit_count += 1
+            elif coverage_status == "blocked":
+                blocked_unit_count += 1
+            else:
+                remaining_unit_count += 1
+                unresolved_units.append(
+                    {
+                        "source_id": source_id,
+                        "unit_id": unit_id,
+                        "coverage_status": coverage_status,
+                    }
+                )
+    return {
+        "selected_unit_count": selected_unit_count,
+        "covered_unit_count": covered_unit_count,
+        "blocked_unit_count": blocked_unit_count,
+        "remaining_unit_count": remaining_unit_count,
+        "resolved": remaining_unit_count == 0,
+        "unresolved_units": unresolved_units,
+    }
 
 
 def _artifact_render_asset_for_crop(

@@ -1657,8 +1657,13 @@ def merge_pending_interaction_trace(
 def should_merge_pending_interaction(
     question_domain: str | None,
     memory_profile: dict[str, Any] | None = None,
+    source_scope_policy: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether pending interaction overlay should participate for the query domain."""
+    if isinstance(source_scope_policy, dict) and not bool(
+        source_scope_policy.get("allow_pending_interaction_direct_support", True)
+    ):
+        return False
     if question_domain == "composition":
         return True
     if question_domain == "workspace-corpus":
@@ -3127,11 +3132,6 @@ def retrieve_corpus(
     target_root = paths.knowledge_target_dir(target)
     retrieval_data["graph_edges"] = read_json(target_root / "graph_edges.json").get("edges", [])
     retrieval_data["manifest"]["target_root"] = str(target_root)
-    if target == "current" and should_merge_pending_interaction(
-        effective_question_domain,
-        memory_profile=memory_profile,
-    ):
-        retrieval_data = merge_pending_interaction_overlay(paths, retrieval_data)
     reference_resolution = resolve_reference_query(
         query,
         source_records=retrieval_data["source_records"],
@@ -3143,6 +3143,23 @@ def retrieve_corpus(
         question_domain=effective_question_domain,
         reference_resolution=reference_resolution,
     )
+    if target == "current" and should_merge_pending_interaction(
+        effective_question_domain,
+        memory_profile=memory_profile,
+        source_scope_policy=source_scope_policy,
+    ):
+        retrieval_data = merge_pending_interaction_overlay(paths, retrieval_data)
+        reference_resolution = resolve_reference_query(
+            query,
+            source_records=retrieval_data["source_records"],
+            unit_records=retrieval_data["unit_records"],
+        )
+        source_scope_policy = build_source_scope_policy(
+            question=query,
+            question_class=None,
+            question_domain=effective_question_domain,
+            reference_resolution=reference_resolution,
+        )
     effective_source_ids = _effective_source_ids_from_reference(
         source_ids,
         reference_resolution,
@@ -3824,6 +3841,7 @@ def trace_answer_text(
                 answer_text,
                 question_domain=effective_question_domain,
             ),
+            source_scope_policy=effective_source_scope_policy,
         ):
             retrieval_data = merge_pending_interaction_overlay(paths, retrieval_data)
         retrieval_data_load_count = 1

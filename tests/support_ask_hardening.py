@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,6 +107,31 @@ class AskHardeningTests(unittest.TestCase):
         seed_self_contained_bootstrap_state(
             workspace,
             prepared_at="2026-03-17T00:00:00Z",
+        )
+
+    def run_host_snippet(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        script: str,
+        env_overrides: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env.update(env_overrides)
+        current_pythonpath = env.get("PYTHONPATH")
+        repo_source_root = str(ROOT / "src")
+        env["PYTHONPATH"] = (
+            repo_source_root
+            if not current_pythonpath
+            else f"{repo_source_root}{os.pathsep}{current_pythonpath}"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=workspace.root,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
         )
 
     def load_conversation(
@@ -2877,6 +2904,94 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(turn["question_domain"], "external-factual")
         self.assertEqual(turn["inner_workflow_id"], "grounded-answer")
         self.assertEqual(turn["analysis_origin"], "agent-supplied")
+
+    def test_prepare_ask_turn_blocks_compatible_host_python_snippet_entry(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        script = "\n".join(
+            [
+                "import json",
+                "from pathlib import Path",
+                "from docmason.ask import prepare_ask_turn",
+                "from docmason.project import WorkspacePaths",
+                f"workspace = WorkspacePaths(root=Path({str(workspace.root)!r}))",
+                "payload = prepare_ask_turn(",
+                "    workspace,",
+                f"    question={'What does Campaign Planning Brief say about architecture?'!r},",
+                f"    semantic_analysis={self.semantic_analysis(question_class='answer', question_domain='workspace-corpus')!r},",
+                ")",
+                "print(json.dumps(payload))",
+            ]
+        )
+        completed = self.run_host_snippet(
+            workspace,
+            script=script,
+            env_overrides={"CODEX_THREAD_ID": "thread-snippet-prepare"},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout.strip())
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(
+            payload["primary_issue_code"],
+            "noncanonical-host-lifecycle-helper-direct",
+        )
+        self.assertIn("hidden canonical ask integration path", payload["recommended_action"])
+        self.assertEqual(list(workspace.conversations_dir.glob("*.json")), [])
+
+    def test_complete_ask_turn_blocks_compatible_host_python_snippet_entry(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        turn = prepare_ask_turn(
+            workspace,
+            question="What does Campaign Planning Brief say about architecture?",
+            semantic_analysis=self.semantic_analysis(
+                question_class="answer",
+                question_domain="workspace-corpus",
+            ),
+        )
+
+        script = "\n".join(
+            [
+                "from pathlib import Path",
+                "from docmason.ask import complete_ask_turn",
+                "from docmason.project import WorkspacePaths",
+                f"workspace = WorkspacePaths(root=Path({str(workspace.root)!r}))",
+                "complete_ask_turn(",
+                "    workspace,",
+                f"    conversation_id={str(turn['conversation_id'])!r},",
+                f"    turn_id={str(turn['turn_id'])!r},",
+                "    inner_workflow_id='grounded-answer',",
+                ")",
+            ]
+        )
+        completed = self.run_host_snippet(
+            workspace,
+            script=script,
+            env_overrides={"CLAUDE_SESSION_ID": "thread-snippet-complete"},
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "noncanonical-host-lifecycle-helper-direct",
+            completed.stderr,
+        )
+        self.assertIn("hidden ask integration path", completed.stderr)
+        blocked_turn = load_turn_record(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+        )
+        self.assertIsNone(blocked_turn["committed_run_id"])
+        self.assertEqual(blocked_turn["status"], "prepared")
 
     def test_hidden_ask_open_commits_missing_source_boundary(self) -> None:
         workspace = self.make_workspace()

@@ -381,6 +381,11 @@ def lane_c_job_key(*, published_snapshot_id: str, source_id: str) -> str:
     return f"lane-c:{published_snapshot_id}:{source_id}"
 
 
+def lane_b_job_key(*, staging_source_signature: str, target: str = "staging") -> str:
+    """Return the canonical shared-job key for one staging-scoped Lane B batch."""
+    return f"lane-b:{target}:{staging_source_signature}"
+
+
 def _create_shared_job(
     paths: WorkspacePaths,
     *,

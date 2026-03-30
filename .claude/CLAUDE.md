@@ -8,6 +8,7 @@ This is a DocMason workspace. Read the full agent contract below.
 
 This file is the committed Claude Code entry surface for this repo.
 `AGENTS.md` is the baseline contract.
+Nothing below overrides `AGENTS.md`; it only gives Claude-specific entry guidance for the same contract.
 
 Bootstrap, repair, or `docmason sync-adapters` may generate repo-local Claude helpers such as:
 
@@ -16,12 +17,14 @@ Bootstrap, repair, or `docmason sync-adapters` may generate repo-local Claude he
 
 Treat those as generated local helpers, not authored instructions.
 Do not hand-edit them, create global skill links, or maintain parallel skill copies.
-Do not treat low-level Python helpers such as `docmason.ask.prepare_ask_turn()` or
-`docmason.ask.complete_ask_turn()` as preferred host entrypoints.
+Do not treat low-level Python helpers in `docmason.ask` as preferred host entrypoints.
 They are internal lifecycle primitives behind the canonical `ask` workflow contract.
-For ordinary ask execution, use the repo-provided hidden canonical ask integration
-path rather than reverse engineering `ask.py` or substituting `retrieve` / `trace`
-for canonical ask completion.
+The exact Claude-side execution wiring belongs in the generated adapter layer, not in this committed entry file.
+For ordinary ask execution, rely on the repo-provided Claude adapter guidance,
+generated helpers, and committed hooks rather than reverse engineering
+`ask.py`.
+Do not reverse engineer `ask.py` or substitute `retrieve` / `trace` for
+canonical ask completion.
 Do not return a final business answer unless the canonical turn has already reached
 legal completion or governed boundary closure.
 

@@ -24,6 +24,7 @@ from docmason.commands import (
     validate_knowledge_base,
 )
 from docmason.coordination import lease_dir, workspace_lease
+from docmason.control_plane import load_shared_job
 from docmason.evidence_artifacts import compile_pptx_visual_artifacts
 from docmason.hybrid import (
     required_overlay_slots,
@@ -41,7 +42,8 @@ from docmason.knowledge import (
     source_artifact_contract_complete,
 )
 from docmason.project import WorkspacePaths, read_json, write_json
-from docmason.semantic_overlays import semantic_overlay_candidates
+from docmason.semantic_overlays import semantic_overlay_candidates, write_semantic_overlay
+from docmason.versioning import apply_snapshot_retention
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 
@@ -117,6 +119,29 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         page.insert_text((300, 92), "Revenue")
         document.save(path)
         document.close()
+
+    def create_pdf_with_full_page_image(self, path: Path) -> None:
+        try:
+            import pymupdf  # type: ignore[import-not-found]
+        except ImportError:  # pragma: no cover - compatibility import
+            import fitz as pymupdf  # type: ignore[import-not-found]
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            image_path = Path(tempdir_name) / "page.png"
+            image = Image.new("RGB", (1200, 1600), color=(245, 245, 245))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((80, 120, 1120, 1480), outline=(32, 64, 128), width=14)
+            draw.rectangle((170, 300, 1030, 540), fill=(210, 225, 245))
+            draw.rectangle((170, 660, 1030, 1180), fill=(225, 235, 250))
+            draw.rectangle((170, 1230, 760, 1380), fill=(235, 240, 250))
+            image.save(image_path)
+
+            document = pymupdf.open()
+            page = document.new_page(width=595, height=842)
+            page.insert_image(page.rect, filename=str(image_path))
+            document.save(path)
+            document.close()
 
     def create_pdf_with_sections_and_tables(self, path: Path) -> None:
         try:
@@ -397,6 +422,34 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
             ]
         )
         (source_dir / "summary.md").write_text(summary, encoding="utf-8")
+
+    def seed_snapshot_version(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        snapshot_id: str,
+        published_at: str,
+        source_signature: str,
+    ) -> Path:
+        snapshot_dir = workspace.knowledge_version_dir(snapshot_id)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        write_json(
+            snapshot_dir / "publish_manifest.json",
+            {
+                "snapshot_id": snapshot_id,
+                "published_at": published_at,
+                "validation_status": "valid",
+                "published_source_signature": source_signature,
+            },
+        )
+        write_json(
+            snapshot_dir / "validation_report.json",
+            {
+                "status": "valid",
+                "source_signature": source_signature,
+            },
+        )
+        return snapshot_dir
 
     def test_sync_pdf_only_creates_staging_and_pending_synthesis(self) -> None:
         workspace = self.make_workspace()
@@ -1344,8 +1397,13 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertEqual(validation.payload["validation_status"], "valid")
 
         published = sync_workspace(workspace)
-        self.assertEqual(published.exit_code, 0)
+        self.assertEqual(published.exit_code, 2)
         self.assertEqual(published.payload["sync_status"], "valid")
+        self.assertIn(
+            published.payload["hybrid_enrichment"]["mode"],
+            {"candidate-prepared", "partially-covered"},
+        )
+        self.assertTrue(published.payload["lane_b_follow_up"]["work_path"])
         self.assertTrue(workspace.current_publish_manifest_path.exists())
         self.assertTrue((workspace.knowledge_base_dir / "current-pointer.json").exists())
         self.assertTrue(workspace.knowledge_base_current_dir.is_symlink())
@@ -1368,11 +1426,188 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertFalse(str(current_publish_manifest.get("snapshot_id")).startswith("unknown-"))
         self.assertEqual(
             current_validation.get("source_signature"),
-            current_publish_manifest.get("source_signature"),
+            current_publish_manifest.get("published_source_signature"),
         )
 
         status = status_workspace(workspace, editable_install_probe=self.ready_probe)
         self.assertEqual(status.payload["stage"], "knowledge-base-present")
+
+    def test_sync_stages_governed_lane_b_follow_up_batch(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        source_id = pending.payload["pending_sources"][0]["source_id"]
+        source_dir = workspace.knowledge_base_staging_dir / "sources" / source_id
+        self.seed_agent_outputs(source_dir)
+
+        published = sync_workspace(workspace)
+
+        self.assertEqual(published.payload["sync_status"], "valid")
+        self.assertEqual(
+            published.payload["hybrid_enrichment"]["mode"],
+            "candidate-prepared",
+        )
+        follow_up = published.payload["lane_b_follow_up"]
+        follow_up_summary = published.payload["lane_b_follow_up_summary"]
+        self.assertTrue(follow_up["triggered"])
+        self.assertEqual(follow_up["state"], "running")
+        self.assertEqual(follow_up_summary["state"], "running")
+        self.assertGreaterEqual(follow_up_summary["selected_source_count"], 1)
+        self.assertTrue((workspace.root / follow_up["work_path"]).exists())
+        self.assertLessEqual(follow_up["selected_unit_count"], 12)
+        self.assertLessEqual(len(follow_up["selected_source_ids"]), 4)
+        manifest = load_shared_job(workspace, str(follow_up["job_id"]))
+        self.assertEqual(manifest["job_family"], "lane-b")
+        self.assertEqual(manifest["scope"]["target"], "staging")
+        self.assertIn("Lane B follow-up: state=running", "\n".join(published.lines))
+
+    def test_sync_settles_governed_lane_b_follow_up_after_overlay_write(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        source_id = pending.payload["pending_sources"][0]["source_id"]
+        source_dir = workspace.knowledge_base_staging_dir / "sources" / source_id
+        self.seed_agent_outputs(source_dir)
+
+        first_sync = sync_workspace(workspace)
+        follow_up = first_sync.payload["lane_b_follow_up"]
+        work_packet = read_json(workspace.root / follow_up["work_path"])
+        selected_source = work_packet["sources"][0]
+
+        for unit in selected_source["units"]:
+            focus_assets = [
+                asset
+                for asset in unit.get("target_focus_render_assets", [])
+                if isinstance(asset, str) and asset
+            ]
+            render_assets = [
+                asset
+                for asset in unit.get("target_render_assets", [])
+                if isinstance(asset, str) and asset
+            ]
+            consumed_inputs = {}
+            if focus_assets:
+                consumed_inputs["focus_render_assets"] = focus_assets
+            if render_assets:
+                consumed_inputs["render_assets"] = render_assets
+            write_semantic_overlay(
+                source_dir,
+                {
+                    "source_id": source_id,
+                    "unit_id": unit["unit_id"],
+                    "eligible_reason": unit.get("eligible_reason") or "image-only-page",
+                    "consumed_inputs": consumed_inputs,
+                    "semantic_labels": [
+                        {
+                            "label": slot,
+                            "text": f"Covered {slot} for the staged multimodal unit.",
+                            "confidence": "high",
+                        }
+                        for slot in unit.get("required_overlay_slots", [])
+                    ],
+                    "artifact_annotations": [],
+                    "cross_region_relations": [],
+                    "uncertainty_notes": [],
+                },
+            )
+
+        second_sync = sync_workspace(workspace)
+
+        self.assertEqual(second_sync.payload["hybrid_enrichment"]["mode"], "covered")
+        settled = second_sync.payload["lane_b_follow_up"]["settled_job"]
+        self.assertEqual(settled["job_id"], follow_up["job_id"])
+        self.assertEqual(load_shared_job(workspace, str(follow_up["job_id"]))["status"], "completed")
+
+    def test_snapshot_retention_keeps_current_run_baseline_and_review_pins(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_snapshot_version(
+            workspace,
+            snapshot_id="snapshot-current",
+            published_at="2026-03-28T00:00:00Z",
+            source_signature="sig-current",
+        )
+        self.seed_snapshot_version(
+            workspace,
+            snapshot_id="snapshot-run",
+            published_at="2026-03-27T00:00:00Z",
+            source_signature="sig-run",
+        )
+        self.seed_snapshot_version(
+            workspace,
+            snapshot_id="snapshot-baseline",
+            published_at="2026-03-26T00:00:00Z",
+            source_signature="sig-baseline",
+        )
+        self.seed_snapshot_version(
+            workspace,
+            snapshot_id="snapshot-review",
+            published_at="2026-03-25T00:00:00Z",
+            source_signature="sig-review",
+        )
+        self.seed_snapshot_version(
+            workspace,
+            snapshot_id="snapshot-recent-a",
+            published_at="2026-03-24T00:00:00Z",
+            source_signature="sig-recent-a",
+        )
+        self.seed_snapshot_version(
+            workspace,
+            snapshot_id="snapshot-recent-b",
+            published_at="2026-03-23T00:00:00Z",
+            source_signature="sig-recent-b",
+        )
+        self.seed_snapshot_version(
+            workspace,
+            snapshot_id="snapshot-expired",
+            published_at="2026-03-10T00:00:00Z",
+            source_signature="sig-expired",
+        )
+        write_json(
+            workspace.knowledge_base_dir / "current-pointer.json",
+            {"snapshot_id": "snapshot-current"},
+        )
+        write_json(
+            workspace.runs_dir / "run-1" / "state.json",
+            {
+                "status": "active",
+                "version_context": {"published_snapshot_id": "snapshot-run"},
+            },
+        )
+        write_json(
+            workspace.eval_baseline_path("broad"),
+            {"version_context": {"published_snapshot_id": "snapshot-baseline"}},
+        )
+        write_json(
+            workspace.snapshot_pins_path,
+            {
+                "pins": [
+                    {
+                        "snapshot_id": "snapshot-review",
+                        "pin_kind": "review-case",
+                        "pin_id": "case-1",
+                    }
+                ]
+            },
+        )
+
+        retention = apply_snapshot_retention(workspace)
+
+        self.assertTrue(workspace.knowledge_version_dir("snapshot-current").exists())
+        self.assertTrue(workspace.knowledge_version_dir("snapshot-run").exists())
+        self.assertTrue(workspace.knowledge_version_dir("snapshot-baseline").exists())
+        self.assertTrue(workspace.knowledge_version_dir("snapshot-review").exists())
+        self.assertTrue(workspace.knowledge_version_dir("snapshot-recent-a").exists())
+        self.assertTrue(workspace.knowledge_version_dir("snapshot-recent-b").exists())
+        self.assertFalse(workspace.knowledge_version_dir("snapshot-expired").exists())
+        self.assertIn("snapshot-expired", retention["deleted_snapshot_ids"])
+        review_entry = next(
+            item for item in retention["snapshots"] if item["snapshot_id"] == "snapshot-review"
+        )
+        self.assertIn("review-case:case-1", review_entry["pin_reasons"])
 
     def test_validate_rejects_placeholder_knowledge(self) -> None:
         workspace = self.make_workspace()

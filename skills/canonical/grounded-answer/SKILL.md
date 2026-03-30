@@ -14,7 +14,6 @@ Ordinary users should not need to name this workflow explicitly before asking bu
 
 - `grounded-answer` is not a free-standing ordinary front door.
 - Start only from canonical ask turn metadata and canonical ask runtime ownership.
-- Compatible hosts should enter through the repo-provided hidden canonical ask integration path rather than stitching `prepare_ask_turn()` / `complete_ask_turn()` manually.
 - If the current turn is missing explicit canonical ask ownership, stop and route back to `ask`.
 
 ## Required Capabilities

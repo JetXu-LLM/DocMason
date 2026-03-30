@@ -153,7 +153,9 @@ def _decode_text_payload(part: EmailMessage) -> tuple[str, list[str]]:
         return payload.decode(charset), warnings
     except (LookupError, UnicodeDecodeError):
         warnings.append(
-            f"Decoded `{part.get_content_type()}` with replacement fallback; some characters may be degraded."
+            "Decoded "
+            f"`{part.get_content_type()}` with replacement fallback; some characters may be "
+            "degraded."
         )
         return payload.decode("utf-8", errors="replace"), warnings
 
@@ -310,7 +312,7 @@ def parse_email_source(source_path: Path) -> ParsedEmailSource:
     html_parts: list[str] = []
     attachments: list[ParsedEmailAttachment] = []
 
-    for ordinal, part in enumerate(message.walk(), start=1):
+    for _ordinal, part in enumerate(message.walk(), start=1):
         content_type = part.get_content_type().lower()
         disposition = (part.get_content_disposition() or "").lower()
         if part.is_multipart() and content_type != "message/rfc822":
@@ -391,7 +393,9 @@ def parse_email_source(source_path: Path) -> ParsedEmailSource:
         f"Date: {email_metadata['date']}".strip(),
         f"Message-ID: {email_metadata['message_id']}".strip(),
     ]
-    header_text = "\n".join(line for line in header_lines if line and not line.endswith(":")).strip()
+    header_text = "\n".join(
+        line for line in header_lines if line and not line.endswith(":")
+    ).strip()
     units.append(
         ParsedUnit(
             unit_id="header-001",

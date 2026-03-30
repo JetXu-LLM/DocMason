@@ -211,6 +211,12 @@ class FoundationAndContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("`ask` remains the only ordinary natural-language front door", agents)
+        self.assertIn(
+            "default top-level workflow for a new ordinary user request in this workspace unless the request is clearly explicit operator work",
+            agents,
+        )
+        self.assertIn("`ask` is the canonical skill at `skills/canonical/ask/SKILL.md`", agents)
+        self.assertIn("user-facing top-level workflow for ordinary natural-language requests", agents)
         self.assertIn("`rg --files`", agents)
         self.assertIn("do not guess how this repository should map onto your platform", agents)
         self.assertIn("what you are, or which assistant is operating here", agents)
@@ -218,10 +224,20 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("Final user-facing replies should normally match the user's language", agents)
         self.assertIn("Do not commit or expose private corpus inputs", agents)
         self.assertIn("inspect the matching canonical skill instead of guessing from memory", agents)
+        self.assertIn("after resolving symlinks", agents)
+        self.assertIn(
+            "Use the smallest evidence scope that is sufficient to answer correctly and truthfully",
+            agents,
+        )
         self.assertIn(
             "ordinary natural-language questions still enter through canonical `ask`",
             agents,
         )
+        self.assertNotIn("`docmason _ask`", agents)
+        self.assertNotIn("entered honestly", agents)
+        self.assertNotIn("pretending ordinary answer completion", agents)
+        self.assertNotIn("Delegation is coaching, not law", agents)
+        self.assertNotIn("workflow entry surface, not a public CLI command", agents)
         self.assertNotIn("## Procedure", agents)
         self.assertNotIn("## Completion Signal", agents)
         self.assertLess(
@@ -233,15 +249,44 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("Reading this skill is not legal ask execution.", ask_skill)
         self.assertIn("Native-thread reconciliation is not legal ask execution.", ask_skill)
         self.assertIn("The routed inner workflow owns the deeper evidence loop.", ask_skill)
+        self.assertIn("canonical skill at `skills/canonical/ask/SKILL.md`", ask_skill)
+        self.assertIn(
+            "default top-level workflow for a new ordinary user request",
+            ask_skill,
+        )
+        self.assertNotIn("`docmason _ask`", ask_skill)
+        self.assertIn(
+            "smallest evidence basis that can support the answer correctly and truthfully",
+            ask_skill,
+        )
+        self.assertIn(
+            "must choose the most appropriate one of the following 5 inner workflows",
+            ask_skill,
+        )
         self.assertIn("keep one concise `route_reason`", ask_skill)
         self.assertIn("route to `knowledge-base-sync`", ask_skill)
         self.assertIn("native ledger", ask_skill)
+        self.assertNotIn("prepare_ask_turn()", ask_skill)
+        self.assertNotIn("complete_ask_turn()", ask_skill)
+        self.assertNotIn("default first-contact entry surface", ask_skill)
+        self.assertNotIn(
+            "route only after canonical ask runtime ownership is already open",
+            ask_skill,
+        )
+        self.assertNotIn(
+            "if canonical ask cannot be opened honestly, stop at that boundary instead of routing ad hoc from native-thread or raw-tool state",
+            ask_skill,
+        )
         self.assertNotIn(
             "upgrade that live turn into canonical ask ownership when reconciliation created it first",
             ask_skill,
         )
         self.assertNotIn("recommended_hybrid_targets", ask_skill)
         self.assertNotIn("Lane C owner", ask_skill)
+        self.assertNotIn("hidden canonical ask integration path", answer_skill)
+        self.assertNotIn("hidden canonical ask integration path", composition_skill)
+        self.assertNotIn("`docmason _ask`", answer_skill)
+        self.assertNotIn("`docmason _ask`", composition_skill)
         self.assertIn("not a free-standing ordinary front door", answer_skill)
         self.assertIn("canonical ask runtime ownership", answer_skill)
         self.assertIn("never a free-standing ordinary front door", composition_skill)

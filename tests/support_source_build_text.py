@@ -461,9 +461,13 @@ class SourceBuildTextTests(unittest.TestCase):
         self.assertIn("partially readable", interaction_check["detail"])
         self.assertTrue(retrieval["results"])
         self.assertEqual(retrieval["results"][0]["source_family"], "corpus")
-        self.assertTrue(turn["auto_sync_triggered"])
-        self.assertEqual(turn["auto_sync_summary"]["status"], "valid")
-        self.assertEqual(turn["pending_interaction_count"], 0)
+        self.assertFalse(turn["auto_sync_triggered"])
+        self.assertTrue(turn["interaction_sync_suggested"])
+        self.assertIn(
+            "Pending interaction-derived runtime state could not be read completely",
+            turn["freshness_notice"],
+        )
+        self.assertEqual(turn["pending_interaction_count"], 1)
 
     def test_sync_restages_missing_pending_text_source_directories(self) -> None:
         workspace = self.make_workspace()

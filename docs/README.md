@@ -3,7 +3,7 @@
 `README.md` is the primary user-facing document.
 It should sell the project honestly, explain the value quickly, and show the default onboarding path.
 
-`AGENTS.md` is the minimal first-contact contract for agents entering the repository.
+`AGENTS.md` is the minimal top-level routing contract for agents entering the repository.
 Detailed workflow procedures belong in `skills/canonical/` and selected deeper reference pages, not in `AGENTS.md` itself.
 
 This `docs/` tree is the public deeper documentation layer for DocMason.

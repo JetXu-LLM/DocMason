@@ -21,9 +21,10 @@ If the agent cannot inspect rendered images, stop and explain that the environme
 ## Procedure
 
 1. Read `knowledge_base/staging/pending_work.json`.
-2. If `knowledge_base/staging/hybrid_work.json` exists and contains the staged source you are handling, treat that file as the authoritative hard-artifact overlay queue.
-3. Work only on the staged items listed there. Treat each pending source or interaction memory as an independent bounded write scope.
-4. For each pending item, open:
+2. If a governed Lane B work packet is present under `runtime/control_plane/shared_jobs/<job_id>/lane_b_work.json`, treat that packet as the bounded authoritative source-selection scope for this pass.
+3. If `knowledge_base/staging/hybrid_work.json` exists and contains the staged source you are handling, treat that file as the authoritative hard-artifact overlay queue inside that bounded scope.
+4. Work only on the staged items listed there. Treat each pending source or interaction memory as an independent bounded write scope.
+5. For each pending item, open:
    - `work_item.json`
    - `source_manifest.json`
    - `evidence_manifest.json`
@@ -37,17 +38,17 @@ If the agent cannot inspect rendered images, stop and explain that the environme
    - extracted text and structure files
    - rendered assets referenced by the evidence manifest
    - when present, the staged interaction-specific context file such as `interaction_context.json`
-5. Build the source semantics from the richest published evidence available instead of defaulting to flattened text:
+6. Build the source semantics from the richest published evidence available instead of defaulting to flattened text:
    - for spreadsheets, prefer workbook, sheet, table, chart, metric, dimension, time-axis, hidden-sheet, and formula summaries over raw cell dumps
    - for PDF and PPTX, prefer section paths, captions, continuation links, procedure spans, region roles, charts, tables, pictures, connectors, groups, and major regions over page-level text alone
    - when the real support is artifact-level, include `artifact_id` in the citation instead of citing only the parent `unit_id`
-6. Write `knowledge.json` with the required bilingual fields and only cite real evidence-unit IDs from the matching source.
-7. Write `summary.md` with:
+7. Write `knowledge.json` with the required bilingual fields and only cite real evidence-unit IDs from the matching source.
+8. Write `summary.md` with:
    - `# <title>`
    - a line that mentions the source ID
    - `## English Summary`
    - `## Source-Language Summary`
-8. When the staged source includes high-value hybrid candidates and the environment can inspect renders, write additive `semantic_overlay/<unit-id>.json` sidecars only for the queued units in `hybrid_work.json`.
+9. When the staged source includes high-value hybrid candidates and the environment can inspect renders, write additive `semantic_overlay/<unit-id>.json` sidecars only for the queued units in `hybrid_work.json`.
    - prefer overlay work where deterministic structure is already rich but cross-region or multimodal semantics are still missing
    - keep the hard-artifact boundary intact:
      - use the queued `target_artifact_ids`
@@ -63,12 +64,12 @@ If the agent cannot inspect rendered images, stop and explain that the environme
      - `unit_evidence_fingerprint`
      - `covered_slots`
      - `blocked_slots`
-9. Avoid placeholders, speculative citations, and unsupported related-source links.
-10. Treat `derived_affordances.json` as a published sidecar rather than scratch output.
+10. Avoid placeholders, speculative citations, and unsupported related-source links.
+11. Treat `derived_affordances.json` as a published sidecar rather than scratch output.
    - the baseline affordance sidecar is generated deterministically by the repo
    - if you enrich it, keep descriptors compact, evidence-backed, grouped by channel, and explicitly derived rather than source-authored fact
-11. When evidence is weak, say so explicitly in `known_gaps`, `ambiguities`, confidence notes, or overlay uncertainty notes instead of inventing certainty.
-12. After all assigned staged sources are complete, return control to the main agent so it can rerun `docmason sync --json` or `docmason validate-kb --json`.
+12. When evidence is weak, say so explicitly in `known_gaps`, `ambiguities`, confidence notes, or overlay uncertainty notes instead of inventing certainty.
+13. After all assigned staged sources are complete, return control to the main agent so it can rerun `docmason sync --json` or `docmason validate-kb --json`.
 
 ## Escalation Rules
 

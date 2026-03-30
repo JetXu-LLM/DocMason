@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from collections import Counter, defaultdict
 from importlib import import_module

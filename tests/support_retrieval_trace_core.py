@@ -443,6 +443,42 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.assertIn("publish", second.payload["phase_costs"])
         self.assertIn("projection_state", second.payload)
         self.assertFalse(second.payload["projection_state"]["dirty"])
+        self.assertEqual(second.payload["rebuild_telemetry"]["rebuild_cause"], "none")
+        self.assertFalse(second.payload["rebuild_telemetry"]["scoped_contract_repair_used"])
+        self.assertIn("Rebuild telemetry: cause=none", "\n".join(second.lines))
+
+    def test_sync_repairs_staging_artifact_contract_without_full_rebuild(self) -> None:
+        from docmason.commands import sync_workspace
+
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        broken_source_dir = workspace.knowledge_base_staging_dir / "sources" / source_ids[0]
+        evidence_manifest_path = broken_source_dir / "evidence_manifest.json"
+        evidence_manifest_path.unlink()
+
+        repaired = sync_workspace(workspace, autonomous=False)
+
+        self.assertEqual(repaired.payload["sync_status"], "valid")
+        self.assertTrue(repaired.payload["publish_skipped"])
+        self.assertTrue(evidence_manifest_path.exists())
+        self.assertEqual(
+            repaired.payload["rebuild_telemetry"]["rebuild_cause"],
+            "artifact-contract-backfill",
+        )
+        self.assertEqual(
+            repaired.payload["rebuild_telemetry"]["contract_backfill_source_count"],
+            1,
+        )
+        self.assertTrue(repaired.payload["rebuild_telemetry"]["scoped_contract_repair_used"])
+        self.assertEqual(repaired.payload["build_stats"]["scoped_repaired_sources"], 1)
+        self.assertIn(
+            "Rebuild telemetry: cause=artifact-contract-backfill",
+            "\n".join(repaired.lines),
+        )
 
     def test_modified_source_preserves_semantic_files_but_marks_them_stale(self) -> None:
         from docmason.commands import sync_workspace

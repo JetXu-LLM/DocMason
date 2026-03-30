@@ -30,7 +30,17 @@ from .affordances import (
     validate_derived_affordances,
 )
 from .artifacts import validate_artifact_index, validate_pdf_document
-from .control_plane import repair_stale_shared_jobs
+from .control_plane import (
+    block_shared_job,
+    complete_shared_job,
+    ensure_shared_job,
+    lane_b_job_key,
+    load_shared_job,
+    load_shared_jobs_index,
+    repair_stale_shared_jobs,
+    shared_job_control_plane_payload,
+    shared_job_is_active,
+)
 from .coordination import workspace_lease
 from .email_sources import parse_email_source
 from .evidence_artifacts import (
@@ -43,8 +53,13 @@ from .evidence_artifacts import (
 from .hybrid import (
     build_source_hybrid_packet,
     focus_render_contract_complete,
+    lane_b_batch_progress,
+    lane_b_batch_signature,
+    lane_b_work_path,
     materialize_focus_render_assets,
+    select_lane_b_batch,
     summarize_hybrid_work,
+    write_lane_b_work_packet,
 )
 from .interaction import (
     build_promoted_interaction_memories,
@@ -85,7 +100,7 @@ from .source_references import (
     enrich_source_manifest_reference_fields,
 )
 from .text_sources import ParsedUnit, parse_text_source
-from .versioning import publish_staging_snapshot
+from .versioning import apply_snapshot_retention, publish_staging_snapshot
 
 PLACEHOLDER_TERMS = ("todo", "tbd", "placeholder", "lorem ipsum", "fill in")
 DOCX_ORDERED_STEP_PATTERN = re.compile(r"^\s*(\d+)(?:[.)-])\s+")
@@ -3297,40 +3312,185 @@ def staging_source_artifacts_complete(
     active_sources: list[dict[str, Any]],
 ) -> bool:
     """Return whether staging still contains the required per-source artifacts."""
+    return not staging_incomplete_source_ids(paths, active_sources)
+
+
+def staging_incomplete_source_ids(
+    paths: WorkspacePaths,
+    active_sources: list[dict[str, Any]],
+) -> list[str]:
+    """Return active staging source IDs that fail the current per-source artifact contract."""
     staged_sources_dir = paths.knowledge_base_staging_dir / "sources"
     if not staged_sources_dir.exists():
-        return False
-    seen_source_ids: set[str] = set()
+        return []
+    incomplete_source_ids: list[str] = []
+    completeness_by_source_id: dict[str, bool] = {}
 
     def source_dir_complete(source_id: str) -> bool:
-        if source_id in seen_source_ids:
-            return True
-        seen_source_ids.add(source_id)
+        if source_id in completeness_by_source_id:
+            return completeness_by_source_id[source_id]
+        completeness_by_source_id[source_id] = False
         source_dir = staged_sources_dir / source_id
+        complete = True
         if not source_dir.exists():
-            return False
-        if not (source_dir / "source_manifest.json").exists():
-            return False
-        if not (source_dir / "evidence_manifest.json").exists():
-            return False
-        source_manifest = read_json(source_dir / "source_manifest.json")
-        if not source_artifact_contract_complete(
-            source_dir,
-            document_type=str(source_manifest.get("document_type") or "unknown"),
-        ):
-            return False
-        for child_source_id in source_manifest.get("child_source_ids", []):
-            if not isinstance(child_source_id, str) or not child_source_id:
-                return False
-            if not source_dir_complete(child_source_id):
-                return False
-        return True
+            complete = False
+        elif not (source_dir / "source_manifest.json").exists():
+            complete = False
+        elif not (source_dir / "evidence_manifest.json").exists():
+            complete = False
+        else:
+            source_manifest = read_json(source_dir / "source_manifest.json")
+            if not source_artifact_contract_complete(
+                source_dir,
+                document_type=str(source_manifest.get("document_type") or "unknown"),
+            ):
+                complete = False
+            child_source_ids = source_manifest.get("child_source_ids", [])
+            if not isinstance(child_source_ids, list):
+                complete = False
+            else:
+                for child_source_id in child_source_ids:
+                    if not isinstance(child_source_id, str) or not child_source_id:
+                        complete = False
+                        continue
+                    if not source_dir_complete(child_source_id):
+                        complete = False
+        completeness_by_source_id[source_id] = complete
+        if not complete and source_id not in incomplete_source_ids:
+            incomplete_source_ids.append(source_id)
+        return complete
 
     for source_entry in active_sources:
         source_id = str(source_entry.get("source_id") or "")
-        if not source_id or not source_dir_complete(source_id):
-            return False
-    return True
+        if source_id:
+            source_dir_complete(source_id)
+    return incomplete_source_ids
+
+
+def repair_staging_artifact_contract(
+    paths: WorkspacePaths,
+    active_sources: list[dict[str, Any]],
+    *,
+    repair_source_ids: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, dict[str, int]] | None:
+    """Repair staging artifact-contract gaps by copying complete prior source trees in place."""
+    staged_sources_dir = paths.knowledge_base_staging_dir / "sources"
+    if not staged_sources_dir.exists():
+        return None
+    active_lookup = {
+        str(source["source_id"]): source
+        for source in active_sources
+        if isinstance(source.get("source_id"), str)
+    }
+    normalized_repair_source_ids = list(
+        dict.fromkeys(
+            source_id
+            for source_id in repair_source_ids
+            if isinstance(source_id, str) and source_id
+        )
+    )
+    repaired_active_source_count = 0
+
+    for source_id in normalized_repair_source_ids:
+        previous_source_dir = locate_previous_source_dir(paths, source_id)
+        if previous_source_dir is None:
+            return None
+        source_entry = active_lookup.get(source_id, {})
+        previous_manifest = read_json(previous_source_dir / "source_manifest.json")
+        document_type = str(
+            source_entry.get("document_type")
+            or previous_manifest.get("document_type")
+            or "unknown"
+        )
+        if not source_artifact_contract_complete(
+            previous_source_dir,
+            document_type=document_type,
+        ):
+            return None
+
+    for source_id in normalized_repair_source_ids:
+        previous_source_dir = locate_previous_source_dir(paths, source_id)
+        if previous_source_dir is None:
+            return None
+        source_dir = staged_sources_dir / source_id
+        if source_dir.exists():
+            shutil.rmtree(source_dir)
+        shutil.copytree(previous_source_dir, source_dir)
+        if source_id in active_lookup:
+            repaired_active_source_count += 1
+
+    refresh_staging_source_metadata(paths, active_sources)
+    catalog_sources, source_summaries, ambiguous_match = write_staging_root_artifacts(
+        paths,
+        active_sources,
+    )
+    return (
+        catalog_sources,
+        source_summaries,
+        ambiguous_match,
+        {
+            "reused_sources": max(len(active_sources) - repaired_active_source_count, 0),
+            "rebuilt_sources": 0,
+            "scoped_repaired_sources": repaired_active_source_count,
+        },
+    )
+
+
+def classify_rebuild_telemetry(
+    paths: WorkspacePaths,
+    *,
+    current_signature: str,
+    state: dict[str, Any],
+    active_sources: list[dict[str, Any]],
+    change_set: dict[str, Any],
+    ambiguous_match: bool,
+    interaction_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify why the current sync does or does not need staging rebuild work."""
+    change_stats = change_set.get("stats", {}) if isinstance(change_set, dict) else {}
+    dirty_source_count = sum(
+        int(change_stats.get(key, 0) or 0)
+        for key in ("added", "modified", "moved_or_renamed", "deleted", "ambiguous")
+    )
+    contract_backfill_source_ids = (
+        staging_incomplete_source_ids(paths, active_sources)
+        if paths.knowledge_base_staging_dir.exists()
+        else []
+    )
+    pending_promotion_count = int(
+        interaction_snapshot.get("pending_promotion_count", 0) or 0
+    )
+    interaction_promotion_only = bool(
+        pending_promotion_count > 0
+        and dirty_source_count == 0
+        and not ambiguous_match
+        and not contract_backfill_source_ids
+        and state.get("published_source_signature") == current_signature
+    )
+    if not paths.knowledge_base_staging_dir.exists():
+        rebuild_cause = "missing-staging"
+    elif ambiguous_match or int(change_stats.get("ambiguous", 0) or 0) > 0:
+        rebuild_cause = "ambiguous-match"
+    elif dirty_source_count > 0:
+        rebuild_cause = "source-delta"
+    elif state.get("staging_source_signature") != current_signature:
+        rebuild_cause = "staging-signature-drift"
+    elif contract_backfill_source_ids:
+        rebuild_cause = "artifact-contract-backfill"
+    elif interaction_promotion_only:
+        rebuild_cause = "interaction-promotion-only"
+    else:
+        rebuild_cause = "none"
+    return {
+        "rebuild_cause": rebuild_cause,
+        "dirty_source_count": dirty_source_count,
+        "contract_backfill_source_count": len(contract_backfill_source_ids),
+        "contract_backfill_source_ids": contract_backfill_source_ids,
+        "interaction_promotion_only": interaction_promotion_only,
+        "pending_promotion_count": pending_promotion_count,
+        "scoped_contract_repair_used": False,
+        "scoped_contract_repair_source_count": 0,
+    }
 
 
 def write_staging_root_artifacts(
@@ -5699,6 +5859,284 @@ def publish_staging(paths: WorkspacePaths, validation_report: dict[str, Any]) ->
     )
 
 
+def _effective_lane_b_owner(owner: dict[str, Any] | None) -> dict[str, Any]:
+    if isinstance(owner, dict) and isinstance(owner.get("id"), str) and owner.get("id"):
+        return owner
+    return {
+        "kind": "command",
+        "id": f"lane-b-follow-up:{uuid.uuid4()}",
+        "pid": os.getpid(),
+    }
+
+
+def _selected_unit_count(selected_sources: list[dict[str, Any]]) -> int:
+    count = 0
+    for source in selected_sources:
+        if not isinstance(source, dict):
+            continue
+        for unit in source.get("units", []):
+            if isinstance(unit, dict):
+                count += 1
+    return count
+
+
+def summarize_lane_b_follow_up(follow_up: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a compact status summary for the latest governed Lane B follow-up batch."""
+    if not isinstance(follow_up, dict) or not follow_up:
+        return {}
+    selected_source_ids = [
+        source_id
+        for source_id in follow_up.get("selected_source_ids", [])
+        if isinstance(source_id, str) and source_id
+    ]
+    selected_sources = [
+        source
+        for source in follow_up.get("selected_sources", [])
+        if isinstance(source, dict)
+    ]
+    selected_unit_count = int(
+        follow_up.get("selected_unit_count")
+        or _selected_unit_count(selected_sources)
+        or 0
+    )
+    summary = {
+        "state": str(follow_up.get("state") or "unknown"),
+        "job_id": str(follow_up.get("job_id") or "") or None,
+        "work_path": str(follow_up.get("work_path") or "") or None,
+        "selected_source_count": len(selected_source_ids) or len(selected_sources),
+        "selected_unit_count": selected_unit_count,
+        "covered_unit_count": 0,
+        "blocked_unit_count": 0,
+        "remaining_unit_count": selected_unit_count,
+    }
+    settled_job = follow_up.get("settled_job")
+    if isinstance(settled_job, dict):
+        summary["covered_unit_count"] = int(settled_job.get("covered_unit_count", 0) or 0)
+        summary["blocked_unit_count"] = int(settled_job.get("blocked_unit_count", 0) or 0)
+        summary["remaining_unit_count"] = int(
+            settled_job.get("remaining_unit_count", 0) or 0
+        )
+        if not summary["selected_unit_count"]:
+            summary["selected_unit_count"] = int(
+                settled_job.get("selected_unit_count", 0) or 0
+            )
+    elif summary["state"] == "covered" and summary["selected_unit_count"] == 0:
+        summary["remaining_unit_count"] = 0
+    return summary
+
+
+def _cancel_stale_lane_b_jobs(
+    paths: WorkspacePaths,
+    *,
+    staging_source_signature: str,
+) -> list[dict[str, str]]:
+    repairs: list[dict[str, str]] = []
+    jobs_index = load_shared_jobs_index(paths)
+    current_job_key = lane_b_job_key(staging_source_signature=staging_source_signature)
+    for job_key, job_id in jobs_index.get("active_by_key", {}).items():
+        if not isinstance(job_key, str) or not job_key.startswith("lane-b:staging:"):
+            continue
+        if job_key == current_job_key:
+            continue
+        if not isinstance(job_id, str) or not job_id:
+            continue
+        manifest = load_shared_job(paths, job_id)
+        if not manifest or not shared_job_is_active(manifest):
+            continue
+        block_shared_job(
+            paths,
+            job_id,
+            result={
+                "reason": (
+                    "The staging source signature changed before the governed Lane B batch "
+                    "settled."
+                )
+            },
+        )
+        repairs.append(
+            {
+                "job_id": job_id,
+                "job_key": job_key,
+                "reason": "staging-source-signature-changed",
+            }
+        )
+    return repairs
+
+
+def _lane_b_follow_up(
+    paths: WorkspacePaths,
+    *,
+    staging_source_signature: str,
+    hybrid_enrichment: dict[str, Any],
+    owner: dict[str, Any] | None,
+) -> dict[str, Any]:
+    hybrid_work = read_json(paths.staging_hybrid_work_path)
+    stale_jobs = _cancel_stale_lane_b_jobs(
+        paths,
+        staging_source_signature=staging_source_signature,
+    )
+    current_job_key = lane_b_job_key(staging_source_signature=staging_source_signature)
+    jobs_index = load_shared_jobs_index(paths)
+    active_job_id = jobs_index.get("active_by_key", {}).get(current_job_key)
+    settled_job: dict[str, Any] | None = None
+
+    if isinstance(active_job_id, str) and active_job_id:
+        active_manifest = load_shared_job(paths, active_job_id)
+        if active_manifest and shared_job_is_active(active_manifest):
+            scope = active_manifest.get("scope")
+            if not isinstance(scope, dict):
+                scope = {}
+            selected_sources = [
+                source for source in scope.get("selected_sources", []) if isinstance(source, dict)
+            ]
+            progress = lane_b_batch_progress(hybrid_work, selected_sources=selected_sources)
+            if progress["resolved"]:
+                work_path = lane_b_work_path(paths, job_id=active_job_id)
+                settle_result = {
+                    **progress,
+                    "work_path": str(work_path.relative_to(paths.root)),
+                    "staging_source_signature": staging_source_signature,
+                }
+                if progress["blocked_unit_count"] > 0:
+                    active_manifest = block_shared_job(
+                        paths,
+                        active_job_id,
+                        result=settle_result,
+                    )
+                else:
+                    active_manifest = complete_shared_job(
+                        paths,
+                        active_job_id,
+                        result=settle_result,
+                    )
+                settled_job = {
+                    "job_id": active_job_id,
+                    "status": active_manifest.get("status"),
+                    **settle_result,
+                }
+                active_job_id = None
+            else:
+                work_path = lane_b_work_path(paths, job_id=active_job_id)
+                if not work_path.exists():
+                    write_lane_b_work_packet(
+                        paths,
+                        job_id=active_job_id,
+                        target="staging",
+                        staging_source_signature=staging_source_signature,
+                        selected_sources=selected_sources,
+                    )
+                return {
+                    "triggered": True,
+                    "state": "waiting-shared-job",
+                    "detail": (
+                        "A governed Lane B follow-up batch is already active for the current "
+                        "staging signature."
+                    ),
+                    "job_id": active_job_id,
+                    "job_key": current_job_key,
+                    "caller_role": "waiter",
+                    "work_path": str(work_path.relative_to(paths.root)),
+                    "hybrid_work_path": str(paths.staging_hybrid_work_path.relative_to(paths.root)),
+                    "selected_source_ids": [
+                        source_id
+                        for source_id in [source.get("source_id") for source in selected_sources]
+                        if isinstance(source_id, str) and source_id
+                    ],
+                    "selected_unit_count": _selected_unit_count(selected_sources),
+                    "selected_sources": selected_sources,
+                    "control_plane": shared_job_control_plane_payload(
+                        active_manifest,
+                        state="waiting-shared-job",
+                    ),
+                    "settled_job": settled_job,
+                    "stale_jobs": stale_jobs,
+                }
+
+    if hybrid_enrichment.get("mode") not in {"candidate-prepared", "partially-covered"}:
+        if settled_job or stale_jobs:
+            return {
+                "triggered": False,
+                "state": "covered",
+                "detail": (
+                    "No governed Lane B follow-up work remains for the current "
+                    "staging signature."
+                ),
+                "settled_job": settled_job,
+                "stale_jobs": stale_jobs,
+            }
+        return {}
+
+    selected_sources = select_lane_b_batch(hybrid_work)
+    if not selected_sources:
+        return {
+            "triggered": False,
+            "state": "covered",
+            "detail": "The remaining hybrid queue is already fully covered or explicitly blocked.",
+            "settled_job": settled_job,
+            "stale_jobs": stale_jobs,
+        }
+
+    effective_owner = _effective_lane_b_owner(owner)
+    job_info = ensure_shared_job(
+        paths,
+        job_key=current_job_key,
+        job_family="lane-b",
+        criticality="derived-state",
+        scope={
+            "target": "staging",
+            "staging_source_signature": staging_source_signature,
+            "hybrid_work_path": str(paths.staging_hybrid_work_path.relative_to(paths.root)),
+            "selected_source_ids": [
+                source_id
+                for source_id in [source.get("source_id") for source in selected_sources]
+                if isinstance(source_id, str) and source_id
+            ],
+            "selected_sources": selected_sources,
+        },
+        input_signature=lane_b_batch_signature(selected_sources),
+        owner=effective_owner,
+    )
+    manifest = job_info["manifest"]
+    caller_role = str(job_info.get("caller_role") or "owner")
+    work_path = lane_b_work_path(paths, job_id=str(manifest["job_id"]))
+    work_path_str = write_lane_b_work_packet(
+        paths,
+        job_id=str(manifest["job_id"]),
+        target="staging",
+        staging_source_signature=staging_source_signature,
+        selected_sources=selected_sources,
+    )
+    state = (
+        "waiting-shared-job"
+        if caller_role == "waiter" and manifest.get("status") == "running"
+        else str(manifest.get("status") or "running")
+    )
+    return {
+        "triggered": True,
+        "state": state,
+        "detail": (
+            "A governed Lane B follow-up batch is ready for bounded multimodal completion."
+            if state != "waiting-shared-job"
+            else "A matching governed Lane B follow-up batch is already active."
+        ),
+        "job_id": manifest.get("job_id"),
+        "job_key": manifest.get("job_key"),
+        "caller_role": caller_role,
+        "work_path": work_path_str,
+        "hybrid_work_path": str(paths.staging_hybrid_work_path.relative_to(paths.root)),
+        "selected_source_ids": [
+            source_id
+            for source_id in [source.get("source_id") for source in selected_sources]
+            if isinstance(source_id, str) and source_id
+        ],
+        "selected_unit_count": _selected_unit_count(selected_sources),
+        "selected_sources": selected_sources,
+        "control_plane": shared_job_control_plane_payload(manifest, state=state),
+        "settled_job": settled_job,
+        "stale_jobs": stale_jobs,
+    }
+
+
 def update_sync_state(
     paths: WorkspacePaths,
     *,
@@ -5710,6 +6148,8 @@ def update_sync_state(
     change_set: dict[str, Any] | None = None,
     reused_sources: int = 0,
     rebuilt_sources: int = 0,
+    rebuild_telemetry: dict[str, Any] | None = None,
+    lane_b_follow_up_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist the current Phase 4 sync state."""
     state = sync_state(paths)
@@ -5728,6 +6168,16 @@ def update_sync_state(
         "last_change_set": change_set or state.get("last_change_set"),
         "reused_sources": reused_sources,
         "rebuilt_sources": rebuilt_sources,
+        "rebuild_telemetry": (
+            dict(rebuild_telemetry)
+            if isinstance(rebuild_telemetry, dict)
+            else state.get("rebuild_telemetry", {})
+        ),
+        "lane_b_follow_up_summary": (
+            dict(lane_b_follow_up_summary)
+            if isinstance(lane_b_follow_up_summary, dict)
+            else state.get("lane_b_follow_up_summary", {})
+        ),
         "retrieval_artifact_signature": artifact_signature(
             paths.retrieval_manifest_path(validation_target)
         ),
@@ -5739,7 +6189,13 @@ def update_sync_state(
     return payload
 
 
-def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[str, Any]:
+def sync_workspace(
+    paths: WorkspacePaths,
+    *,
+    autonomous: bool = True,
+    owner: dict[str, Any] | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     """Run the staged sync workflow and, by default, close the loop to final publish."""
     autonomous_steps: list[dict[str, Any]] = []
     phase_costs = {
@@ -5779,6 +6235,8 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             "publish_skip_reason": None,
             "repair_actions": repair_actions,
             "projection_state": projection_state_summary(paths),
+            "snapshot_retention": {},
+            "lane_b_follow_up": {},
         }
 
     office_snapshot = office_renderer_snapshot(paths)
@@ -5804,6 +6262,8 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             "publish_skip_reason": None,
             "repair_actions": repair_actions,
             "projection_state": projection_state_summary(paths),
+            "snapshot_retention": {},
+            "lane_b_follow_up": {},
         }
     with workspace_lease(paths, "sync", timeout_seconds=600.0):
         if paths.knowledge_base_dir.joinpath(".staging-build").exists():
@@ -5843,20 +6303,54 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             }
         )
         phase_costs["detect"] = perf_counter() - detect_started
-        rebuild_required = (
-            not paths.knowledge_base_staging_dir.exists()
-            or state.get("staging_source_signature") != current_signature
-            or not staging_source_artifacts_complete(paths, active_sources)
-            or ambiguous_match
-            or any(
-                int(change_stats.get(key, 0)) > 0
-                for key in ("added", "modified", "moved_or_renamed", "deleted", "ambiguous")
-            )
+        interaction_snapshot = interaction_ingest_snapshot(paths)
+        rebuild_telemetry = classify_rebuild_telemetry(
+            paths,
+            current_signature=current_signature,
+            state=state,
+            active_sources=active_sources,
+            change_set=change_set,
+            ambiguous_match=ambiguous_match,
+            interaction_snapshot=interaction_snapshot,
         )
-        build_stats = {"reused_sources": 0, "rebuilt_sources": 0}
+        rebuild_required = rebuild_telemetry["rebuild_cause"] in {
+            "missing-staging",
+            "staging-signature-drift",
+            "source-delta",
+            "ambiguous-match",
+        }
+        build_stats = {
+            "reused_sources": 0,
+            "rebuilt_sources": 0,
+            "scoped_repaired_sources": 0,
+        }
+        scoped_contract_repair_used = False
 
         stage_started = perf_counter()
-        if rebuild_required:
+        if rebuild_telemetry["rebuild_cause"] == "artifact-contract-backfill":
+            scoped_contract_repair = repair_staging_artifact_contract(
+                paths,
+                active_sources,
+                repair_source_ids=list(
+                    rebuild_telemetry.get("contract_backfill_source_ids", [])
+                ),
+            )
+            if scoped_contract_repair is not None:
+                (
+                    _catalog_sources,
+                    _source_summaries,
+                    _ambiguous,
+                    build_stats,
+                ) = scoped_contract_repair
+                scoped_contract_repair_used = True
+            else:
+                rebuild_required = True
+                _catalog_sources, _source_summaries, _ambiguous, build_stats = build_staging_artifacts(
+                    paths,
+                    active_sources,
+                    office_snapshot["binary"],
+                )
+        elif rebuild_required:
             _catalog_sources, _source_summaries, _ambiguous, build_stats = build_staging_artifacts(
                 paths,
                 active_sources,
@@ -5869,14 +6363,20 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 active_sources,
             )
         change_set = refresh_change_set_details(change_set, active_sources)
+        rebuild_telemetry["scoped_contract_repair_used"] = scoped_contract_repair_used
+        rebuild_telemetry["scoped_contract_repair_source_count"] = int(
+            build_stats.get("scoped_repaired_sources", 0) or 0
+        )
         autonomous_steps.append(
             {
                 "step": "stage",
                 "status": "completed",
                 "detail": (
-                    f"Staging {'rebuilt' if rebuild_required else 'refreshed'} with "
+                    f"Staging "
+                    f"{'scoped-repaired' if scoped_contract_repair_used else ('rebuilt' if rebuild_required else 'refreshed')} with "
                     f"reused_sources={build_stats['reused_sources']} and "
-                    f"rebuilt_sources={build_stats['rebuilt_sources']}."
+                    f"rebuilt_sources={build_stats['rebuilt_sources']} and "
+                    f"scoped_repaired_sources={build_stats.get('scoped_repaired_sources', 0)}."
                 ),
             }
         )
@@ -5974,6 +6474,8 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 change_set=change_set,
                 reused_sources=build_stats["reused_sources"],
                 rebuilt_sources=build_stats["rebuilt_sources"],
+                rebuild_telemetry=rebuild_telemetry,
+                lane_b_follow_up_summary={},
             )
             update_dependency_state(
                 paths,
@@ -5993,6 +6495,18 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 "published": False,
                 "rebuilt": rebuild_required,
                 "build_stats": build_stats,
+                "rebuild_cause": rebuild_telemetry["rebuild_cause"],
+                "dirty_source_count": rebuild_telemetry["dirty_source_count"],
+                "contract_backfill_source_count": rebuild_telemetry[
+                    "contract_backfill_source_count"
+                ],
+                "interaction_promotion_only": rebuild_telemetry[
+                    "interaction_promotion_only"
+                ],
+                "scoped_contract_repair_used": rebuild_telemetry[
+                    "scoped_contract_repair_used"
+                ],
+                "rebuild_telemetry": rebuild_telemetry,
                 "auto_repairs": auto_repairs,
                 "auto_authoring": auto_authoring,
                 "hybrid_enrichment": hybrid_enrichment,
@@ -6010,6 +6524,9 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 "publish_skip_reason": None,
                 "repair_actions": repair_actions,
                 "projection_state": projection_state_summary(paths),
+                "snapshot_retention": {},
+                "lane_b_follow_up": {},
+                "lane_b_follow_up_summary": {},
             }
         if pending_sources:
             update_sync_state(
@@ -6022,6 +6539,8 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 change_set=change_set,
                 reused_sources=build_stats["reused_sources"],
                 rebuilt_sources=build_stats["rebuilt_sources"],
+                rebuild_telemetry=rebuild_telemetry,
+                lane_b_follow_up_summary={},
             )
             update_dependency_state(
                 paths,
@@ -6041,6 +6560,18 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 "published": False,
                 "rebuilt": rebuild_required,
                 "build_stats": build_stats,
+                "rebuild_cause": rebuild_telemetry["rebuild_cause"],
+                "dirty_source_count": rebuild_telemetry["dirty_source_count"],
+                "contract_backfill_source_count": rebuild_telemetry[
+                    "contract_backfill_source_count"
+                ],
+                "interaction_promotion_only": rebuild_telemetry[
+                    "interaction_promotion_only"
+                ],
+                "scoped_contract_repair_used": rebuild_telemetry[
+                    "scoped_contract_repair_used"
+                ],
+                "rebuild_telemetry": rebuild_telemetry,
                 "auto_repairs": auto_repairs,
                 "auto_authoring": auto_authoring,
                 "hybrid_enrichment": hybrid_enrichment,
@@ -6058,6 +6589,9 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                 "publish_skip_reason": None,
                 "repair_actions": repair_actions,
                 "projection_state": projection_state_summary(paths),
+                "snapshot_retention": {},
+                "lane_b_follow_up": {},
+                "lane_b_follow_up_summary": {},
             }
 
         validate_started = perf_counter()
@@ -6083,6 +6617,9 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
         publish_skip_reason: str | None = None
         published_manifest: dict[str, Any] | None = None
         published_signature: str | None = state.get("published_source_signature")
+        snapshot_retention: dict[str, Any] = {}
+        lane_b_follow_up: dict[str, Any] = {}
+        lane_b_follow_up_summary: dict[str, Any] = {}
         if validation_report["status"] in {"valid", "warnings"}:
             if (
                 not rebuild_required
@@ -6142,6 +6679,43 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
                     reason="A knowledge-base publish activated new canonical runtime truth.",
                 )
                 phase_costs["projection_enqueue"] = perf_counter() - projection_started
+            snapshot_retention = apply_snapshot_retention(paths)
+            autonomous_steps.append(
+                {
+                    "step": "snapshot-retention",
+                    "status": (
+                        "completed"
+                        if not snapshot_retention.get("deletion_failures")
+                        else "degraded"
+                    ),
+                    "detail": (
+                        "Applied snapshot retention with "
+                        f"deleted_count={snapshot_retention.get('deleted_count', 0)} and "
+                        "pinned_snapshot_count="
+                        f"{snapshot_retention.get('pinned_snapshot_count', 0)}."
+                    ),
+                }
+            )
+            if autonomous:
+                lane_b_follow_up = _lane_b_follow_up(
+                    paths,
+                    staging_source_signature=current_signature,
+                    hybrid_enrichment=hybrid_enrichment,
+                    owner=owner,
+                )
+                lane_b_follow_up_summary = summarize_lane_b_follow_up(lane_b_follow_up)
+                if lane_b_follow_up:
+                    autonomous_steps.append(
+                        {
+                            "step": "lane-b-follow-up",
+                            "status": (
+                                "completed"
+                                if lane_b_follow_up.get("state") == "covered"
+                                else "degraded"
+                            ),
+                            "detail": lane_b_follow_up.get("detail"),
+                        }
+                    )
         else:
             autonomous_steps.append(
                 {
@@ -6161,6 +6735,8 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             change_set=change_set,
             reused_sources=build_stats["reused_sources"],
             rebuilt_sources=build_stats["rebuilt_sources"],
+            rebuild_telemetry=rebuild_telemetry,
+            lane_b_follow_up_summary=lane_b_follow_up_summary,
         )
         if published:
             sync_payload["last_publish_at"] = (
@@ -6191,6 +6767,18 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             "published": published,
             "rebuilt": rebuild_required,
             "build_stats": build_stats,
+            "rebuild_cause": rebuild_telemetry["rebuild_cause"],
+            "dirty_source_count": rebuild_telemetry["dirty_source_count"],
+            "contract_backfill_source_count": rebuild_telemetry[
+                "contract_backfill_source_count"
+            ],
+            "interaction_promotion_only": rebuild_telemetry[
+                "interaction_promotion_only"
+            ],
+            "scoped_contract_repair_used": rebuild_telemetry[
+                "scoped_contract_repair_used"
+            ],
+            "rebuild_telemetry": rebuild_telemetry,
             "auto_repairs": auto_repairs,
             "auto_authoring": auto_authoring,
             "hybrid_enrichment": hybrid_enrichment,
@@ -6208,6 +6796,9 @@ def sync_workspace(paths: WorkspacePaths, *, autonomous: bool = True) -> dict[st
             "publish_skip_reason": publish_skip_reason,
             "repair_actions": repair_actions,
             "projection_state": projection_state_summary(paths),
+            "snapshot_retention": snapshot_retention,
+            "lane_b_follow_up": lane_b_follow_up,
+            "lane_b_follow_up_summary": lane_b_follow_up_summary,
         }
 
 
@@ -6229,5 +6820,7 @@ def validate_workspace(paths: WorkspacePaths, *, target: str) -> dict[str, Any]:
         change_set=sync_state(paths).get("last_change_set"),
         reused_sources=int(sync_state(paths).get("reused_sources", 0) or 0),
         rebuilt_sources=int(sync_state(paths).get("rebuilt_sources", 0) or 0),
+        rebuild_telemetry=sync_state(paths).get("rebuild_telemetry", {}),
+        lane_b_follow_up_summary=sync_state(paths).get("lane_b_follow_up_summary", {}),
     )
     return report

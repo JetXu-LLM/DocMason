@@ -342,6 +342,14 @@ class WorkspacePaths:
         return self.shared_jobs_dir / "index.json"
 
     @property
+    def snapshot_pins_path(self) -> Path:
+        return self.control_plane_dir / "snapshot_pins.json"
+
+    @property
+    def snapshot_retention_state_path(self) -> Path:
+        return self.control_plane_dir / "snapshot_retention.json"
+
+    @property
     def projection_state_path(self) -> Path:
         return self.control_plane_dir / "projection_state.json"
 
@@ -952,6 +960,18 @@ def knowledge_base_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     current_files = list_visible_files(paths.knowledge_base_current_dir)
     staging_files = list_visible_files(paths.knowledge_base_staging_dir)
     state = sync_state(paths)
+    current_pointer = read_json(paths.knowledge_base_dir / "current-pointer.json")
+    retention_state = read_json(paths.snapshot_retention_state_path)
+    storage_lifecycle: dict[str, Any] = {}
+    if not retention_state:
+        from .versioning import snapshot_retention_summary, storage_lifecycle_summary
+
+        retention_state = snapshot_retention_summary(paths)
+        storage_lifecycle = storage_lifecycle_summary(paths)
+    else:
+        from .versioning import storage_lifecycle_summary
+
+        storage_lifecycle = storage_lifecycle_summary(paths)
     validation_report = read_json(paths.current_validation_report_path)
     if not validation_report:
         validation_report = read_json(paths.staging_validation_report_path)
@@ -976,6 +996,33 @@ def knowledge_base_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
         "stale_reason": stale_reason,
         "source_inventory_signature": current_signature,
         "published_source_signature": published_signature,
+        "current_snapshot_id": current_pointer.get("snapshot_id"),
+        "versions_count": len(
+            list(paths.knowledge_base_versions_dir.glob("*/publish_manifest.json"))
+        ),
+        "snapshot_retention": {
+            "applied": retention_state.get("applied", False),
+            "deleted_count": retention_state.get("deleted_count", 0),
+            "eligible_delete_snapshot_ids": retention_state.get(
+                "eligible_delete_snapshot_ids", []
+            ),
+            "pinned_snapshot_count": retention_state.get("pinned_snapshot_count", 0),
+            "retained_snapshot_ids": retention_state.get("retained_snapshot_ids", []),
+            "deleted_snapshot_ids": retention_state.get("deleted_snapshot_ids", []),
+        }
+        if retention_state
+        else {},
+        "storage_lifecycle": storage_lifecycle,
+        "last_sync_rebuild_telemetry": (
+            dict(state.get("rebuild_telemetry", {}))
+            if isinstance(state.get("rebuild_telemetry"), dict)
+            else {}
+        ),
+        "lane_b_follow_up": (
+            dict(state.get("lane_b_follow_up_summary", {}))
+            if isinstance(state.get("lane_b_follow_up_summary"), dict)
+            else {}
+        ),
     }
 
 
@@ -1174,17 +1221,14 @@ def bootstrap_state_summary(
         paths,
         require_sync_capability=require_sync_capability,
     )
+    toolchain_value = readiness.get("toolchain")
     return {
         "present": bool(state),
         "schema_version": int(state.get("schema_version", 0) or 0) if state else None,
         "cached_ready": bool(readiness.get("ready")),
         "reason": readiness.get("reason"),
         "detail": readiness.get("detail"),
-        "toolchain": (
-            dict(readiness.get("toolchain"))
-            if isinstance(readiness.get("toolchain"), dict)
-            else {}
-        ),
+        "toolchain": dict(toolchain_value) if isinstance(toolchain_value, dict) else {},
         "manual_recovery_doc": readiness.get("manual_recovery_doc")
         or manual_workspace_recovery_doc(),
     }

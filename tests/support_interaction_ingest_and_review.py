@@ -29,7 +29,7 @@ from docmason.interaction import (
     reconcile_codex_thread,
 )
 from docmason.project import WorkspacePaths, read_json, write_json
-from docmason.retrieval import retrieve_corpus, trace_source
+from docmason.retrieval import merge_pending_interaction_overlay, retrieve_corpus, trace_source
 from docmason.review import refresh_log_review_summary
 from docmason.transcript import load_codex_transcript, validate_normalized_transcript
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
@@ -1077,6 +1077,47 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             "Pending interaction-derived backlog was ignored for this strict source-scoped ask.",
             turn["freshness_notice"],
         )
+
+    def test_retrieve_corpus_skips_pending_interaction_overlay_for_strict_source_scope(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        thread_id = "thread-source-scope-retrieval"
+        state_db, sessions_root = self.write_fake_codex_storage(
+            workspace,
+            thread_id=thread_id,
+            source_ids=source_ids,
+        )
+
+        with (
+            self.patch_codex_storage(state_db, sessions_root),
+            self.patch_interaction_storage(state_db, sessions_root),
+            mock.patch(
+                "docmason.retrieval.merge_pending_interaction_overlay",
+                wraps=merge_pending_interaction_overlay,
+            ) as merge_overlay,
+        ):
+            retrieval = retrieve_corpus(
+                workspace,
+                query=(
+                    "Using only the document 'Campaign Planning Brief', "
+                    "how should I handle the response-time requirement from the screenshot?"
+                ),
+                top=3,
+                graph_hops=1,
+                document_types=None,
+                source_ids=None,
+                include_renders=True,
+            )
+
+        self.assertEqual(retrieval["reference_resolution_summary"], "exact-reference")
+        self.assertFalse(merge_overlay.called)
+        self.assertTrue(retrieval["results"])
+        self.assertEqual(retrieval["results"][0]["source_family"], "corpus")
 
     def test_prepare_ask_turn_keeps_source_exact_approximate_locator_advisory(self) -> None:
         workspace = self.make_workspace()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,57 @@ from .truth_boundary import (
     build_source_scope_policy,
     support_manifest_is_local_corpus,
 )
+
+_HOST_SNIPPET_FILENAMES = frozenset({"<stdin>", "<string>"})
+_NONCANONICAL_HOST_LIFECYCLE_HELPER_DIRECT = "noncanonical-host-lifecycle-helper-direct"
+
+
+def _host_snippet_lifecycle_helper_violation() -> dict[str, Any] | None:
+    """Return a correction payload when a compatible host calls ask helpers from a snippet."""
+    host_identity = current_host_identity()
+    host_provider = str(host_identity.get("host_provider") or "")
+    host_thread_ref = str(host_identity.get("host_thread_ref") or "")
+    if host_provider not in {"codex", "claude-code"} or not host_thread_ref:
+        return None
+
+    caller_surface = next(
+        (
+            frame.filename
+            for frame in traceback.extract_stack(limit=12)
+            if frame.filename in _HOST_SNIPPET_FILENAMES
+        ),
+        None,
+    )
+    if caller_surface is None:
+        return None
+
+    return {
+        "status": "blocked",
+        "user_reply_allowed": False,
+        "primary_issue_code": _NONCANONICAL_HOST_LIFECYCLE_HELPER_DIRECT,
+        "issue_codes": [_NONCANONICAL_HOST_LIFECYCLE_HELPER_DIRECT],
+        "detail": (
+            "Compatible hosts must open canonical ask through the repo-provided hidden ask "
+            "integration path. Direct lifecycle-helper calls from ad hoc Python snippets "
+            "are not a legal ordinary front door."
+        ),
+        "recommended_action": (
+            "Re-enter the same question through the hidden canonical ask integration path "
+            "instead of calling prepare_ask_turn()/complete_ask_turn() directly."
+        ),
+        "host_provider": host_provider,
+        "host_thread_ref": host_thread_ref,
+        "caller_surface": caller_surface,
+    }
+
+
+def _raise_host_snippet_lifecycle_helper_violation(payload: dict[str, Any]) -> None:
+    issue_code = str(
+        payload.get("primary_issue_code") or _NONCANONICAL_HOST_LIFECYCLE_HELPER_DIRECT
+    )
+    detail = str(payload.get("detail") or "")
+    recommended_action = str(payload.get("recommended_action") or "")
+    raise ValueError(f"{issue_code}: {detail} {recommended_action}".strip())
 
 
 def _workspace_notices_enabled(question_domain: str) -> bool:
@@ -1666,8 +1718,12 @@ def prepare_ask_turn(
     """Open or reuse one canonical ask turn.
 
     This is an internal ask-lifecycle primitive used by canonical workflow code.
-    It is not a preferred host integration entrypoint.
+    Compatible hosts must use the hidden ask integration path instead of ad hoc snippets.
     """
+    lifecycle_violation = _host_snippet_lifecycle_helper_violation()
+    if lifecycle_violation is not None:
+        return lifecycle_violation
+
     explicit_continuation = False
     confirmation_resolution = _maybe_handle_confirmation_reply(
         paths,
@@ -2343,8 +2399,12 @@ def complete_ask_turn(
     """Commit one canonical ask turn through the shared barrier.
 
     This is an internal ask-lifecycle primitive used by canonical workflow code.
-    It is not a preferred host integration entrypoint.
+    Compatible hosts must use the hidden ask integration path instead of ad hoc snippets.
     """
+    lifecycle_violation = _host_snippet_lifecycle_helper_violation()
+    if lifecycle_violation is not None:
+        _raise_host_snippet_lifecycle_helper_violation(lifecycle_violation)
+
     current_turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
     current_turn = {
         "conversation_id": conversation_id,

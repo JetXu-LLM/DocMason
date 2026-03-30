@@ -374,11 +374,17 @@ def _validate_workspace(paths: WorkspacePaths, *, target: str) -> dict[str, Any]
     return validate_workspace(paths, target=target)
 
 
-def _run_phase4_sync(paths: WorkspacePaths, *, autonomous: bool) -> dict[str, Any]:
+def _run_phase4_sync(
+    paths: WorkspacePaths,
+    *,
+    autonomous: bool,
+    owner: dict[str, Any] | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     """Run the Phase 4 sync body lazily."""
     from .knowledge import sync_workspace
 
-    return sync_workspace(paths, autonomous=autonomous)
+    return sync_workspace(paths, autonomous=autonomous, owner=owner, run_id=run_id)
 
 
 def _retrieve_corpus(
@@ -2271,6 +2277,29 @@ def doctor_workspace(
             ),
         )
 
+    knowledge_base = knowledge_base_snapshot(workspace)
+    storage_lifecycle = knowledge_base.get("storage_lifecycle", {})
+    if isinstance(storage_lifecycle, dict) and storage_lifecycle:
+        add_check(
+            "storage-lifecycle",
+            READY,
+            (
+                "Storage lifecycle tracks "
+                f"{storage_lifecycle.get('family_count', 0)} artifact families, "
+                f"{storage_lifecycle.get('pinned_snapshot_count', 0)} pinned snapshot(s), "
+                "and "
+                f"{len(storage_lifecycle.get('eligible_delete_snapshot_ids', []))} "
+                "snapshot(s) eligible for deletion on the next retention pass."
+            ),
+        )
+    else:
+        add_check(
+            "storage-lifecycle",
+            DEGRADED,
+            "Storage lifecycle summary is unavailable.",
+            "Inspect `knowledge_base/` state and rerun `docmason doctor`.",
+        )
+
     overall = READY
     if any(check["status"] == ACTION_REQUIRED for check in checks):
         overall = ACTION_REQUIRED
@@ -2283,6 +2312,7 @@ def doctor_workspace(
     payload = {
         "status": overall,
         "environment": environment,
+        "knowledge_base": knowledge_base,
         "checks": checks,
         "supported_inputs": list(SUPPORTED_INPUTS),
         "supported_input_tiers": supported_input_tiers(),
@@ -2385,6 +2415,37 @@ def status_workspace(
             + " active answer-critical job(s)"
         ),
     ]
+    rebuild_telemetry = payload["knowledge_base"].get("last_sync_rebuild_telemetry", {})
+    if isinstance(rebuild_telemetry, dict) and rebuild_telemetry:
+        lines.append(
+            "Last sync rebuild: "
+            f"cause={rebuild_telemetry.get('rebuild_cause', 'unknown')}, "
+            f"dirty_sources={rebuild_telemetry.get('dirty_source_count', 0)}, "
+            "contract_backfill_sources="
+            f"{rebuild_telemetry.get('contract_backfill_source_count', 0)}, "
+            "interaction_promotion_only="
+            f"{'yes' if rebuild_telemetry.get('interaction_promotion_only') else 'no'}"
+        )
+    lane_b_follow_up = payload["knowledge_base"].get("lane_b_follow_up", {})
+    if isinstance(lane_b_follow_up, dict) and lane_b_follow_up:
+        lines.append(
+            "Lane B follow-up: "
+            f"state={lane_b_follow_up.get('state', 'unknown')}, "
+            f"selected_sources={lane_b_follow_up.get('selected_source_count', 0)}, "
+            f"selected_units={lane_b_follow_up.get('selected_unit_count', 0)}, "
+            f"covered={lane_b_follow_up.get('covered_unit_count', 0)}, "
+            f"blocked={lane_b_follow_up.get('blocked_unit_count', 0)}, "
+            f"remaining={lane_b_follow_up.get('remaining_unit_count', 0)}"
+        )
+    storage_lifecycle = payload["knowledge_base"].get("storage_lifecycle", {})
+    if isinstance(storage_lifecycle, dict) and storage_lifecycle:
+        lines.append(
+            "Storage lifecycle: "
+            f"families={storage_lifecycle.get('family_count', 0)}, "
+            f"pinned_snapshots={storage_lifecycle.get('pinned_snapshot_count', 0)}, "
+            "expiring_snapshots="
+            f"{len(storage_lifecycle.get('eligible_delete_snapshot_ids', []))}"
+        )
     if pending_actions:
         lines.append(f"Pending actions: {', '.join(pending_actions)}")
     _apply_coordination_warning(
@@ -2464,6 +2525,10 @@ def sync_workspace(
                 "pending_work_path": None,
                 "next_workflows": [],
                 "next_steps": readiness_next_steps,
+                "rebuild_telemetry": {},
+                "snapshot_retention": {},
+                "lane_b_follow_up": {},
+                "lane_b_follow_up_summary": {},
             }
             lines = [
                 f"Sync status: {ACTION_REQUIRED}",
@@ -2548,6 +2613,10 @@ def sync_workspace(
                 "pending_work_path": None,
                 "next_workflows": [],
                 "next_steps": ["Run `docmason sync --yes` to approve and continue."],
+                "rebuild_telemetry": {},
+                "snapshot_retention": {},
+                "lane_b_follow_up": {},
+                "lane_b_follow_up_summary": {},
             }
             lines = [
                 f"Sync status: {ACTION_REQUIRED}",
@@ -2597,6 +2666,10 @@ def sync_workspace(
                 "next_steps": [
                     "Wait for the active shared sync job to settle, then retry if needed."
                 ],
+                "rebuild_telemetry": {},
+                "snapshot_retention": {},
+                "lane_b_follow_up": {},
+                "lane_b_follow_up_summary": {},
             }
             lines = [
                 f"Sync status: {DEGRADED}",
@@ -2605,9 +2678,16 @@ def sync_workspace(
             return make_report(DEGRADED, payload, lines)
     else:
         shared_job = {}
-    result = _run_phase4_sync(workspace, autonomous=autonomous)
+    result = _run_phase4_sync(
+        workspace,
+        autonomous=autonomous,
+        owner=effective_owner,
+        run_id=run_id,
+    )
     if autonomous and shared_job:
-        if result["status"] in {"valid", "warnings"} and bool(result.get("published")):
+        if result["status"] in {"valid", "warnings"} and (
+            bool(result.get("published")) or bool(result.get("publish_skipped"))
+        ):
             shared_job = complete_shared_job(workspace, str(shared_job["job_id"]), result=result)
         elif result["status"] in {"action-required", "blocking-errors"}:
             shared_job = block_shared_job(
@@ -2623,6 +2703,14 @@ def sync_workspace(
                 status=str(shared_job.get("status") or ""),
             )
     status = validation_command_status(result["status"])
+    hybrid_mode = None
+    if isinstance(result.get("hybrid_enrichment"), dict):
+        hybrid_mode = result["hybrid_enrichment"].get("mode")
+    if result["status"] in {"valid", "warnings"} and hybrid_mode in {
+        "candidate-prepared",
+        "partially-covered",
+    }:
+        status = DEGRADED
     next_workflows: list[str] = []
     follow_up_steps: list[str] = []
     pending_work_path = None
@@ -2667,6 +2755,10 @@ def sync_workspace(
         "publish_skip_reason": result.get("publish_skip_reason"),
         "repair_actions": result.get("repair_actions", []),
         "projection_state": result.get("projection_state", {}),
+        "rebuild_telemetry": result.get("rebuild_telemetry", {}),
+        "snapshot_retention": result.get("snapshot_retention", {}),
+        "lane_b_follow_up": result.get("lane_b_follow_up", {}),
+        "lane_b_follow_up_summary": result.get("lane_b_follow_up_summary", {}),
         "pending_work_path": pending_work_path,
         "next_workflows": next_workflows,
         "next_steps": follow_up_steps,
@@ -2688,6 +2780,19 @@ def sync_workspace(
             "Build stats: "
             f"reused={build_stats.get('reused_sources', 0)}, "
             f"rebuilt={build_stats.get('rebuilt_sources', 0)}"
+        )
+    rebuild_telemetry = result.get("rebuild_telemetry", {})
+    if isinstance(rebuild_telemetry, dict) and rebuild_telemetry:
+        lines.append(
+            "Rebuild telemetry: "
+            f"cause={rebuild_telemetry.get('rebuild_cause', 'unknown')}, "
+            f"dirty_sources={rebuild_telemetry.get('dirty_source_count', 0)}, "
+            "contract_backfill_sources="
+            f"{rebuild_telemetry.get('contract_backfill_source_count', 0)}, "
+            "interaction_promotion_only="
+            f"{'yes' if rebuild_telemetry.get('interaction_promotion_only') else 'no'}, "
+            "scoped_contract_repair="
+            f"{'yes' if rebuild_telemetry.get('scoped_contract_repair_used') else 'no'}"
         )
     auto_repairs = result.get("auto_repairs", {})
     if isinstance(auto_repairs, dict):
@@ -2721,6 +2826,17 @@ def sync_workspace(
             "Interaction ingest: "
             f"pending={interaction_ingest.get('pending_promotion_count', 0)}, "
             f"promoted={interaction_ingest.get('promoted_memory_count', 0)}"
+        )
+    lane_b_follow_up_summary = result.get("lane_b_follow_up_summary", {})
+    if isinstance(lane_b_follow_up_summary, dict) and lane_b_follow_up_summary:
+        lines.append(
+            "Lane B follow-up: "
+            f"state={lane_b_follow_up_summary.get('state', 'unknown')}, "
+            f"selected_sources={lane_b_follow_up_summary.get('selected_source_count', 0)}, "
+            f"selected_units={lane_b_follow_up_summary.get('selected_unit_count', 0)}, "
+            f"covered={lane_b_follow_up_summary.get('covered_unit_count', 0)}, "
+            f"blocked={lane_b_follow_up_summary.get('blocked_unit_count', 0)}, "
+            f"remaining={lane_b_follow_up_summary.get('remaining_unit_count', 0)}"
         )
     change_set = result.get("change_set", {})
     if isinstance(change_set, dict) and isinstance(change_set.get("stats"), dict):
@@ -3539,6 +3655,7 @@ def run_workflow(
             )
         else:
             hybrid_enrichment = sync_report.payload.get("hybrid_enrichment", {})
+            lane_b_follow_up = sync_report.payload.get("lane_b_follow_up", {})
             if (
                 sync_status in {"valid", "warnings"}
                 and isinstance(hybrid_enrichment, dict)
@@ -3546,18 +3663,31 @@ def run_workflow(
             ):
                 workflow_status = "needs-hybrid-enrichment"
                 next_workflows = ["knowledge-construction", "knowledge-base-sync"]
-                hybrid_work_path = hybrid_enrichment.get("hybrid_work_path")
-                queue_detail = (
-                    f" from `{hybrid_work_path}`"
-                    if isinstance(hybrid_work_path, str) and hybrid_work_path
-                    else ""
+                work_path = (
+                    lane_b_follow_up.get("work_path")
+                    if isinstance(lane_b_follow_up, dict)
+                    else None
                 )
-                next_steps.append(
-                    "Deterministic publication succeeded, but hard-artifact multimodal "
-                    f"enrichment is still queued{queue_detail}. Consume that queue with a "
-                    "capable multimodal host agent, write additive `semantic_overlay/` "
-                    "sidecars, then rerun `docmason workflow knowledge-base-sync`."
-                )
+                if isinstance(work_path, str) and work_path:
+                    next_steps.append(
+                        "Deterministic publication succeeded, and a governed staged multimodal "
+                        f"follow-up batch is ready at `{work_path}`. Consume that bounded work "
+                        "packet with a capable host agent, write additive `semantic_overlay/` "
+                        "sidecars, then rerun `docmason workflow knowledge-base-sync`."
+                    )
+                else:
+                    hybrid_work_path = hybrid_enrichment.get("hybrid_work_path")
+                    queue_detail = (
+                        f" from `{hybrid_work_path}`"
+                        if isinstance(hybrid_work_path, str) and hybrid_work_path
+                        else ""
+                    )
+                    next_steps.append(
+                        "Deterministic publication succeeded, but hard-artifact multimodal "
+                        f"enrichment is still queued{queue_detail}. Consume that queue with a "
+                        "capable multimodal host agent, write additive `semantic_overlay/` "
+                        "sidecars, then rerun `docmason workflow knowledge-base-sync`."
+                    )
     else:
         payload = {
             "status": ACTION_REQUIRED,
