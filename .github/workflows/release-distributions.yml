@@ -63,13 +63,17 @@ jobs:
             dist/DocMason-demo-ico-gcs.zip
             dist/DocMason-demo-ico-gcs.zip.sha256
       - name: Publish release-entry metadata
-        if: (github.event_name == 'push' || inputs.publish_release) && secrets.DOCMASON_RELEASE_ENTRY_ADMIN_URL != '' && secrets.DOCMASON_RELEASE_ENTRY_ADMIN_TOKEN != ''
+        if: github.event_name == 'push' || inputs.publish_release
         env:
           RELEASE_ENTRY_ADMIN_URL: ${{ secrets.DOCMASON_RELEASE_ENTRY_ADMIN_URL }}
           RELEASE_ENTRY_ADMIN_TOKEN: ${{ secrets.DOCMASON_RELEASE_ENTRY_ADMIN_TOKEN }}
           RELEASE_VERSION: ${{ steps.version.outputs.value }}
           RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.value }}
         run: |
+          if [ -z "${RELEASE_ENTRY_ADMIN_URL:-}" ] || [ -z "${RELEASE_ENTRY_ADMIN_TOKEN:-}" ]; then
+            echo "Release-entry metadata publish skipped because admin URL/token secrets are not configured."
+            exit 0
+          fi
           python - <<'PY'
           import json
           import os
