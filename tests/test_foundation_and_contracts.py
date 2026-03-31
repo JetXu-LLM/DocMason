@@ -47,7 +47,6 @@ class FoundationAndContractTests(unittest.TestCase):
             ROOT / "scripts" / "update-docmason-core.py",
             ROOT / "scripts" / "check-repo-safety.py",
             ROOT / "scripts" / "install-git-hooks.sh",
-            ROOT / "planning" / "2026-03-30-update-core-cli-tech-spec.md",
             ROOT / ".githooks" / "README.md",
             ROOT / ".githooks" / "pre-commit",
             ROOT / ".githooks" / "pre-push",

@@ -497,6 +497,7 @@ def _materialize_current_root_into_single_current_storage(
     target_root = paths.knowledge_published_root_dir(current_snapshot_id)
     if current_source_dir == target_root:
         return target_root
+    paths.knowledge_base_published_dir.mkdir(parents=True, exist_ok=True)
     _remove_path(target_root)
     if current_source_dir.parent in {paths.knowledge_base_versions_dir, paths.knowledge_base_dir}:
         os.replace(current_source_dir, target_root)
