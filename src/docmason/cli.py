@@ -22,11 +22,19 @@ from .commands import (
 from .host_integration import run_hidden_ask_cli
 from .project import SUPPORTED_DOCUMENT_TYPES
 
+_PUBLIC_COMMAND_METAVAR = (
+    "{prepare,doctor,status,sync,retrieve,trace,validate-kb,sync-adapters,update-core,workflow}"
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the stable command-line interface."""
     parser = argparse.ArgumentParser(prog="docmason", description="DocMason CLI")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar=_PUBLIC_COMMAND_METAVAR,
+    )
 
     prepare_parser = subparsers.add_parser("prepare", help="Bootstrap the local workspace.")
     prepare_parser.add_argument(
@@ -197,12 +205,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # Hidden hook subcommand — called by .claude/hooks/*.sh scripts.
-    hook_parser = subparsers.add_parser("_hook")
+    hook_parser = subparsers.add_parser("_hook", help=argparse.SUPPRESS)
     hook_parser.add_argument(
         "event_name",
         help="Hook event name (session, prompt-submit, post-tool-use, stop).",
     )
     subparsers.add_parser("_ask", help=argparse.SUPPRESS)
+    subparsers._choices_actions = [  # type: ignore[attr-defined]
+        action
+        for action in subparsers._choices_actions  # type: ignore[attr-defined]
+        if getattr(action, "dest", None) not in {"_hook", "_ask"}
+    ]
     return parser
 
 

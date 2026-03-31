@@ -20,7 +20,8 @@ Ordinary users should not need to name it explicitly before asking.
 
 - `grounded-composition` is never a free-standing ordinary front door.
 - Start only from canonical ask turn metadata and canonical ask runtime ownership.
-- If the current turn is missing explicit canonical ask ownership, stop and route back to `ask`.
+- Start only after canonical `ask` has already handed the live turn here with `status = execute` and `inner_workflow_id = grounded-composition`.
+- If the current turn is missing that ask-owned handoff, stop and route back to `ask`.
 
 ## Required Capabilities
 
@@ -34,7 +35,7 @@ If the environment cannot inspect the required evidence, stop and explain the bl
 ## Procedure
 
 1. Start from the canonical `ask` turn metadata and answer-file path.
-   - when `semantic_analysis.evidence_requirements` is present, treat it as the first-pass plan for which published evidence channels to inspect
+   - honor ask-provided `reference_resolution`, `source_scope_policy`, and `semantic_analysis.evidence_requirements` as the governing first-pass plan for this turn
 2. Treat the task as KB-first escalation:
    - run retrieval and trace first
    - inspect `reference_resolution` when the user names a document or locator in user-native terms

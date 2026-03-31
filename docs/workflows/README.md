@@ -87,7 +87,8 @@ The current hybrid queue now distinguishes:
 `docmason sync-adapters` is not a required step before every first question.
 Use it when the chosen agent ecosystem needs generated adapter files or when those files are missing or stale.
 If the normal launcher or `prepare` path cannot finish in the current shell or platform, continue
-with [`docs/setup/manual-workspace-recovery.md`](../setup/manual-workspace-recovery.md).
+with [`docs/setup/manual-workspace-recovery.md`](../setup/manual-workspace-recovery.md) as the
+last fallback rather than as the default first-run branch.
 
 ### Ordinary Ongoing Usage
 
@@ -157,17 +158,21 @@ artifact-level retrieval or cross-source comparison.
 ## Environment Preparation Notes
 
 - `./scripts/bootstrap-workspace.sh --yes` is the preferred zero-to-working launcher from a raw checkout.
-- The launcher should only choose a healthy bootstrap Python and delegate to `docmason prepare --yes`.
+- The launcher should prefer a controlled UV bootstrap asset path for ordinary native cold starts, and should only use an explicit `DOCMASON_BOOTSTRAP_PYTHON` override for operator repair or abnormal shells.
+- When that controlled bootstrap asset path is needed, the launcher should cache it in a shared user cache and use it only to create the repo-local bootstrap helper venv.
 - The launcher now rejects broken recursive stubs and startup-silent bootstrap candidates instead of hanging on them.
 - Prepared steady-state work should run from repo-local managed Python `3.13` under `.docmason/toolchain/python/`.
 - If `uv` is missing, `prepare` should provision it inside `.docmason/toolchain/bootstrap/venv` rather than keeping an externally anchored steady-state runtime.
 - The project runtime itself remains isolated inside repo-local `.venv`.
 - Once `.venv` exists, prefer `./.venv/bin/python -m docmason ...` or the CLI inside `.venv` for ordinary workspace operations.
+- For native Codex/macOS first runs, Homebrew plus LibreOffice are treated as the standard machine baseline. Repo-local runtime bootstrap should happen first; machine-level setup should then complete automatically when host access allows it.
 - For Office rendering, install LibreOffice before syncing PowerPoint, Word, or Excel sources, including legacy `.ppt`, `.doc`, and `.xls` files.
 - For PDF corpora, keep the repo-local PDF stack installed: `PyMuPDF`, `pypdfium2`, `pypdf`, and `pillow`.
 - Markdown, plain text, `.eml`, and the lightweight-compatible text-like inputs do not require LibreOffice.
+- On native Codex/macOS, if DocMason reports that the thread is still in Codex `Default permissions`, switch that thread to `Full access` before retrying machine-level setup. Approving one command prompt does not change the thread-wide permissions mode.
 - On macOS with Homebrew, prefer letting the bootstrap launcher or `docmason prepare --yes` auto-install LibreOffice when required, or use `brew install --cask libreoffice-still`.
 - On macOS without Homebrew, download the official installer from `https://www.libreoffice.org/download/download/`, open the `.dmg`, and drag LibreOffice into `/Applications`.
+- On Claude Code or other non-native host surfaces, the same repair path may still need broader host access, but the product guidance is intentionally generic rather than Codex-UI-specific.
 - On Linux, install LibreOffice with your distribution's preferred package manager flow or the official download page, then ensure `soffice` is on `PATH`.
 
 ## Runtime And Review Notes

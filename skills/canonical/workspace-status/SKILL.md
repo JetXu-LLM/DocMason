@@ -32,7 +32,7 @@ If the agent cannot inspect the filesystem, stop and explain that the current wo
 
 - `status` is descriptive, not reparative. Do not silently switch into `prepare`, `sync`, or `sync-adapters` from inside this workflow.
 - When the workspace is stale or invalid, preserve that distinction instead of flattening it into a generic “not ready” message.
-- When the stage is `control-plane-pending-confirmation`, preserve that state explicitly and surface the exact pending approval action such as `prepare --yes` or `sync --yes`.
+- When the stage is `control-plane-pending-confirmation`, preserve that state explicitly and surface the exact pending approval action such as `switch-host-to-full-access`, `prepare --yes`, or `sync --yes`.
 
 ## Completion Signal
 
@@ -45,7 +45,7 @@ If the agent cannot inspect the filesystem, stop and explain that the current wo
 - `environment.toolchain_mode`, `environment.isolation_grade`, and `environment.entrypoint_health`
   are the stable readiness fields for the prepared runtime.
 - `control_plane` is the authoritative summary for governed waits, approvals, and shared jobs.
-- Pending actions may include `prepare`, `sync-adapters`, `sync`, and `validate-kb`.
+- Pending actions may include `prepare`, `switch-host-to-full-access`, `sync-adapters`, `sync`, and `validate-kb`.
 - Control-plane pending confirmations are authoritative status truth, not optional side notes.
 - A staged knowledge base with pending synthesis or blocking validation is reported as `knowledge-base-invalid`.
 - `sync-adapters` is an operator-maintenance action, not a universal prerequisite before every `ask` turn.

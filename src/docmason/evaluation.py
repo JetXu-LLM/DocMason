@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import ANSWER_STATES, SUPPORT_BASIS_VALUES
-from .conversation import LOG_ORIGIN_EVALUATION_SUITE
+from .conversation import LOG_CONTEXT_FIELD_NAMES, LOG_ORIGIN_EVALUATION_SUITE
 from .project import WorkspacePaths, read_json, write_json
 from .retrieval import (
     ANSWER_WORKFLOW_ID,
@@ -225,6 +225,10 @@ def _normalize_ask_turn_case(case_id: str, payload: Any) -> dict[str, Any]:
         ask_replay.get("host_thread_ref"),
         f"{case_id}.ask_replay.host_thread_ref",
     )
+    trace_via_public_command = _require_bool_or_none(
+        ask_replay.get("trace_via_public_command"),
+        f"{case_id}.ask_replay.trace_via_public_command",
+    )
 
     continuations_payload = ask_replay.get("continuations", [])
     if continuations_payload is None:
@@ -401,6 +405,7 @@ def _normalize_ask_turn_case(case_id: str, payload: Any) -> dict[str, Any]:
     return {
         "replay_source": normalized_replay_source,
         "host_thread_ref": host_thread_ref,
+        "trace_via_public_command": bool(trace_via_public_command),
         "semantic_analysis": semantic_analysis,
         "continuations": normalized_continuations,
         "answer_plan": normalized_answer_plan,
@@ -915,6 +920,66 @@ def _temporary_codex_thread(thread_ref: str) -> Iterator[None]:
             os.environ["CODEX_THREAD_ID"] = previous_thread_ref
 
 
+@contextmanager
+def _temporary_docmason_log_context(
+    log_context: dict[str, str] | None,
+    *,
+    log_origin: str | None = None,
+) -> Iterator[None]:
+    """Bind one transient DocMason log context into the process environment."""
+    updates = {
+        f"DOCMASON_{field_name.upper()}": value
+        for field_name in LOG_CONTEXT_FIELD_NAMES
+        if isinstance(log_context, dict)
+        and isinstance((value := log_context.get(field_name)), str)
+        and value
+    }
+    if isinstance(log_origin, str) and log_origin:
+        updates["DOCMASON_LOG_ORIGIN"] = log_origin
+    previous = {name: os.environ.get(name) for name in updates}
+    os.environ.update(updates)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _trace_answer_file_for_ask_replay(
+    paths: WorkspacePaths,
+    *,
+    answer_file: Path,
+    top: int,
+    log_context: dict[str, str] | None,
+    log_origin: str,
+    via_public_command: bool,
+) -> dict[str, Any]:
+    """Trace one replay answer via the requested owner surface."""
+    if not via_public_command:
+        from .retrieval import trace_answer_file
+
+        return trace_answer_file(
+            paths,
+            answer_file=answer_file,
+            top=top,
+            log_context=log_context,
+            log_origin=log_origin,
+        )
+
+    from .commands import trace_knowledge
+
+    with _temporary_docmason_log_context(log_context, log_origin=log_origin):
+        report = trace_knowledge(
+            paths=paths,
+            answer_file=str(answer_file),
+            top=top,
+        )
+    return dict(report.payload)
+
+
 def _ask_turn_thread_ref(case: dict[str, Any], *, run_scope_id: str) -> str:
     """Return the stable host thread ref for one ask-turn evaluation case."""
     ask_replay = case.get("ask_replay", {})
@@ -1408,7 +1473,6 @@ def _execute_ask_turn_case(
     """Replay one manual ask-path case through the canonical ask front door."""
     from .ask import complete_ask_turn, prepare_ask_turn, settle_lane_c_shared_refresh
     from .conversation import load_turn_record
-    from .retrieval import trace_answer_file
 
     ask_replay = dict(case.get("ask_replay") or {})
     thread_ref = _ask_turn_thread_ref(case, run_scope_id=run_scope_id)
@@ -1493,12 +1557,13 @@ def _execute_ask_turn_case(
                 if isinstance(raw_log_context, dict)
                 else None
             )
-            trace = trace_answer_file(
+            trace = _trace_answer_file_for_ask_replay(
                 paths,
                 answer_file=answer_file,
                 top=int(answer_plan["trace_top"]),
                 log_context=log_context,
                 log_origin=LOG_ORIGIN_EVALUATION_SUITE,
+                via_public_command=bool(ask_replay.get("trace_via_public_command")),
             )
             completed = complete_ask_turn(
                 paths,
@@ -1582,12 +1647,13 @@ def _execute_ask_turn_case(
                         answer_file_path=post_refresh_answer_file_path,
                         answer_text=post_refresh_answer_text,
                     )
-                    post_refresh_trace = trace_answer_file(
+                    post_refresh_trace = _trace_answer_file_for_ask_replay(
                         paths,
                         answer_file=post_refresh_answer_file,
                         top=post_refresh_trace_top,
                         log_context=log_context,
                         log_origin=LOG_ORIGIN_EVALUATION_SUITE,
+                        via_public_command=bool(ask_replay.get("trace_via_public_command")),
                     )
                     all_session_ids = _deduplicate_strings(
                         [

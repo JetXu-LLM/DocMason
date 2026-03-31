@@ -3116,6 +3116,9 @@ def _merge_log_context(
             value = fallback_record.get(field_name)
             if isinstance(value, str) and value:
                 merged[field_name] = value
+        active_run_id = fallback_record.get("active_run_id")
+        if isinstance(active_run_id, str) and active_run_id:
+            merged["run_id"] = active_run_id
         merged.update(semantic_log_context_from_record(fallback_record))
     if explicit_log_context:
         for field_name in LOG_CONTEXT_FIELD_NAMES:

@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANUAL_RECOVERY_DOC="docs/setup/manual-workspace-recovery.md"
 ASSUME_YES=0
 JSON_FLAG=""
+BOOTSTRAP_UV_INSTALLER_URL="${DOCMASON_BOOTSTRAP_UV_INSTALLER_URL:-https://astral.sh/uv/install.sh}"
+BOOTSTRAP_PYTHON_REQUEST="${DOCMASON_BOOTSTRAP_PYTHON_VERSION:-3.13}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -33,21 +35,11 @@ fail() {
 
 python_is_supported() {
   local candidate="$1"
-  local first_line=""
   local probe_pid=""
   local ticks=0
 
   if [[ ! -x "$candidate" ]]; then
     return 1
-  fi
-
-  if command -v file >/dev/null 2>&1; then
-    if file "$candidate" 2>/dev/null | grep -qi 'Python script text executable'; then
-      first_line="$(head -n 1 "$candidate" 2>/dev/null || true)"
-      if [[ "$first_line" == '#!/usr/bin/env python3' || "$first_line" == '#!/usr/bin/env python' ]]; then
-        return 1
-      fi
-    fi
   fi
 
   "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
@@ -69,13 +61,14 @@ python_is_supported() {
   wait "$probe_pid" >/dev/null 2>&1
 }
 
-resolve_candidate() {
-  local candidate="$1"
-  if command -v "$candidate" >/dev/null 2>&1; then
-    command -v "$candidate"
-  else
-    printf '%s\n' "$candidate"
-  fi
+launch_prepare() {
+  local python_bin="$1"
+  local bootstrap_source="$2"
+  shift 2
+  cd "$ROOT"
+  export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+  export DOCMASON_BOOTSTRAP_SOURCE="$bootstrap_source"
+  exec "$python_bin" -m docmason prepare --yes "$@"
 }
 
 find_repo_local_bootstrap_python() {
@@ -93,136 +86,103 @@ find_repo_local_bootstrap_python() {
   return 1
 }
 
-find_supported_shared_python() {
-  local candidates=()
-  local candidate resolved
-
-  if [[ -n "${DOCMASON_BOOTSTRAP_PYTHON:-}" ]]; then
-    candidates+=("${DOCMASON_BOOTSTRAP_PYTHON}")
+shared_bootstrap_cache_root() {
+  if [[ -n "${DOCMASON_SHARED_BOOTSTRAP_CACHE:-}" ]]; then
+    printf '%s\n' "${DOCMASON_SHARED_BOOTSTRAP_CACHE}"
+    return 0
   fi
-  candidates+=(
-    python3.13
-    python3.12
-    python3.11
-    python3
-    python
-    /opt/homebrew/bin/python3.13
-    /opt/homebrew/bin/python3.12
-    /opt/homebrew/bin/python3.11
-    /opt/homebrew/bin/python3
-    /usr/local/bin/python3.13
-    /usr/local/bin/python3.12
-    /usr/local/bin/python3.11
-    /usr/local/bin/python3
-  )
-
-  for candidate in "${candidates[@]}"; do
-    resolved="$(resolve_candidate "$candidate")"
-    if [[ ! -x "$resolved" ]]; then
-      continue
-    fi
-    if python_is_supported "$resolved"; then
-      printf '%s\n' "$resolved"
-      return 0
-    fi
-  done
-  return 1
-}
-
-find_brew() {
-  if command -v brew >/dev/null 2>&1; then
-    command -v brew
+  if [[ "$(uname -s)" == "Darwin" && -n "${HOME:-}" ]]; then
+    printf '%s\n' "$HOME/Library/Caches/DocMason/bootstrap"
+    return 0
   fi
-}
-
-homebrew_prefix() {
-  if [[ "$(uname -m)" == "arm64" ]]; then
-    printf '%s\n' "/opt/homebrew"
-  else
-    printf '%s\n' "/usr/local"
+  if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+    printf '%s\n' "$XDG_CACHE_HOME/docmason/bootstrap"
+    return 0
   fi
-}
-
-refresh_brew_path() {
-  local prefix
-  prefix="$(homebrew_prefix)"
-  if [[ -x "$prefix/bin/brew" ]]; then
-    export PATH="$prefix/bin:$PATH"
+  if [[ -n "${HOME:-}" ]]; then
+    printf '%s\n' "$HOME/.cache/docmason/bootstrap"
+    return 0
   fi
+  printf '%s\n' "$ROOT/.docmason/toolchain/bootstrap/cache"
 }
 
-homebrew_auto_install_feasible() {
-  local prefix parent
-  [[ "$(uname -s)" == "Darwin" ]] || return 1
-  [[ -x /bin/bash ]] || return 1
-  [[ -x /usr/bin/curl ]] || return 1
-  [[ -x /usr/bin/xcode-select ]] || return 1
-  /usr/bin/xcode-select -p >/dev/null 2>&1 || return 1
-  prefix="$(homebrew_prefix)"
-  if [[ -e "$prefix" ]]; then
-    [[ -w "$prefix" ]] || return 1
-  else
-    parent="$(dirname "$prefix")"
-    [[ -w "$parent" ]] || return 1
+ensure_bootstrap_cache_root() {
+  local cache_root="$1"
+  mkdir -p "$cache_root"
+}
+
+install_controlled_bootstrap_uv() {
+  local cache_root="$1"
+  local installer_path="$cache_root/uv-installer.sh"
+  local unmanaged_dir="$cache_root/uv-unmanaged"
+  local uv_bin="$unmanaged_dir/uv"
+
+  if [[ -x "$uv_bin" ]]; then
+    printf '%s\n' "$uv_bin"
+    return 0
   fi
+
+  command -v curl >/dev/null 2>&1 || fail "The controlled bootstrap asset requires `curl`."
+  command -v sh >/dev/null 2>&1 || fail "The controlled bootstrap asset requires `/bin/sh`."
+
+  log "Downloading the controlled UV bootstrap asset..."
+  curl -LsSf "$BOOTSTRAP_UV_INSTALLER_URL" -o "$installer_path" \
+    || fail "Could not download the controlled UV bootstrap asset."
+
+  log "Installing the controlled UV bootstrap asset..."
+  mkdir -p "$unmanaged_dir"
+  UV_UNMANAGED_INSTALL="$unmanaged_dir" UV_NO_MODIFY_PATH=1 sh "$installer_path" \
+    || fail "Could not install the controlled UV bootstrap asset."
+
+  if [[ ! -x "$uv_bin" && -x "$unmanaged_dir/bin/uv" ]]; then
+    uv_bin="$unmanaged_dir/bin/uv"
+  fi
+  [[ -x "$uv_bin" ]] || fail "The controlled UV bootstrap asset did not produce a runnable `uv` binary."
+  printf '%s\n' "$uv_bin"
 }
 
-install_homebrew() {
-  log "Installing Homebrew with the official unattended installer..."
-  NONINTERACTIVE=1 /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+create_repo_local_bootstrap_venv() {
+  local uv_bin="$1"
+  local bootstrap_python="$ROOT/.docmason/toolchain/bootstrap/venv/bin/python"
+
+  if [[ -x "$bootstrap_python" ]] && python_is_supported "$bootstrap_python"; then
+    printf '%s\n' "$bootstrap_python"
+    return 0
+  fi
+
+  mkdir -p "$ROOT/.docmason/toolchain/bootstrap"
+  mkdir -p "$ROOT/.docmason/toolchain/cache/uv"
+  log "Creating the repo-local bootstrap helper venv through the controlled UV bootstrap asset..."
+  UV_CACHE_DIR="$ROOT/.docmason/toolchain/cache/uv" \
+    "$uv_bin" venv --python "$BOOTSTRAP_PYTHON_REQUEST" "$ROOT/.docmason/toolchain/bootstrap/venv" \
+    || fail "Could not create the repo-local bootstrap helper venv from the controlled bootstrap asset."
+
+  [[ -x "$bootstrap_python" ]] || fail "The repo-local bootstrap helper venv was created without a runnable Python."
+  printf '%s\n' "$bootstrap_python"
 }
 
-install_supported_python() {
-  local brew_bin="$1"
-  log "Installing a shared bootstrap Python with Homebrew..."
-  "$brew_bin" install python
-}
-
-launch_prepare() {
-  local python_bin="$1"
-  shift
-  cd "$ROOT"
-  export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-  exec "$python_bin" -m docmason prepare --yes "$@"
-}
+if [[ -n "${DOCMASON_BOOTSTRAP_PYTHON:-}" ]] && python_is_supported "${DOCMASON_BOOTSTRAP_PYTHON}"; then
+  log "Using the explicit manual bootstrap Python override."
+  launch_prepare "${DOCMASON_BOOTSTRAP_PYTHON}" "manual-bootstrap-python" ${JSON_FLAG:+$JSON_FLAG}
+fi
 
 BOOTSTRAP_PYTHON="$(find_repo_local_bootstrap_python || true)"
 if [[ -n "$BOOTSTRAP_PYTHON" ]]; then
   if [[ "$BOOTSTRAP_PYTHON" == "$ROOT/.docmason/toolchain/python/current/bin/python3.13" ]]; then
     log "Using the repo-local managed Python repair path."
-  else
-    log "Using the repo-local bootstrap helper venv."
+    launch_prepare "$BOOTSTRAP_PYTHON" "repo-local-managed" ${JSON_FLAG:+$JSON_FLAG}
   fi
-  launch_prepare "$BOOTSTRAP_PYTHON" ${JSON_FLAG:+$JSON_FLAG}
+  log "Using the repo-local bootstrap helper venv."
+  launch_prepare "$BOOTSTRAP_PYTHON" "repo-local-bootstrap-venv" ${JSON_FLAG:+$JSON_FLAG}
 fi
 
-BREW_BIN="$(find_brew || true)"
-refresh_brew_path
-BREW_BIN="$(find_brew || true)"
-BOOTSTRAP_PYTHON="$(find_supported_shared_python || true)"
-
-if [[ -z "$BOOTSTRAP_PYTHON" && -z "$BREW_BIN" && "$ASSUME_YES" -eq 1 ]]; then
-  if homebrew_auto_install_feasible; then
-    install_homebrew || fail "Could not install Homebrew through the official unattended path."
-    hash -r
-    refresh_brew_path
-    BREW_BIN="$(find_brew || true)"
-  fi
+if [[ "$ASSUME_YES" -ne 1 ]]; then
+  fail "No supported repo-local bootstrap runtime is available yet. Rerun with --yes to allow the controlled bootstrap asset path."
 fi
 
-if [[ -z "$BOOTSTRAP_PYTHON" && -n "$BREW_BIN" ]]; then
-  if [[ "$ASSUME_YES" -eq 1 ]]; then
-    install_supported_python "$BREW_BIN" || fail "Could not install a supported bootstrap Python with Homebrew."
-    hash -r
-    BOOTSTRAP_PYTHON="$(find_supported_shared_python || true)"
-  else
-    fail "No supported Python 3.11+ bootstrap interpreter was found. Rerun with --yes to allow automated installation through Homebrew."
-  fi
-fi
-
-if [[ -z "$BOOTSTRAP_PYTHON" ]]; then
-  fail "Could not find a supported Python 3.11+ bootstrap interpreter. Install one or provide it via DOCMASON_BOOTSTRAP_PYTHON."
-fi
-
-log "Using shared bootstrap Python to provision the repo-local managed Python 3.13 workspace."
-launch_prepare "$BOOTSTRAP_PYTHON" ${JSON_FLAG:+$JSON_FLAG}
+CACHE_ROOT="$(shared_bootstrap_cache_root)"
+ensure_bootstrap_cache_root "$CACHE_ROOT"
+BOOTSTRAP_UV="$(install_controlled_bootstrap_uv "$CACHE_ROOT")"
+BOOTSTRAP_PYTHON="$(create_repo_local_bootstrap_venv "$BOOTSTRAP_UV")"
+log "Using the controlled bootstrap asset path to provision the repo-local runtime."
+launch_prepare "$BOOTSTRAP_PYTHON" "controlled-bootstrap-asset" ${JSON_FLAG:+$JSON_FLAG}

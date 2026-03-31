@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -27,6 +28,7 @@ from docmason.interaction import (
     promote_native_ledger_turn,
     reconcile_claude_code_thread,
     reconcile_codex_thread,
+    refresh_interaction_overlay,
 )
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import merge_pending_interaction_overlay, retrieve_corpus, trace_source
@@ -1255,6 +1257,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
 
         _persist_interaction_entry(
             workspace,
+            native_ledger_id="a" * 64,
             conversation_id="thread-reuse",
             turn_id="turn-001",
             native_turn_id="native-turn-001",
@@ -1955,6 +1958,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         workspace = self.make_workspace()
         entry = _persist_interaction_entry(
             workspace,
+            native_ledger_id="a" * 64,
             conversation_id="thread-123",
             turn_id="turn-001",
             native_turn_id="native-turn-1",
@@ -1986,6 +1990,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
 
         refreshed = _persist_interaction_entry(
             workspace,
+            native_ledger_id="a" * 64,
             conversation_id="thread-123",
             turn_id="turn-001",
             native_turn_id="native-turn-1",
@@ -2010,6 +2015,159 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertEqual(refreshed["status"], "promoted")
         self.assertEqual(refreshed["promoted_memory_id"], "interaction-memory-123")
         self.assertEqual(refreshed["promoted_at"], "2026-03-17T00:10:00Z")
+
+    def test_persist_interaction_entry_keys_by_native_ledger_identity(self) -> None:
+        workspace = self.make_workspace()
+        entry = _persist_interaction_entry(
+            workspace,
+            native_ledger_id="a" * 64,
+            conversation_id="thread-123",
+            turn_id="turn-001",
+            native_turn_id="native-turn-1",
+            recorded_at="2026-03-17T00:00:00Z",
+            user_text="Summarize the proposal.",
+            assistant_excerpt="Summary ready.",
+            attachment_refs=[],
+            continuation_type=None,
+            related_source_ids=[],
+            tool_use_audit={},
+        )
+
+        self.assertEqual(
+            entry["interaction_id"],
+            f"interaction-{'a' * 64}-native-turn-1",
+        )
+        self.assertEqual(entry["native_ledger_id"], "a" * 64)
+        self.assertTrue(
+            (
+                workspace.interaction_entries_dir / f"{entry['interaction_id']}.json"
+            ).exists()
+        )
+
+    def test_persist_interaction_entry_updates_same_entry_after_late_binding(self) -> None:
+        workspace = self.make_workspace()
+        native_ledger_id = "b" * 64
+        first = _persist_interaction_entry(
+            workspace,
+            native_ledger_id=native_ledger_id,
+            conversation_id=native_ledger_id,
+            turn_id="turn-001",
+            native_turn_id="native-turn-1",
+            recorded_at="2026-03-17T00:00:00Z",
+            user_text="Summarize the proposal.",
+            assistant_excerpt="Summary ready.",
+            attachment_refs=[],
+            continuation_type=None,
+            related_source_ids=[],
+            tool_use_audit={},
+        )
+        second = _persist_interaction_entry(
+            workspace,
+            native_ledger_id=native_ledger_id,
+            conversation_id="7be8db04-f984-4a93-a38c-e2754529c38d",
+            turn_id="turn-001",
+            native_turn_id="native-turn-1",
+            recorded_at="2026-03-17T00:00:00Z",
+            user_text="Summarize the proposal.",
+            assistant_excerpt="Summary ready.",
+            attachment_refs=[],
+            continuation_type=None,
+            related_source_ids=[],
+            tool_use_audit={},
+        )
+
+        entry_files = list(workspace.interaction_entries_dir.glob("*.json"))
+        self.assertEqual(len(entry_files), 1)
+        self.assertEqual(first["interaction_id"], second["interaction_id"])
+        self.assertEqual(second["conversation_id"], "7be8db04-f984-4a93-a38c-e2754529c38d")
+
+    def test_sync_prunes_orphan_duplicate_promoted_memory_after_entry_repair(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        native_ledger_id = "c" * 64
+        canonical_conversation_id = "7be8db04-f984-4a93-a38c-e2754529c38d"
+        native_turn_id = "native-turn-1"
+        stable_interaction_id = f"interaction-{native_ledger_id}-{native_turn_id}"
+        legacy_interaction_id = f"interaction-{canonical_conversation_id}-{native_turn_id}"
+
+        _persist_interaction_entry(
+            workspace,
+            native_ledger_id=native_ledger_id,
+            conversation_id=canonical_conversation_id,
+            turn_id="turn-001",
+            native_turn_id=native_turn_id,
+            recorded_at="2026-03-17T00:00:00Z",
+            user_text="Summarize the proposal.",
+            assistant_excerpt="Summary ready.",
+            attachment_refs=[],
+            continuation_type=None,
+            related_source_ids=[],
+            tool_use_audit={},
+        )
+        refresh_interaction_overlay(workspace)
+        first_sync = sync_workspace(workspace)
+        self.assertEqual(first_sync.payload["sync_status"], "valid")
+
+        stable_path = workspace.interaction_entries_dir / f"{stable_interaction_id}.json"
+        stable_payload = read_json(stable_path)
+        current_manifest = read_json(workspace.interaction_manifest_path("current"))
+        stable_memory_id = current_manifest["memories"][0]["memory_id"]
+
+        legacy_payload = dict(stable_payload)
+        legacy_payload["interaction_id"] = legacy_interaction_id
+        legacy_payload["entry_path"] = str(
+            (workspace.interaction_entries_dir / f"{legacy_interaction_id}.json").relative_to(
+                workspace.root
+            )
+        )
+        legacy_payload["promoted_memory_id"] = "interaction-memory-legacy"
+        legacy_payload["promoted_at"] = "2026-03-17T00:09:00Z"
+        write_json(
+            workspace.interaction_entries_dir / f"{legacy_interaction_id}.json",
+            legacy_payload,
+        )
+
+        stable_memory_dir = workspace.interaction_memories_dir("current") / stable_memory_id
+        legacy_memory_dir = (
+            workspace.interaction_memories_dir("current") / "interaction-memory-legacy"
+        )
+        shutil.copytree(stable_memory_dir, legacy_memory_dir)
+        legacy_source_manifest = read_json(legacy_memory_dir / "source_manifest.json")
+        legacy_source_manifest["source_id"] = "interaction-memory-legacy"
+        legacy_source_manifest["current_path"] = "interaction/interaction-memory-legacy"
+        legacy_source_manifest["path_history"] = ["interaction/interaction-memory-legacy"]
+        legacy_source_manifest["interaction_ids"] = [legacy_interaction_id]
+        write_json(legacy_memory_dir / "source_manifest.json", legacy_source_manifest)
+        legacy_context = read_json(legacy_memory_dir / "interaction_context.json")
+        legacy_context["memory_id"] = "interaction-memory-legacy"
+        legacy_context["interaction_ids"] = [legacy_interaction_id]
+        write_json(legacy_memory_dir / "interaction_context.json", legacy_context)
+
+        refresh_interaction_overlay(workspace)
+        result = sync_workspace(workspace)
+        self.assertEqual(result.payload["sync_status"], "valid")
+        current_manifest = read_json(workspace.interaction_manifest_path("current"))
+        self.assertEqual(current_manifest["memory_count"], 1)
+        self.assertEqual(
+            [memory["memory_id"] for memory in current_manifest["memories"]],
+            [stable_memory_id],
+        )
+        self.assertTrue(
+            (workspace.interaction_entries_dir / f"{stable_interaction_id}.json").exists()
+        )
+        self.assertFalse(
+            (workspace.interaction_entries_dir / f"{legacy_interaction_id}.json").exists()
+        )
+        self.assertTrue((workspace.interaction_memories_dir("current") / stable_memory_id).exists())
+        self.assertFalse(
+            (
+                workspace.interaction_memories_dir("current") / "interaction-memory-legacy"
+            ).exists()
+        )
 
 
 if __name__ == "__main__":

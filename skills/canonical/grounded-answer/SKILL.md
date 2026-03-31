@@ -14,7 +14,8 @@ Ordinary users should not need to name this workflow explicitly before asking bu
 
 - `grounded-answer` is not a free-standing ordinary front door.
 - Start only from canonical ask turn metadata and canonical ask runtime ownership.
-- If the current turn is missing explicit canonical ask ownership, stop and route back to `ask`.
+- Start only after canonical `ask` has already handed the live turn here with `status = execute` and `inner_workflow_id = grounded-answer`.
+- If the current turn is missing that ask-owned handoff, stop and route back to `ask`.
 
 ## Required Capabilities
 
@@ -34,7 +35,7 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
      - `external-source-verified`
      - `model-knowledge`
      - `mixed`
-   - when the front controller provides `evidence_requirements`, treat them as the canonical odd-question inspection contract
+   - honor ask-provided `reference_resolution`, `source_scope_policy`, and `evidence_requirements`; when `evidence_requirements` is present, treat it as the canonical odd-question inspection contract before widening scope or changing evidence basis
 2. Normalize the user question and decompose it only when that improves grounded retrieval.
 3. Run `docmason retrieve "<query>" --json` for the initial question or sub-question when KB evidence is part of the answer path.
    - prefer published affordance sidecars and already-published evidence channels over ad hoc source inspection

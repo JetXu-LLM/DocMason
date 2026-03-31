@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import docmason.commands as commands_module
 import docmason.retrieval as retrieval_module
 from docmason.ask import complete_ask_turn, prepare_ask_turn, settle_lane_c_shared_refresh
 from docmason.cli import build_parser
@@ -545,6 +546,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
         required_sources_or_units: list[str] | None = None,
         minimum_support_overlap: int = 0,
         feedback_tags: list[str] | None = None,
+        trace_via_public_command: bool = False,
     ) -> dict[str, object]:
         return {
             "case_id": case_id,
@@ -566,6 +568,11 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 "replay_source": {"kind": "manual-suite"},
                 "semantic_analysis": semantic_analysis,
                 "continuations": continuations or [],
+                **(
+                    {"trace_via_public_command": True}
+                    if trace_via_public_command
+                    else {}
+                ),
                 **({"answer_plan": answer_plan} if answer_plan is not None else {}),
                 **({"hybrid_refresh": hybrid_refresh} if hybrid_refresh is not None else {}),
                 **({"expectations": expectations} if expectations is not None else {}),
@@ -1009,6 +1016,79 @@ class EvaluationRuntimeTests(unittest.TestCase):
         self.assertIn("benchmark_candidates", ready_case["artifact_paths"])
         self.assertIn("answer_history_index", ready_case["artifact_paths"])
         self.assertIn("projection_state", ready_case["artifact_paths"])
+
+    def test_run_suite_can_trace_ask_turn_via_public_trace_command(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-public-trace-path",
+                    family="ask-ready",
+                    question="What does the campaign planning brief say about the architecture operating model?",
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids[0]],
+                    required_sources_or_units=[source_ids[0]],
+                    minimum_support_overlap=1,
+                    reference_facts=["The replay should be able to close via the public trace command path."],
+                    answer_plan={
+                        "answer_text": (
+                            "The campaign planning brief says the strategy defines an architecture "
+                            "operating model and connects strategy to implementation."
+                        ),
+                        "trace_top": 2,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                    },
+                    trace_via_public_command=True,
+                )
+            ],
+        )
+        real_trace_knowledge: Any = commands_module.trace_knowledge
+        trace_calls = 0
+
+        def patched_trace_knowledge(*args: object, **kwargs: object) -> CommandReport:
+            nonlocal trace_calls
+            trace_calls += 1
+            return real_trace_knowledge(*args, **kwargs)
+
+        with mock.patch(
+            "docmason.commands.trace_knowledge",
+            side_effect=patched_trace_knowledge,
+        ):
+            run_payload = run_evaluation_suite(
+                workspace,
+                suite_path=suite_path,
+                rubric_path=rubric_path,
+                judge_trials_path=judge_path,
+                run_label="Ask public trace path",
+            )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        self.assertEqual(trace_calls, 1)
+        case = run_payload["cases"][0]
+        query_session = read_json(
+            workspace.query_sessions_dir / f"{case['execution']['session_id']}.json"
+        )
+        retrieval_trace = read_json(
+            workspace.retrieval_traces_dir / f"{case['execution']['trace_id']}.json"
+        )
+        self.assertEqual(query_session["log_origin"], "evaluation-suite")
+        self.assertEqual(retrieval_trace["log_origin"], "evaluation-suite")
 
     def test_run_suite_marks_ask_turn_replay_as_synthetic_runtime(self) -> None:
         workspace = self.make_workspace()

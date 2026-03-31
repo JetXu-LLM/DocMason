@@ -194,6 +194,17 @@ def _turn_detail(turn: dict[str, Any], *, fallback: str | None = None) -> str | 
     return None
 
 
+def _bundle_notice(turn: dict[str, Any], *, user_reply_allowed: bool) -> str | None:
+    if not user_reply_allowed:
+        return None
+    if _nonempty_string(turn.get("inner_workflow_id")) != "grounded-composition":
+        return None
+    bundle_paths = _string_list(turn.get("bundle_paths"))
+    if not bundle_paths:
+        return None
+    return f"Bundle artifacts available at {bundle_paths[0]}."
+
+
 def _host_turn_payload(
     paths: WorkspacePaths,
     *,
@@ -234,6 +245,7 @@ def _host_turn_payload(
         "issue_codes": _string_list(turn.get("issue_codes")),
         "answer_file_path": _nonempty_string(turn.get("answer_file_path")),
         "bundle_paths": _string_list(turn.get("bundle_paths")),
+        "bundle_notice": _bundle_notice(turn, user_reply_allowed=user_reply_allowed),
         "inner_workflow_id": _nonempty_string(turn.get("inner_workflow_id")),
         "question_domain": _nonempty_string(turn.get("question_domain")),
         "support_strategy": _nonempty_string(turn.get("support_strategy")),

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 MINIMUM_PYTHON = (3, 11)
-BOOTSTRAP_STATE_SCHEMA_VERSION = 3
+BOOTSTRAP_STATE_SCHEMA_VERSION = 4
 MANUAL_WORKSPACE_RECOVERY_DOC = "docs/setup/manual-workspace-recovery.md"
 
 
@@ -657,6 +657,15 @@ class WorkspacePaths:
     def canonical_workflow_metadata_files(self) -> list[Path]:
         return [directory / "workflow.json" for directory in self.canonical_skill_directories()]
 
+    def canonical_skill_reference_files(self) -> list[Path]:
+        files: list[Path] = []
+        for directory in self.canonical_skill_directories():
+            references_dir = directory / "references"
+            if not references_dir.exists():
+                continue
+            files.extend(path for path in references_dir.rglob("*") if path.is_file())
+        return sorted(files)
+
     def operator_skill_files(self) -> list[Path]:
         return [directory / "SKILL.md" for directory in self.operator_skill_directories()]
 
@@ -670,6 +679,7 @@ class WorkspacePaths:
         return [
             *self.canonical_skill_files(),
             *self.canonical_workflow_metadata_files(),
+            *self.canonical_skill_reference_files(),
         ]
 
     def generated_claude_core_files(self) -> list[Path]:
@@ -1254,6 +1264,22 @@ def cached_bootstrap_readiness(
             "toolchain": toolchain,
         }
 
+    machine_baseline_ready = bool(state.get("machine_baseline_ready", True))
+    machine_baseline_status = str(state.get("machine_baseline_status") or "")
+    if not machine_baseline_ready and machine_baseline_status not in {"", "not-applicable"}:
+        return {
+            "ready": False,
+            "reason": machine_baseline_status,
+            "detail": (
+                str(state.get("host_access_guidance") or "")
+                or str(state.get("machine_baseline_status") or "")
+                or "The native machine baseline is not ready yet."
+            ),
+            "manual_recovery_doc": manual_doc,
+            "state": state,
+            "toolchain": toolchain,
+        }
+
     if require_sync_capability:
         requirements = source_runtime_requirements(paths)
         if requirements["requires_office_renderer"] and not bool(
@@ -1311,6 +1337,16 @@ def bootstrap_state_summary(
         "cached_ready": bool(readiness.get("ready")),
         "reason": readiness.get("reason"),
         "detail": readiness.get("detail"),
+        "workspace_runtime_ready": bool(state.get("workspace_runtime_ready"))
+        if state
+        else False,
+        "machine_baseline_ready": bool(state.get("machine_baseline_ready", True))
+        if state
+        else False,
+        "machine_baseline_status": state.get("machine_baseline_status") if state else None,
+        "bootstrap_source": state.get("bootstrap_source") if state else None,
+        "host_access_required": bool(state.get("host_access_required")) if state else False,
+        "host_access_guidance": state.get("host_access_guidance") if state else None,
         "toolchain": dict(toolchain_value) if isinstance(toolchain_value, dict) else {},
         "manual_recovery_doc": readiness.get("manual_recovery_doc")
         or manual_workspace_recovery_doc(),

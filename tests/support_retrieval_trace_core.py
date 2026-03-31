@@ -21,6 +21,7 @@ from docmason.commands import (
 from docmason.knowledge import update_source_index
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.review import refresh_log_review_summary
+from docmason.run_control import RUN_ORIGIN_ASK_FRONT_DOOR, run_state_path
 from docmason.semantic_overlays import write_semantic_overlay
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
@@ -108,6 +109,14 @@ class RetrievalTraceCoreTests(unittest.TestCase):
                 ],
             },
         )
+        run_state = {
+            "run_id": "run-001",
+            "conversation_id": thread_id,
+            "turn_id": "turn-001",
+            "run_origin": RUN_ORIGIN_ASK_FRONT_DOOR,
+            "status": "active",
+        }
+        write_json(run_state_path(workspace, "run-001"), run_state)
 
     def create_pdf(self, path: Path, *, page_count: int = 1) -> None:
         from pypdf import PdfWriter
@@ -1199,6 +1208,58 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         trace_path = workspace.retrieval_traces_dir / f"{report.payload['trace_id']}.json"
         trace_payload = read_json(trace_path)
         self.assertEqual(trace_payload["log_origin"], "operator-direct")
+
+    def test_trace_answer_file_uses_interactive_origin_when_active_thread_is_canonical_ask(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+        self.seed_active_thread_turn(workspace, front_door_state="canonical-ask")
+
+        answer_path = workspace.answers_dir / "thread-operator" / "turn-001.md"
+        answer_path.write_text("The planning brief connects strategy to implementation.\n")
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
+            report = trace_knowledge(answer_file=str(answer_path), top=2, paths=workspace)
+
+        trace_path = workspace.retrieval_traces_dir / f"{report.payload['trace_id']}.json"
+        trace_payload = read_json(trace_path)
+        self.assertEqual(trace_payload["log_origin"], "interactive-ask")
+        self.assertEqual(trace_payload["canonical_binding_status"], "canonical")
+        self.assertEqual(trace_payload["run_id"], "run-001")
+
+    def test_trace_session_uses_interactive_origin_when_active_thread_is_canonical_ask(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+        self.seed_active_thread_turn(workspace, front_door_state="canonical-ask")
+        answer_path = workspace.answers_dir / "thread-operator" / "turn-001.md"
+        answer_path.write_text("The planning brief connects strategy to implementation.\n")
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
+            answer_trace_report = trace_knowledge(
+                answer_file=str(answer_path),
+                top=2,
+                paths=workspace,
+            )
+            trace_report = trace_knowledge(
+                session_id=answer_trace_report.payload["session_id"],
+                top=2,
+                paths=workspace,
+            )
+
+        trace_path = workspace.retrieval_traces_dir / f"{trace_report.payload['trace_id']}.json"
+        trace_payload = read_json(trace_path)
+        self.assertEqual(trace_payload["log_origin"], "interactive-ask")
+        self.assertEqual(trace_payload["canonical_binding_status"], "canonical")
+        self.assertEqual(trace_payload["run_id"], "run-001")
 
     def test_retrieve_and_trace_survive_reconciliation_lease_conflict_with_warning(self) -> None:
         workspace = self.make_workspace()

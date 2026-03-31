@@ -85,6 +85,7 @@ Non-negotiable rule:
 - Prefer `--json` when machine-readable output helps.
 - Do not invent new public commands or claim planned workflows already exist.
 - `ask` is exposed through the canonical skill, not as a public CLI command.
+- When a supported host needs the exact ordinary-ask opening and completion rules, inspect `skills/canonical/ask/SKILL.md` rather than CLI help, hidden-surface probing, or ad hoc source reverse engineering.
 - Stable command output, JSON payload text, prompts, public docs, code, and comments remain English.
 - Final user-facing replies should normally match the user's language unless they explicitly ask for another language.
 - If you are unsure which command a workflow should use, inspect the matching canonical skill instead of guessing from memory.

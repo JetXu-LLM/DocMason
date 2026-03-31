@@ -27,6 +27,10 @@ CONFIRMATION_KIND_PROMPTS = {
         "This question requires additional local dependencies before it can continue safely. "
         "Prepare the workspace now?"
     ),
+    "host-access-upgrade": (
+        "This question needs a host-access upgrade before machine-level setup can continue. "
+        "Upgrade host access now and then continue the same task?"
+    ),
 }
 AFFIRMATIVE_CONFIRMATIONS = frozenset(
     {"y", "yes", "ok", "okay", "start", "continue", "是", "好", "开始", "继续", "确认"}
@@ -325,6 +329,7 @@ def required_prepare_capabilities(
     editable_install: bool | None = None,
     editable_detail: str | None = None,
     office_snapshot: dict[str, Any] | None = None,
+    machine_baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from .commands import inspect_editable_install
     from .workspace_probe import office_renderer_snapshot
@@ -333,21 +338,40 @@ def required_prepare_capabilities(
         editable_install, editable_detail = inspect_editable_install(paths)
     if office_snapshot is None:
         office_snapshot = office_renderer_snapshot(paths)
+    if machine_baseline is None:
+        machine_baseline = {
+            "applicable": False,
+            "ready": True,
+            "status": "not-applicable",
+            "host_access_required": False,
+            "detail": "",
+        }
     required_capabilities: list[str] = []
     intrusion_class = "repo-local"
     reasons: list[str] = []
+    confirmation_kind: str | None = None
     if not editable_install:
         required_capabilities.append("editable-install")
         reasons.append(str(editable_detail))
-    if office_snapshot.get("required") and not office_snapshot.get("ready"):
+    if bool(machine_baseline.get("applicable")) and not bool(machine_baseline.get("ready")):
+        required_capabilities.append("machine-baseline")
+        intrusion_class = "high-intrusion"
+        reasons.append(str(machine_baseline.get("detail") or "Machine baseline is unavailable."))
+        if bool(machine_baseline.get("host_access_required")):
+            intrusion_class = "host-access-upgrade"
+            confirmation_kind = "host-access-upgrade"
+    elif office_snapshot.get("required") and not office_snapshot.get("ready"):
         required_capabilities.append("office-rendering")
         intrusion_class = "high-intrusion"
         reasons.append(str(office_snapshot.get("detail") or "Office rendering is unavailable."))
+        confirmation_kind = "high-intrusion-prepare"
     return {
         "required_capabilities": sorted(required_capabilities),
         "required_capability_signature": _stable_json_digest(sorted(required_capabilities)),
         "intrusion_class": intrusion_class,
-        "high_intrusion_required": intrusion_class == "high-intrusion",
+        "high_intrusion_required": intrusion_class in {"high-intrusion", "host-access-upgrade"},
+        "confirmation_kind": confirmation_kind,
+        "host_access_upgrade_required": intrusion_class == "host-access-upgrade",
         "reasons": reasons,
     }
 
@@ -902,14 +926,19 @@ def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
             }
         )
     next_legal_actions: list[str] = []
+    host_access_upgrade_pending = False
     for job in active_jobs:
         if job.get("status") != "awaiting-confirmation":
             continue
         if job.get("job_family") == "prepare":
-            next_legal_actions.append("prepare --yes")
+            if job.get("confirmation_kind") == "host-access-upgrade":
+                host_access_upgrade_pending = True
+                next_legal_actions.append("switch-host-to-full-access")
+            else:
+                next_legal_actions.append("prepare --yes")
         elif job.get("job_family") == "sync":
             next_legal_actions.append("sync --yes")
-    if not ready:
+    if not ready and not host_access_upgrade_pending:
         next_legal_actions.append("prepare")
     if ready and (not kb_snapshot.get("present") or kb_snapshot.get("stale")):
         next_legal_actions.append("sync")
@@ -980,6 +1009,7 @@ def workspace_state_ref(paths: WorkspacePaths, *, force_refresh: bool = False) -
             "corpus_delta": snapshot.get("corpus_delta"),
             "interaction_state": snapshot.get("interaction_state"),
             "active_answer_critical_jobs": snapshot.get("active_answer_critical_jobs"),
+            "next_legal_actions": snapshot.get("next_legal_actions", []),
             "repair_actions": snapshot.get("repair_actions", []),
         },
     }

@@ -12,7 +12,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1118,6 +1118,133 @@ def office_renderer_next_step() -> str:
     )
 
 
+def _resolve_bootstrap_source(workspace: WorkspacePaths) -> str:
+    """Classify the current bootstrap entrypoint for prepare-state reporting."""
+    explicit = os.environ.get("DOCMASON_BOOTSTRAP_SOURCE", "").strip()
+    if explicit:
+        return explicit
+
+    executable = Path(sys.executable).resolve()
+    if workspace.toolchain_bootstrap_python.exists():
+        with suppress(OSError):
+            if executable == workspace.toolchain_bootstrap_python.resolve():
+                return "repo-local-bootstrap-venv"
+    if workspace.toolchain_python_current_dir.exists():
+        current_python = workspace.toolchain_python_current_dir / "bin" / "python3.13"
+        with suppress(OSError):
+            if current_python.exists() and executable == current_python.resolve():
+                return "repo-local-managed"
+
+    manual_override = os.environ.get("DOCMASON_BOOTSTRAP_PYTHON", "").strip()
+    if manual_override:
+        with suppress(OSError):
+            if executable == Path(manual_override).expanduser().resolve():
+                return "manual-bootstrap-python"
+    return "shared-python"
+
+
+def _native_machine_baseline_install_guidance(
+    *,
+    rerun_command: str = "docmason prepare --yes",
+) -> str:
+    return (
+        "Run "
+        f"`{rerun_command}` to let DocMason install or repair the native machine baseline. "
+        "If that managed path still cannot finish, complete the Homebrew or LibreOffice install "
+        "manually, then rerun the same command."
+    )
+
+
+def _codex_full_access_guidance(*, rerun_command: str = "docmason prepare --yes") -> str:
+    return (
+        "DocMason is currently running in Codex `Default permissions`. Machine-level setup for "
+        "Homebrew and LibreOffice needs Codex `Full access`. Clicking `Yes` on a single command "
+        "prompt only approves that command; it does not switch the thread out of `Default "
+        "permissions`. Switch this thread to `Full access`, then continue the same task or rerun "
+        f"`{rerun_command}`."
+    )
+
+
+def _machine_baseline_snapshot(
+    workspace: WorkspacePaths,
+    *,
+    office_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Describe native machine-baseline readiness separately from repo-local runtime state."""
+    from .conversation import current_host_execution_context
+
+    host_execution = current_host_execution_context()
+    office = office_snapshot or office_renderer_snapshot(workspace)
+    brew_binary = find_brew_binary()
+    brew_ready = bool(brew_binary)
+    libreoffice_ready = bool(office.get("ready"))
+    provider = str(host_execution.get("host_provider") or "unknown-agent")
+    applicable = sys.platform == "darwin" and provider == "codex"
+    if not applicable:
+        return {
+            "applicable": False,
+            "ready": True,
+            "status": "not-applicable",
+            "detail": "Native macOS machine-baseline policy is not active for this host surface.",
+            "brew_ready": brew_ready,
+            "brew_binary": brew_binary,
+            "libreoffice_ready": libreoffice_ready,
+            "libreoffice_binary": office.get("binary"),
+            "host_access_required": False,
+            "host_access_guidance": None,
+            "host_execution": host_execution,
+        }
+
+    missing_components: list[str] = []
+    if not brew_ready:
+        missing_components.append("Homebrew")
+    if not libreoffice_ready:
+        missing_components.append("LibreOffice")
+    if not missing_components:
+        return {
+            "applicable": True,
+            "ready": True,
+            "status": "ready",
+            "detail": "Native Codex machine baseline is ready.",
+            "brew_ready": brew_ready,
+            "brew_binary": brew_binary,
+            "libreoffice_ready": libreoffice_ready,
+            "libreoffice_binary": office.get("binary"),
+            "host_access_required": False,
+            "host_access_guidance": None,
+            "host_execution": host_execution,
+        }
+
+    missing_detail = ", ".join(missing_components)
+    if host_execution.get("permission_mode") == "default-permissions":
+        guidance = _codex_full_access_guidance()
+        status = "host-access-upgrade-required"
+        detail = (
+            f"Native Codex machine baseline is missing {missing_detail}, and the current thread "
+            "is still in `Default permissions`."
+        )
+        host_access_required = True
+    else:
+        guidance = _native_machine_baseline_install_guidance()
+        status = "install-required"
+        detail = f"Native Codex machine baseline is missing {missing_detail}."
+        host_access_required = False
+
+    return {
+        "applicable": True,
+        "ready": False,
+        "status": status,
+        "detail": detail,
+        "brew_ready": brew_ready,
+        "brew_binary": brew_binary,
+        "libreoffice_ready": libreoffice_ready,
+        "libreoffice_binary": office.get("binary"),
+        "host_access_required": host_access_required,
+        "host_access_guidance": guidance,
+        "host_execution": host_execution,
+    }
+
+
 def pdf_renderer_next_step() -> str:
     """Return the preferred next-step guidance for the PDF extraction stack."""
     return (
@@ -1146,9 +1273,11 @@ def write_bootstrap_ready_marker(
     status: str,
     package_manager: str,
     bootstrap_python: str,
+    bootstrap_source: str,
     editable_install: bool,
     editable_detail: str,
     office_snapshot: dict[str, Any],
+    machine_baseline: dict[str, Any],
     pdf_snapshot: dict[str, Any],
     uv_bootstrap_mode: str | None = None,
     last_repair_at: str | None = None,
@@ -1165,12 +1294,17 @@ def write_bootstrap_ready_marker(
         and toolchain.get("managed_python_executable")
         else bootstrap_python
     )
+    workspace_runtime_ready = bool(
+        editable_install and toolchain.get("isolation_grade") == "self-contained"
+    )
+    machine_baseline_ready = bool(machine_baseline.get("ready", True))
     state = {
         "schema_version": BOOTSTRAP_STATE_SCHEMA_VERSION,
         "status": status,
-        "environment_ready": bool(
-            editable_install and toolchain.get("isolation_grade") == "self-contained"
-        ),
+        "environment_ready": workspace_runtime_ready and machine_baseline_ready,
+        "workspace_runtime_ready": workspace_runtime_ready,
+        "machine_baseline_ready": machine_baseline_ready,
+        "machine_baseline_status": machine_baseline.get("status"),
         "checked_at": bootstrap_checked_at(),
         "prepared_at": (
             isoformat_timestamp(workspace.venv_python.stat().st_mtime)
@@ -1179,6 +1313,7 @@ def write_bootstrap_ready_marker(
         ),
         "workspace_root": str(workspace.root.resolve()),
         "package_manager": package_manager,
+        "bootstrap_source": bootstrap_source,
         "python_executable": managed_python_executable,
         "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
         "editable_install": editable_install,
@@ -1201,10 +1336,14 @@ def write_bootstrap_ready_marker(
         "repair_recommended": toolchain.get("repair_recommended"),
         "repair_reason": toolchain.get("repair_reason"),
         "last_repair_at": last_repair_at,
+        "host_access_required": bool(machine_baseline.get("host_access_required")),
+        "host_access_guidance": machine_baseline.get("host_access_guidance"),
         "libreoffice_executable": office_snapshot.get("binary"),
         "libreoffice_origin": (
             "system-discovery" if office_snapshot.get("binary") else None
         ),
+        "homebrew_binary": machine_baseline.get("brew_binary"),
+        "homebrew_ready": bool(machine_baseline.get("brew_ready")),
         "pdf_renderer_ready": bool(pdf_snapshot.get("ready", False)),
         "office_renderer_ready": bool(office_snapshot.get("ready", False)),
         "office_renderer_required": bool(office_snapshot.get("required", False)),
@@ -1229,8 +1368,23 @@ def environment_snapshot(
         bootstrap_state=state,
         editable_install=editable_install,
     )
+    machine_baseline_ready = bool(state.get("machine_baseline_ready", True))
     return {
         "ready": bool(cached.get("ready")),
+        "workspace_runtime_ready": bool(
+            state.get(
+                "workspace_runtime_ready",
+                editable_install and toolchain.get("isolation_grade") == "self-contained",
+            )
+        ),
+        "machine_baseline_ready": machine_baseline_ready,
+        "machine_baseline_status": state.get(
+            "machine_baseline_status",
+            "ready" if machine_baseline_ready else "unknown",
+        ),
+        "bootstrap_source": state.get("bootstrap_source"),
+        "host_access_required": bool(state.get("host_access_required")),
+        "host_access_guidance": state.get("host_access_guidance"),
         "venv_python": str(paths.venv_python.relative_to(paths.root)),
         "editable_install": editable_install,
         "editable_install_detail": editable_detail,
@@ -1319,6 +1473,10 @@ def workspace_stage(
         for job in control_plane.get("active_answer_critical_jobs", [])
         if isinstance(job, dict) and job.get("status") == "awaiting-confirmation"
     ]
+    host_access_upgrade_pending = any(
+        job.get("job_family") == "prepare" and job.get("confirmation_kind") == "host-access-upgrade"
+        for job in active_confirmation_jobs
+    )
 
     if active_confirmation_jobs:
         stage = "control-plane-pending-confirmation"
@@ -1339,12 +1497,15 @@ def workspace_stage(
         stage = "foundation-only"
 
     pending_actions: list[str] = []
-    if not environment["ready"]:
+    if not environment["ready"] and not host_access_upgrade_pending:
         pending_actions.append("prepare")
     if active_confirmation_jobs:
         primary_job = active_confirmation_jobs[0]
         if primary_job.get("job_family") == "prepare":
-            pending_actions.append("prepare --yes")
+            if primary_job.get("confirmation_kind") == "host-access-upgrade":
+                pending_actions.append("switch-host-to-full-access")
+            else:
+                pending_actions.append("prepare --yes")
         elif primary_job.get("job_family") == "sync":
             pending_actions.append("sync --yes")
     if source_total > 0 and (not kb["present"] or kb["stale"] or stage == "knowledge-base-invalid"):
@@ -1407,6 +1568,7 @@ def prepare_workspace(
         workspace,
         bootstrap_state=bootstrap_state(workspace),
     )
+    bootstrap_source = _resolve_bootstrap_source(workspace)
 
     if not platform_supported():
         payload = {
@@ -1732,13 +1894,39 @@ def prepare_workspace(
 
     prepare_shared_job: dict[str, Any] = {}
     office_snapshot = office_renderer_snapshot(workspace)
+    machine_baseline = _machine_baseline_snapshot(
+        workspace,
+        office_snapshot=office_snapshot,
+    )
     prepare_requirements = required_prepare_capabilities(
         workspace,
         editable_install=editable_install,
         editable_detail=editable_detail,
         office_snapshot=office_snapshot,
+        machine_baseline=machine_baseline,
     )
     if prepare_requirements["high_intrusion_required"]:
+        confirmation_kind = (
+            "host-access-upgrade"
+            if prepare_requirements.get("host_access_upgrade_required")
+            else str(prepare_requirements.get("confirmation_kind") or "high-intrusion-prepare")
+        )
+        confirmation_prompt = (
+            str(machine_baseline.get("host_access_guidance"))
+            if confirmation_kind == "host-access-upgrade"
+            else (
+                "This question requires additional local dependencies before it can continue "
+                "safely. Prepare the workspace now?"
+            )
+        )
+        next_command = (
+            "Switch Codex to `Full access`, then continue the same task."
+            if confirmation_kind == "host-access-upgrade"
+            else "docmason prepare --yes"
+        )
+        requires_confirmation = bool(
+            prepare_requirements.get("host_access_upgrade_required")
+        ) or not assume_yes
         prepare_job_info = ensure_shared_job(
             workspace,
             job_key=(
@@ -1757,18 +1945,17 @@ def prepare_workspace(
             input_signature=prepare_requirements["required_capability_signature"],
             owner=effective_owner,
             run_id=run_id,
-            requires_confirmation=not assume_yes,
-            confirmation_kind="high-intrusion-prepare",
-            confirmation_prompt=(
-                "This question requires additional local dependencies before it can continue "
-                "safely. Prepare the workspace now?"
-            ),
+            requires_confirmation=requires_confirmation,
+            confirmation_kind=confirmation_kind,
+            confirmation_prompt=confirmation_prompt,
             confirmation_reason="; ".join(prepare_requirements["reasons"]),
         )
         prepare_shared_job = prepare_job_info["manifest"]
         caller_role = str(prepare_job_info.get("caller_role") or "owner")
-        if prepare_shared_job.get("status") == "awaiting-confirmation" and not assume_yes:
-            payload = {
+        if prepare_shared_job.get("status") == "awaiting-confirmation" and (
+            not assume_yes or prepare_requirements.get("host_access_upgrade_required")
+        ):
+            confirmation_payload: dict[str, Any] = {
                 "status": ACTION_REQUIRED,
                 "prepare_status": "awaiting-confirmation",
                 "actions_performed": actions_performed,
@@ -1782,9 +1969,24 @@ def prepare_workspace(
                 },
                 "control_plane": shared_job_control_plane_payload(
                     prepare_shared_job,
-                    next_command="docmason prepare --yes",
+                    next_command=next_command,
                 ),
-                "next_steps": ["Run `docmason prepare --yes` to approve and continue."],
+                "workspace_runtime_ready": bool(
+                    editable_install
+                    and initial_toolchain.get("isolation_grade") == "self-contained"
+                ),
+                "machine_baseline_ready": bool(machine_baseline.get("ready")),
+                "machine_baseline_status": machine_baseline.get("status"),
+                "bootstrap_source": bootstrap_source,
+                "host_access_required": bool(machine_baseline.get("host_access_required")),
+                "host_access_guidance": machine_baseline.get("host_access_guidance"),
+                "next_steps": [
+                    (
+                        "Switch Codex to `Full access`, then continue the same task."
+                        if confirmation_kind == "host-access-upgrade"
+                        else "Run `docmason prepare --yes` to approve and continue."
+                    )
+                ],
             }
             lines = [
                 f"Prepare status: {ACTION_REQUIRED}",
@@ -1792,10 +1994,18 @@ def prepare_workspace(
                     prepare_shared_job.get("confirmation_prompt")
                     or prepare_shared_job.get("confirmation_reason")
                 ),
-                "Next step: run `docmason prepare --yes` to approve and continue.",
+                (
+                    "Next step: switch Codex to `Full access`, then continue the same task."
+                    if confirmation_kind == "host-access-upgrade"
+                    else "Next step: run `docmason prepare --yes` to approve and continue."
+                ),
             ]
-            return make_report(ACTION_REQUIRED, payload, lines)
-        if prepare_shared_job.get("status") == "awaiting-confirmation" and assume_yes:
+            return make_report(ACTION_REQUIRED, confirmation_payload, lines)
+        if (
+            prepare_shared_job.get("status") == "awaiting-confirmation"
+            and assume_yes
+            and not prepare_requirements.get("host_access_upgrade_required")
+        ):
             prepare_shared_job = approve_shared_job(
                 workspace,
                 str(prepare_shared_job["job_id"]),
@@ -1835,7 +2045,11 @@ def prepare_workspace(
                 "A matching shared prepare job is already running.",
             ]
             return make_report(DEGRADED, payload, lines)
-    if office_snapshot["required"] and not office_snapshot["ready"] and assume_yes:
+    if (
+        bool(machine_baseline.get("applicable"))
+        and not bool(machine_baseline.get("ready"))
+        and assume_yes
+    ):
         brew_plan = homebrew_auto_install_plan(command_runner=command_runner, cwd=workspace.root)
         if find_brew_binary() is None and brew_plan["feasible"]:
             brew_install = command_runner(brew_plan["install_command"], workspace.root)
@@ -1865,7 +2079,7 @@ def prepare_workspace(
             actions_skipped.append(
                 "Skipped Homebrew installation because the host does not satisfy the official "
                 f"unattended install preconditions. Details: {brew_plan['detail']}"
-            )
+                )
         install_command, install_display = preferred_libreoffice_install_command()
         if install_command is not None and install_display is not None:
             execution = command_runner(install_command, workspace.root)
@@ -1877,7 +2091,20 @@ def prepare_workspace(
                     "LibreOffice installation failed during prepare. Details: "
                     f"{execution.stderr or execution.stdout or 'no output'}"
                 )
-    if office_snapshot["required"] and not office_snapshot["ready"]:
+        machine_baseline = _machine_baseline_snapshot(
+            workspace,
+            office_snapshot=office_snapshot,
+        )
+    office_renderer_gap = bool(office_snapshot["required"]) and not bool(
+        office_snapshot["ready"]
+    ) and not bool(machine_baseline.get("applicable"))
+    if bool(machine_baseline.get("applicable")) and not bool(machine_baseline.get("ready")):
+        status = DEGRADED
+        next_steps.append(
+            str(machine_baseline.get("host_access_guidance"))
+            or _native_machine_baseline_install_guidance()
+        )
+    elif office_renderer_gap:
         status = DEGRADED
         next_steps.append(office_renderer_next_step())
 
@@ -1890,9 +2117,11 @@ def prepare_workspace(
         status=status,
         package_manager=package_manager,
         bootstrap_python=bootstrap_python,
+        bootstrap_source=bootstrap_source,
         editable_install=editable_install,
         editable_detail=editable_detail,
         office_snapshot=office_snapshot,
+        machine_baseline=machine_baseline,
         pdf_snapshot=pdf_snapshot,
         uv_bootstrap_mode=uv_bootstrap_mode,
         last_repair_at=bootstrap_checked_at(),
@@ -1927,7 +2156,13 @@ def prepare_workspace(
     _refresh_generated_connector_manifests(workspace)
     actions_performed.append("Recorded bootstrap state in runtime/bootstrap_state.json.")
     if prepare_shared_job:
-        if office_snapshot["required"] and not office_snapshot["ready"]:
+        if not bool(machine_baseline.get("ready")):
+            prepare_shared_job = block_shared_job(
+                workspace,
+                str(prepare_shared_job["job_id"]),
+                result={"detail": machine_baseline["detail"]},
+            )
+        elif office_renderer_gap:
             prepare_shared_job = block_shared_job(
                 workspace,
                 str(prepare_shared_job["job_id"]),
@@ -1946,9 +2181,17 @@ def prepare_workspace(
             status=str(prepare_shared_job.get("status") or ""),
         )
 
-    payload = {
+    prepare_payload: dict[str, Any] = {
         "status": status,
         "prepare_status": status,
+        "workspace_runtime_ready": bool(
+            editable_install and final_toolchain.get("isolation_grade") == "self-contained"
+        ),
+        "machine_baseline_ready": bool(machine_baseline.get("ready")),
+        "machine_baseline_status": machine_baseline.get("status"),
+        "bootstrap_source": bootstrap_source,
+        "host_access_required": bool(machine_baseline.get("host_access_required")),
+        "host_access_guidance": machine_baseline.get("host_access_guidance"),
         "actions_performed": actions_performed,
         "actions_skipped": actions_skipped,
         "manual_recovery_doc": manual_workspace_recovery_doc(),
@@ -1968,6 +2211,7 @@ def prepare_workspace(
             "toolchain": final_toolchain,
             "bootstrap_state": str(workspace.bootstrap_state_path.relative_to(workspace.root)),
             "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "machine_baseline": machine_baseline,
         },
         "next_steps": deduplicate(next_steps),
     }
@@ -1978,11 +2222,18 @@ def prepare_workspace(
         f"Virtual environment: {workspace.venv_dir.relative_to(workspace.root)}",
         editable_detail,
     ]
-    if office_snapshot["required"] and not office_snapshot["ready"]:
-        lines.append(office_snapshot["detail"])
+    lines.append(f"Bootstrap source: {bootstrap_source}")
+    lines.append(
+        "Machine baseline: "
+        f"{machine_baseline.get('status', 'unknown')}"
+    )
+    if not bool(machine_baseline.get("ready")):
+        lines.append(str(machine_baseline.get("detail")))
+    elif office_renderer_gap:
+        lines.append(str(office_snapshot.get("detail")))
     if next_steps:
         lines.append(f"Next steps: {', '.join(deduplicate(next_steps))}")
-    return make_report(status, payload, lines)
+    return make_report(status, prepare_payload, lines)
 
 
 def doctor_workspace(
@@ -2108,6 +2359,24 @@ def doctor_workspace(
             DEGRADED,
             bootstrap_detail,
             "Run `docmason prepare --yes` to record the current bootstrap marker.",
+        )
+
+    machine_baseline = _machine_baseline_snapshot(workspace)
+    if machine_baseline["status"] == "ready":
+        add_check("machine-baseline", READY, machine_baseline["detail"])
+    elif machine_baseline["status"] == "host-access-upgrade-required":
+        add_check(
+            "machine-baseline",
+            ACTION_REQUIRED,
+            machine_baseline["detail"],
+            str(machine_baseline.get("host_access_guidance")),
+        )
+    elif machine_baseline["status"] != "not-applicable":
+        add_check(
+            "machine-baseline",
+            ACTION_REQUIRED,
+            machine_baseline["detail"],
+            "Run `docmason prepare --yes` to install or repair the native machine baseline.",
         )
 
     uv_binary = find_uv_binary(workspace)
@@ -2350,9 +2619,13 @@ def doctor_workspace(
     if pending_confirmations:
         primary_job = pending_confirmations[0]
         next_step = (
-            "Run `docmason prepare --yes` to approve and continue."
-            if primary_job.get("job_family") == "prepare"
-            else "Run `docmason sync --yes` to approve and continue."
+            "Switch Codex to `Full access`, then continue the same task."
+            if primary_job.get("confirmation_kind") == "host-access-upgrade"
+            else (
+                "Run `docmason prepare --yes` to approve and continue."
+                if primary_job.get("job_family") == "prepare"
+                else "Run `docmason sync --yes` to approve and continue."
+            )
         )
         add_check(
             "control-plane",
@@ -2475,6 +2748,10 @@ def status_workspace(
         f"Isolation grade: {payload['environment']['isolation_grade']}",
         f"Entrypoint health: {payload['environment']['entrypoint_health']}",
         (
+            "Machine baseline: "
+            f"{payload['environment'].get('machine_baseline_status', 'unknown')}"
+        ),
+        (
             "Bootstrap state: "
             + (
                 "ready"
@@ -2539,6 +2816,8 @@ def status_workspace(
     control_plane_repairs = payload.get("control_plane", {}).get("repair_actions", [])
     if isinstance(control_plane_repairs, list) and control_plane_repairs:
         lines.append(f"Control-plane repairs: {len(control_plane_repairs)}")
+    if payload["environment"].get("host_access_guidance"):
+        lines.append(str(payload["environment"]["host_access_guidance"]))
     rebuild_telemetry = payload["knowledge_base"].get("last_sync_rebuild_telemetry", {})
     if isinstance(rebuild_telemetry, dict) and rebuild_telemetry:
         lines.append(
@@ -3272,6 +3551,11 @@ def trace_knowledge(
                 paths=workspace,
                 answer_file=answer_file_path,
                 top=max(top, 1),
+                log_context=(
+                    front_door.get("log_context")
+                    if isinstance(front_door.get("log_context"), dict)
+                    else None
+                ),
                 log_origin=trace_log_origin,
             )
         elif session_id is not None:
@@ -3279,6 +3563,11 @@ def trace_knowledge(
                 paths=workspace,
                 session_id=session_id,
                 top=max(top, 1),
+                log_context=(
+                    front_door.get("log_context")
+                    if isinstance(front_door.get("log_context"), dict)
+                    else None
+                ),
                 log_origin=trace_log_origin,
             )
         else:  # pragma: no cover - protected by argparse

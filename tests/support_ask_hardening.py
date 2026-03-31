@@ -3718,6 +3718,129 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(live_turn["status"], "prepared")
         self.assertEqual(live_turn["hybrid_refresh_completion_status"], "covered")
 
+    def test_hidden_ask_finalize_closes_with_public_trace_path(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-trace-public",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects strategy to implementation.\n",
+            encoding="utf-8",
+        )
+        log_context = {
+            str(key): str(value)
+            for key, value in dict(opened.get("log_context") or {}).items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        exported_context = {
+            f"DOCMASON_{key.upper()}": value for key, value in log_context.items()
+        }
+        exported_context["CODEX_THREAD_ID"] = "thread-hidden-trace-public"
+        with mock.patch.dict(os.environ, exported_context, clear=False):
+            trace_report = trace_knowledge(
+                answer_file=str(answer_path),
+                top=2,
+                paths=workspace,
+            )
+
+        trace_payload = read_json(
+            workspace.retrieval_traces_dir / f"{trace_report.payload['trace_id']}.json"
+        )
+        self.assertEqual(trace_payload["canonical_binding_status"], "canonical")
+        self.assertEqual(trace_payload["run_id"], str(opened["run_id"]))
+
+        completed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The planning brief connects strategy to implementation.",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["trace_ids"], [trace_report.payload["trace_id"]])
+        self.assertEqual(completed["canonical_turn_state"], "committed")
+
+    def test_hidden_ask_finalize_exposes_bundle_notice_for_committed_composition_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "Compare the campaign planning brief with the evaluation plan.",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-bundle-notice",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text("# Final Composition\n\nSummary.\n", encoding="utf-8")
+
+        bundle_path = f"runtime/agent-work/{opened['conversation_id']}/{opened['turn_id']}"
+
+        def fake_complete(*args: object, **kwargs: object) -> dict[str, object]:
+            del args
+            update_conversation_turn(
+                workspace,
+                conversation_id=str(kwargs["conversation_id"]),
+                turn_id=str(kwargs["turn_id"]),
+                updates={
+                    "committed_run_id": str(opened["run_id"]),
+                    "answer_file_path": str(opened["answer_file_path"]),
+                    "answer_state": "partially-grounded",
+                    "support_basis": "kb-grounded",
+                    "response_excerpt": "Summary.",
+                    "session_ids": [],
+                    "trace_ids": [],
+                    "inner_workflow_id": "grounded-composition",
+                    "bundle_paths": [bundle_path],
+                },
+            )
+            return {"committed_run_id": str(opened["run_id"])}
+
+        with mock.patch(
+            "docmason.host_integration.complete_ask_turn",
+            side_effect=fake_complete,
+        ):
+            completed = handle_hidden_ask_request(
+                {
+                    "action": "finalize",
+                    "conversation_id": opened["conversation_id"],
+                    "turn_id": opened["turn_id"],
+                    "answer_file_path": opened["answer_file_path"],
+                    "response_excerpt": "Summary.",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["bundle_paths"], [bundle_path])
+        self.assertEqual(
+            completed["bundle_notice"],
+            f"Bundle artifacts available at {bundle_path}.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

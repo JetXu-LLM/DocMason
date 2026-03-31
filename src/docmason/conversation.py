@@ -370,6 +370,97 @@ def current_host_identity(*, agent_surface: str | None = None) -> dict[str, Any]
     }
 
 
+def _normalized_permission_mode(
+    *,
+    provider: str,
+    sandbox_policy: str | None,
+    approval_mode: str | None,
+    explicit_mode: str | None = None,
+) -> str | None:
+    if explicit_mode:
+        return explicit_mode
+    if provider == "codex":
+        if sandbox_policy == "danger-full-access":
+            return "full-access"
+        if sandbox_policy == "workspace-write":
+            return "default-permissions"
+    if provider == "claude-code" and approval_mode == "bypassPermissions":
+        return "full-access"
+    return None
+
+
+def _normalized_sandbox_policy(raw_value: Any) -> str | None:
+    if isinstance(raw_value, dict):
+        return _nonempty_string(raw_value.get("type")) or _nonempty_string(raw_value.get("mode"))
+    text = _nonempty_string(raw_value)
+    if text is None:
+        return None
+    if text.startswith("{"):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(decoded, dict):
+            return _normalized_sandbox_policy(decoded)
+    return text
+
+
+def current_host_execution_context(*, agent_surface: str | None = None) -> dict[str, Any]:
+    """Return the best available host execution-context snapshot for the current thread.
+
+    This helper focuses on the small set of host fields that materially affect DocMason
+    bootstrap and machine-baseline behavior, especially for native Codex cold starts.
+    """
+    provider = agent_surface or detect_agent_surface()
+    explicit_permission_mode = _nonempty_string(os.environ.get("DOCMASON_PERMISSION_MODE"))
+    explicit_sandbox_policy = _nonempty_string(
+        os.environ.get("DOCMASON_SANDBOX_POLICY")
+        or os.environ.get("DOCMASON_CODEX_SANDBOX_POLICY")
+    )
+    explicit_approval_mode = _nonempty_string(
+        os.environ.get("DOCMASON_APPROVAL_MODE")
+        or os.environ.get("DOCMASON_CODEX_APPROVAL_MODE")
+    )
+    metadata: dict[str, Any] = {}
+    context_source = "env-override" if (
+        explicit_permission_mode or explicit_sandbox_policy or explicit_approval_mode
+    ) else "unknown"
+
+    if provider == "codex" and not (
+        explicit_permission_mode or explicit_sandbox_policy or explicit_approval_mode
+    ):
+        thread_id = _nonempty_string(os.environ.get("CODEX_THREAD_ID"))
+        if thread_id:
+            try:
+                from .transcript import codex_thread_metadata
+
+                metadata = codex_thread_metadata(thread_id)
+                context_source = "codex-thread-metadata"
+            except (FileNotFoundError, KeyError, OSError, ValueError, json.JSONDecodeError):
+                metadata = {}
+
+    sandbox_policy = _normalized_sandbox_policy(
+        explicit_sandbox_policy or metadata.get("sandbox_policy")
+    )
+    approval_mode = explicit_approval_mode or _nonempty_string(metadata.get("approval_mode"))
+    permission_mode = _normalized_permission_mode(
+        provider=provider,
+        sandbox_policy=sandbox_policy,
+        approval_mode=approval_mode,
+        explicit_mode=explicit_permission_mode,
+    )
+    full_machine_access = permission_mode == "full-access"
+
+    return {
+        "host_provider": provider,
+        "sandbox_policy": sandbox_policy,
+        "approval_mode": approval_mode,
+        "permission_mode": permission_mode,
+        "full_machine_access": full_machine_access,
+        "context_source": context_source,
+    }
+
+
 def host_identity_is_bindable(host_identity: dict[str, Any] | None) -> bool:
     """Return whether the host identity is strong enough for canonical binding."""
     if not isinstance(host_identity, dict):

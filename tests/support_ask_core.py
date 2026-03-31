@@ -584,6 +584,74 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.assertFalse(turn["auto_prepare_triggered"])
         self.assertFalse(turn["auto_sync_triggered"])
 
+    def test_prepare_ask_turn_pauses_for_native_codex_host_access_upgrade(self) -> None:
+        workspace = self.make_workspace()
+        self.create_pdf(workspace.source_dir / "example.pdf")
+        self.seed_published_kb_stub(workspace)
+        prepare_report = CommandReport(
+            1,
+            {
+                "status": ACTION_REQUIRED,
+                "prepare_status": "awaiting-confirmation",
+                "detail": "Native Codex machine baseline is missing Homebrew, LibreOffice.",
+                "control_plane": {
+                    "state": "awaiting-confirmation",
+                    "shared_job_id": "prepare-job-1",
+                    "job_family": "prepare",
+                    "confirmation_kind": "host-access-upgrade",
+                    "confirmation_prompt": (
+                        "DocMason is currently running in Codex `Default permissions`."
+                    ),
+                    "confirmation_reason": "machine-baseline",
+                },
+                "host_access_required": True,
+                "host_access_guidance": (
+                    "Switch this Codex thread to `Full access`, then continue the same task."
+                ),
+                "next_steps": [
+                    "Switch Codex to `Full access`, then continue the same task."
+                ],
+            },
+            [],
+        )
+
+        with (
+            mock.patch("docmason.ask.prepare_workspace", return_value=prepare_report),
+            mock.patch("docmason.ask.cached_bootstrap_readiness", side_effect=[
+                {
+                    "ready": False,
+                    "detail": "No cached bootstrap marker is recorded yet.",
+                    "reason": "missing-bootstrap-state",
+                },
+                {
+                    "ready": False,
+                    "detail": "No cached bootstrap marker is recorded yet.",
+                    "reason": "missing-bootstrap-state",
+                },
+                {
+                    "ready": False,
+                    "detail": "No cached bootstrap marker is recorded yet.",
+                    "reason": "missing-bootstrap-state",
+                },
+            ]),
+            mock.patch("docmason.ask.bootstrap_workspace_with_launcher") as launcher_mock,
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-host-access-upgrade"}, clear=False),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the workspace corpus say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        launcher_mock.assert_not_called()
+        self.assertEqual(turn["status"], "awaiting-confirmation")
+        self.assertEqual(turn["confirmation_kind"], "host-access-upgrade")
+        self.assertIn("Default permissions", str(turn["confirmation_prompt"]))
+        self.assertTrue(turn["auto_prepare_triggered"])
+
     def test_prepare_ask_turn_refreshes_legacy_marker_before_auto_sync(self) -> None:
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")

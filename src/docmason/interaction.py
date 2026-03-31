@@ -46,6 +46,7 @@ UUID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
+HEX64_PATTERN = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
 RELATION_PRIORITY = {
     "corrects-source": 0,
     "clarifies-source": 1,
@@ -452,6 +453,10 @@ def _store_attachment(
 
 def _interaction_entry_path(paths: WorkspacePaths, interaction_id: str) -> Path:
     return paths.interaction_entries_dir / f"{interaction_id}.json"
+
+
+def _interaction_entry_id(*, native_ledger_id: str, native_turn_id: str) -> str:
+    return f"interaction-{native_ledger_id}-{native_turn_id}"
 
 
 def pending_interaction_entries(paths: WorkspacePaths) -> list[dict[str, Any]]:
@@ -1037,6 +1042,7 @@ def _write_answer_file_if_missing(
 def _persist_interaction_entry(
     paths: WorkspacePaths,
     *,
+    native_ledger_id: str,
     conversation_id: str,
     turn_id: str,
     native_turn_id: str,
@@ -1057,8 +1063,23 @@ def _persist_interaction_entry(
     operator_evidence: dict[str, Any] | None = None,
     promotable: bool = True,
 ) -> dict[str, Any]:
-    interaction_id = f"interaction-{conversation_id}-{native_turn_id}"
+    interaction_id = _interaction_entry_id(
+        native_ledger_id=native_ledger_id,
+        native_turn_id=native_turn_id,
+    )
     existing_entry = read_json(_interaction_entry_path(paths, interaction_id))
+    legacy_interaction_id = (
+        f"interaction-{conversation_id}-{native_turn_id}"
+        if conversation_id != native_ledger_id
+        else None
+    )
+    legacy_entry = (
+        read_json(_interaction_entry_path(paths, legacy_interaction_id))
+        if isinstance(legacy_interaction_id, str)
+        else {}
+    )
+    if not isinstance(existing_entry, dict) and isinstance(legacy_entry, dict):
+        existing_entry = dict(legacy_entry)
     preserve_promotion = (
         promotable
         and
@@ -1086,6 +1107,7 @@ def _persist_interaction_entry(
         "conversation_id": conversation_id,
         "turn_id": turn_id,
         "native_turn_id": native_turn_id,
+        "native_ledger_id": native_ledger_id,
         "source_family": "interaction-pending",
         "trust_tier": "interaction",
         "pending_promotion": promotable and not preserve_promotion,
@@ -1141,7 +1163,178 @@ def _persist_interaction_entry(
     entry["searchable_text"] = _entry_searchable_text(entry)
     entry["entry_fingerprint"] = _sha256_text(json.dumps(entry, sort_keys=True))
     write_json(_interaction_entry_path(paths, interaction_id), entry)
+    if isinstance(legacy_interaction_id, str):
+        legacy_path = _interaction_entry_path(paths, legacy_interaction_id)
+        if legacy_path.exists():
+            legacy_path.unlink()
     return entry
+
+
+def _entry_attachment_shas(entry: dict[str, Any]) -> list[str]:
+    attachment_refs = entry.get("attachment_refs", [])
+    return [
+        str(attachment.get("sha256"))
+        for attachment in attachment_refs
+        if isinstance(attachment, dict) and isinstance(attachment.get("sha256"), str)
+    ]
+
+
+def _entry_duplicate_signature(entry: dict[str, Any]) -> str:
+    payload = {
+        "native_turn_id": entry.get("native_turn_id"),
+        "recorded_at": entry.get("recorded_at"),
+        "user_text": entry.get("user_text"),
+        "assistant_excerpt": entry.get("assistant_excerpt"),
+        "attachment_shas": _entry_attachment_shas(entry),
+    }
+    return _sha256_text(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+
+
+def _looks_like_native_ledger_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(HEX64_PATTERN.fullmatch(value))
+
+
+def _native_ledger_id_from_interaction_id(
+    interaction_id: Any,
+    *,
+    native_turn_id: Any,
+) -> str | None:
+    if not isinstance(interaction_id, str) or not isinstance(native_turn_id, str):
+        return None
+    prefix = "interaction-"
+    suffix = f"-{native_turn_id}"
+    if not interaction_id.startswith(prefix) or not interaction_id.endswith(suffix):
+        return None
+    value = interaction_id[len(prefix) : -len(suffix)]
+    return value if value else None
+
+
+def _preferred_conversation_id(entries: list[dict[str, Any]]) -> str | None:
+    for entry in entries:
+        conversation_id = entry.get("conversation_id")
+        if isinstance(conversation_id, str) and UUID_PATTERN.fullmatch(conversation_id):
+            return conversation_id
+    for entry in entries:
+        conversation_id = entry.get("conversation_id")
+        if isinstance(conversation_id, str) and conversation_id:
+            return conversation_id
+    return None
+
+
+def _repair_duplicate_interaction_entries(paths: WorkspacePaths) -> dict[str, int]:
+    """Collapse legacy duplicate interaction entries before promoted-memory build."""
+    all_entries: list[dict[str, Any]] = []
+    for path in _json_files(paths.interaction_entries_dir):
+        payload = read_json(path)
+        if isinstance(payload, dict):
+            all_entries.append(payload)
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for entry in all_entries:
+        groups.setdefault(_entry_duplicate_signature(entry), []).append(entry)
+
+    repaired_groups = 0
+    deleted_entries = 0
+    rewritten_entries = 0
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        native_ledger_id = next(
+            (
+                str(value)
+                for value in (
+                    entry.get("native_ledger_id") for entry in group if isinstance(entry, dict)
+                )
+                if _looks_like_native_ledger_id(value)
+            ),
+            None,
+        )
+        if native_ledger_id is None:
+            native_ledger_id = next(
+                (
+                    value
+                    for entry in group
+                    for value in (
+                        _native_ledger_id_from_interaction_id(
+                            entry.get("interaction_id"),
+                            native_turn_id=entry.get("native_turn_id"),
+                        ),
+                        entry.get("conversation_id"),
+                    )
+                    if _looks_like_native_ledger_id(value)
+                ),
+                None,
+            )
+        if native_ledger_id is None:
+            continue
+        native_turn_id = next(
+            (
+                str(entry.get("native_turn_id"))
+                for entry in group
+                if isinstance(entry.get("native_turn_id"), str) and entry.get("native_turn_id")
+            ),
+            None,
+        )
+        if native_turn_id is None:
+            continue
+        stable_interaction_id = _interaction_entry_id(
+            native_ledger_id=native_ledger_id,
+            native_turn_id=native_turn_id,
+        )
+        preferred = next(
+            (entry for entry in group if entry.get("interaction_id") == stable_interaction_id),
+            max(
+                group,
+                key=lambda item: str(item.get("updated_at") or item.get("recorded_at") or ""),
+            ),
+        )
+        merged = dict(preferred)
+        merged["interaction_id"] = stable_interaction_id
+        merged["native_ledger_id"] = native_ledger_id
+        preferred_conversation_id = _preferred_conversation_id(group)
+        if isinstance(preferred_conversation_id, str):
+            merged["conversation_id"] = preferred_conversation_id
+
+        promoted_entries = [
+            entry
+            for entry in group
+            if entry.get("pending_promotion") is False and entry.get("status") == "promoted"
+        ]
+        if promoted_entries:
+            promoted_preferred = max(
+                promoted_entries,
+                key=lambda item: str(item.get("promoted_at") or item.get("updated_at") or ""),
+            )
+            merged["pending_promotion"] = False
+            merged["status"] = "promoted"
+            if isinstance(promoted_preferred.get("promoted_memory_id"), str):
+                merged["promoted_memory_id"] = promoted_preferred["promoted_memory_id"]
+            if isinstance(promoted_preferred.get("promoted_at"), str):
+                merged["promoted_at"] = promoted_preferred["promoted_at"]
+        merged["entry_path"] = str(
+            _interaction_entry_path(paths, stable_interaction_id).relative_to(paths.root)
+        )
+        merged["entry_fingerprint"] = _sha256_text(json.dumps(merged, sort_keys=True))
+        write_json(_interaction_entry_path(paths, stable_interaction_id), merged)
+        rewritten_entries += 1
+
+        for entry in group:
+            interaction_id = entry.get("interaction_id")
+            if not isinstance(interaction_id, str):
+                continue
+            if interaction_id == stable_interaction_id:
+                continue
+            entry_path = _interaction_entry_path(paths, interaction_id)
+            if entry_path.exists():
+                entry_path.unlink()
+                deleted_entries += 1
+        repaired_groups += 1
+
+    return {
+        "repaired_groups": repaired_groups,
+        "deleted_entries": deleted_entries,
+        "rewritten_entries": rewritten_entries,
+    }
 
 
 def _native_ledger_path(paths: WorkspacePaths, ledger_id: str) -> Path:
@@ -1494,6 +1687,7 @@ def _reconcile_native_transcript(
             profile = _native_profile(user_text)
             interaction_entry = _persist_interaction_entry(
                 paths,
+                native_ledger_id=native_ledger_id,
                 conversation_id=(
                     canonical_conversation_id
                     if isinstance(canonical_conversation_id, str) and canonical_conversation_id
@@ -2020,6 +2214,55 @@ def _existing_interaction_manifest_lookup(
     return lookup
 
 
+def _prune_orphan_interaction_memories(
+    paths: WorkspacePaths, *, target: str
+) -> dict[str, Any]:
+    """Remove promoted memory dirs whose interaction ids no longer resolve."""
+    memories_dir = paths.interaction_memories_dir(target)
+    memories_dir.mkdir(parents=True, exist_ok=True)
+    removed_memory_ids: list[str] = []
+    kept_records: list[dict[str, Any]] = []
+    for memory_dir in sorted(path for path in memories_dir.iterdir() if path.is_dir()):
+        memory_id = memory_dir.name
+        source_manifest = read_json(memory_dir / "source_manifest.json")
+        interaction_ids = [
+            interaction_id
+            for interaction_id in source_manifest.get("interaction_ids", [])
+            if isinstance(interaction_id, str) and interaction_id
+        ]
+        if not any(
+            _interaction_entry_path(paths, interaction_id).exists()
+            for interaction_id in interaction_ids
+        ):
+            import shutil
+
+            shutil.rmtree(memory_dir)
+            removed_memory_ids.append(memory_id)
+            continue
+        kept_records.append(_interaction_memory_manifest_record(memory_dir, memory_id=memory_id))
+    existing_manifest = read_json(paths.interaction_manifest_path(target))
+    pending_entry_count = (
+        int(existing_manifest.get("pending_entry_count", 0) or 0)
+        if isinstance(existing_manifest, dict)
+        else 0
+    )
+    manifest = {
+        "generated_at": utc_now(),
+        "memory_count": len(kept_records),
+        "pending_memory_count": sum(
+            1 for memory in kept_records if not memory["has_semantic_outputs"]
+        ),
+        "pending_entry_count": pending_entry_count,
+        "memories": kept_records,
+    }
+    write_json(paths.interaction_manifest_path(target), manifest)
+    return {
+        "target": target,
+        "removed_memory_ids": removed_memory_ids,
+        "removed_count": len(removed_memory_ids),
+    }
+
+
 def _preserve_interaction_semantic_outputs(
     previous_payload: dict[str, bytes], memory_dir: Path
 ) -> None:
@@ -2250,12 +2493,14 @@ def build_promoted_interaction_memories(
     """Build merged interaction memories for sync-time publication."""
     interaction_dir = paths.interaction_target_dir(target)
     memories_dir = paths.interaction_memories_dir(target)
-    previous_lookup = _existing_interaction_memory_lookup(paths, target=target)
-    target_dir_lookup = _existing_interaction_memory_dir_lookup(paths, targets=(target,))
-    current_dir_lookup = _existing_interaction_memory_dir_lookup(paths, targets=("current",))
     interaction_dir.mkdir(parents=True, exist_ok=True)
     memories_dir.mkdir(parents=True, exist_ok=True)
 
+    _repair_duplicate_interaction_entries(paths)
+    _prune_orphan_interaction_memories(paths, target="current")
+    previous_lookup = _existing_interaction_memory_lookup(paths, target=target)
+    target_dir_lookup = _existing_interaction_memory_dir_lookup(paths, targets=(target,))
+    current_dir_lookup = _existing_interaction_memory_dir_lookup(paths, targets=("current",))
     entries = pending_interaction_entries(paths)
     grouped = _group_entries_for_promotion(entries)
     memories: list[dict[str, Any]] = []
@@ -2513,6 +2758,26 @@ def build_promoted_interaction_memories(
 
     for memory_id, previous_dir in current_dir_lookup.items():
         if memory_id in built_memory_ids:
+            continue
+        source_manifest = read_json(previous_dir / "source_manifest.json")
+        raw_interaction_ids = (
+            source_manifest.get("interaction_ids")
+            if isinstance(source_manifest, dict)
+            else None
+        )
+        interaction_ids = (
+            [
+                interaction_id
+                for interaction_id in raw_interaction_ids
+                if isinstance(interaction_id, str) and interaction_id
+            ]
+            if isinstance(raw_interaction_ids, list)
+            else []
+        )
+        if not any(
+            _interaction_entry_path(paths, interaction_id).exists()
+            for interaction_id in interaction_ids
+        ):
             continue
         target_dir = memories_dir / memory_id
         import shutil

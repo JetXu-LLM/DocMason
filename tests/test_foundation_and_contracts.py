@@ -281,7 +281,10 @@ class FoundationAndContractTests(unittest.TestCase):
             "the host from opening canonical `ask` for an ordinary user request;",
             ask_skill,
         )
-        self.assertNotIn("`docmason _ask`", ask_skill)
+        self.assertIn("## Canonical Ask Contract", ask_skill)
+        self.assertIn("./.venv/bin/python -m docmason _ask", ask_skill)
+        self.assertIn("`workflow.json` remains routing metadata", ask_skill)
+        self.assertIn("only `completed` or `boundary` permits a final business reply", ask_skill)
         self.assertIn(
             "smallest evidence basis that can support the answer correctly and truthfully",
             ask_skill,
@@ -293,8 +296,6 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("keep one concise `route_reason`", ask_skill)
         self.assertIn("route to `knowledge-base-sync`", ask_skill)
         self.assertIn("native ledger", ask_skill)
-        self.assertNotIn("prepare_ask_turn()", ask_skill)
-        self.assertNotIn("complete_ask_turn()", ask_skill)
         self.assertNotIn("default first-contact entry surface", ask_skill)
         self.assertNotIn(
             "route only after canonical ask runtime ownership is already open",

@@ -5,11 +5,17 @@ Use this document only when the normal automation path is unavailable or incompl
 - `./scripts/bootstrap-workspace.sh --yes`
 - `docmason prepare --yes`
 
+This is not the ordinary native Codex/macOS first-run path.
+On that path, DocMason should prefer the controlled bootstrap asset launcher plus the governed
+machine-baseline install flow before dropping here.
+
 The launcher contract is now strict:
 
-- it performs bounded liveness probing instead of trusting an arbitrary `python3 -c` forever
-- it prefers repo-local managed Python, then the repo-local bootstrap venv, then
-  `DOCMASON_BOOTSTRAP_PYTHON`, then a healthy shared Python `3.13`, `3.12`, or `3.11`
+- it performs bounded liveness probing instead of trusting an arbitrary bootstrap interpreter forever
+- it prefers repo-local managed Python, then the repo-local bootstrap venv, then an explicit
+  `DOCMASON_BOOTSTRAP_PYTHON` override, then the controlled UV bootstrap asset path
+- when it has to fetch that controlled bootstrap asset, it should do so through a shared user
+  cache and then build the repo-local bootstrap helper from there
 - it rejects obviously broken bootstrap candidates such as shebang-only recursive stubs,
   startup-silent candidates, and timed-out launcher chains
 
@@ -31,9 +37,10 @@ An environment is good enough for ordinary DocMason work when all of these are t
 1. A bootstrap or repair Python 3.11 or newer is available.
 2. `.docmason/toolchain/python/current/bin/python3.13` exists.
 3. `.venv/bin/python` resolves under `.docmason/toolchain/python/`.
-4. `runtime/bootstrap_state.json` reports `schema_version = 3` and `isolation_grade = self-contained`.
+4. `runtime/bootstrap_state.json` reports `schema_version = 4` and `isolation_grade = self-contained`.
 5. `docmason doctor --json` reports the environment checks honestly.
-6. If the current corpus includes Office files, LibreOffice is installed before sync runs.
+6. On native Codex/macOS, the machine baseline is ready: Homebrew plus LibreOffice are present.
+7. If the current corpus includes Office files, LibreOffice is installed before sync runs.
 
 ## Lowest-Risk Manual Repair Order
 
@@ -41,14 +48,21 @@ An environment is good enough for ordinary DocMason work when all of these are t
    - It should contain `pyproject.toml`, `docmason.yaml`, `src/docmason/`, and `scripts/`.
    - If the repository was moved, always work from the new real path.
 
-2. Find a healthy supported Python.
-   - Preferred shared fallback order: `python3.13`, `python3.12`, `python3.11`.
-   - On macOS, Homebrew Python is acceptable.
+2. If the normal launcher cannot obtain a bootstrap runtime, decide whether you are still on an
+   ordinary path.
+   - For native Codex/macOS ordinary cold starts, go back and complete the governed launcher path
+     first, including any explicit `Default permissions` versus `Full access` boundary.
+   - Only continue here when the launcher itself is unavailable or cannot finish honestly.
+
+3. Find a healthy supported Python.
+   - Preferred manual fallback order: an explicit `DOCMASON_BOOTSTRAP_PYTHON`, then a known-good
+     `python3.13`, `python3.12`, or `python3.11`.
+   - On macOS, Homebrew Python is acceptable for this manual fallback path.
    - On Linux, use the distro package manager or an already-installed supported Python.
    - Do not trust a wrapper that resolves to a recursive `#!/usr/bin/env python3` stub or a
      candidate that hangs on a trivial startup probe.
 
-3. Run the repo-local prepare flow from source with that bootstrap Python.
+4. Run the repo-local prepare flow from source with that bootstrap Python.
 
 Preferred path:
 
@@ -62,7 +76,7 @@ If you want machine-readable output:
 PYTHONPATH=src /absolute/path/to/python3.11 -m docmason prepare --yes --json
 ```
 
-4. If `prepare` cannot provision `uv` automatically, repair the repo-local bootstrap helper venv.
+5. If `prepare` cannot provision `uv` automatically, repair the repo-local bootstrap helper venv.
 
 Preferred path:
 
@@ -73,7 +87,7 @@ Preferred path:
 PYTHONPATH=src .docmason/toolchain/bootstrap/venv/bin/python -m docmason prepare --yes
 ```
 
-5. Verify.
+6. Verify.
 
 ```bash
 .venv/bin/python -m docmason doctor --json
@@ -96,6 +110,10 @@ If the repository was renamed or moved:
 
 If the current source corpus includes `.pptx`, `.ppt`, `.docx`, `.doc`, `.xlsx`, or `.xls`,
 DocMason needs LibreOffice before sync can build the knowledge base correctly.
+
+- native Codex/macOS ordinary path:
+  - prefer returning to the governed launcher and `docmason prepare --yes`
+  - if the thread is still in Codex `Default permissions`, switch it to `Full access` first
 
 - macOS with Homebrew:
 

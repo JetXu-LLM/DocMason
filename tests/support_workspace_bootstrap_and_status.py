@@ -29,7 +29,13 @@ from docmason.commands import (
     sync_adapters,
     sync_workspace,
 )
-from docmason.control_plane import ensure_shared_job, load_shared_job, sync_input_signature
+from docmason.control_plane import (
+    ensure_shared_job,
+    load_shared_job,
+    sync_input_signature,
+    workspace_state_snapshot,
+)
+from docmason.conversation import current_host_execution_context
 from docmason.coordination import LeaseConflictError
 from docmason.project import (
     WorkspacePaths,
@@ -286,13 +292,17 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         write_json(
             workspace.bootstrap_state_path,
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "status": "ready",
                 "environment_ready": True,
+                "workspace_runtime_ready": True,
+                "machine_baseline_ready": True,
+                "machine_baseline_status": "ready",
                 "checked_at": "2026-03-25T00:00:00Z",
                 "prepared_at": "2026-03-25T00:00:00Z",
                 "workspace_root": str(workspace.root.resolve()),
                 "package_manager": package_manager,
+                "bootstrap_source": "repo-local-managed",
                 "python_executable": str(managed_python),
                 "venv_python": ".venv/bin/python",
                 "editable_install": True,
@@ -317,6 +327,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 "repair_recommended": False,
                 "repair_reason": None,
                 "last_repair_at": "2026-03-25T00:00:00Z",
+                "host_access_required": False,
+                "host_access_guidance": None,
+                "homebrew_ready": True,
+                "homebrew_binary": "/opt/homebrew/bin/brew",
                 "pdf_renderer_ready": pdf_renderer_ready,
                 "office_renderer_ready": office_renderer_ready,
                 "office_renderer_required": False,
@@ -411,6 +425,22 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(report.payload["environment"]["package_manager"], "uv")
         self.assertIn("repo-local bootstrap helper", report.payload["next_steps"][0])
 
+    def test_current_host_execution_context_normalizes_codex_json_sandbox_policy(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DOCMASON_AGENT_SURFACE": "codex",
+                "DOCMASON_CODEX_SANDBOX_POLICY": '{"type":"danger-full-access"}',
+                "DOCMASON_CODEX_APPROVAL_MODE": "never",
+            },
+            clear=False,
+        ):
+            context = current_host_execution_context()
+
+        self.assertEqual(context["sandbox_policy"], "danger-full-access")
+        self.assertEqual(context["permission_mode"], "full-access")
+        self.assertTrue(context["full_machine_access"])
+
     def test_prepare_uses_uv_when_available(self) -> None:
         workspace = self.make_workspace()
         seen_commands: list[list[str]] = []
@@ -420,7 +450,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             seen_commands.append(command_list)
             return self.fake_prepare_runner(workspace)(command_list, cwd)
 
-        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch.dict(
+                os.environ,
+                {"DOCMASON_AGENT_SURFACE": "unknown-agent"},
+                clear=False,
+            ),
+        ):
             report = prepare_workspace(
                 workspace,
                 command_runner=runner,
@@ -438,8 +475,11 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         self.assertTrue(workspace.agent_work_dir.exists())
         state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
-        self.assertEqual(state["schema_version"], 3)
+        self.assertEqual(state["schema_version"], 4)
         self.assertTrue(state["environment_ready"])
+        self.assertTrue(state["workspace_runtime_ready"])
+        self.assertTrue(state["machine_baseline_ready"])
+        self.assertEqual(state["machine_baseline_status"], "not-applicable")
         self.assertEqual(state["package_manager"], "uv")
         self.assertEqual(state["workspace_root"], str(workspace.root.resolve()))
         self.assertEqual(state["toolchain_mode"], "repo-local-managed")
@@ -659,7 +699,9 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(toolchain["entrypoint_health"], "startup-silent")
         self.assertEqual(toolchain["repair_reason"], "entrypoint-broken")
 
-    def test_bootstrap_launcher_skips_bad_env_python_stub_and_uses_healthy_fallback(self) -> None:
+    def test_bootstrap_launcher_ignores_bad_manual_python_and_uses_controlled_bootstrap_asset(
+        self,
+    ) -> None:
         workspace = self.make_workspace()
         script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
         script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -686,6 +728,29 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "print(json.dumps({'status': 'ready'}))\n",
             encoding="utf-8",
         )
+        fake_uv_installer = workspace.root / "uv-installer.sh"
+        fake_uv_installer.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "cat > \"$UV_UNMANAGED_INSTALL/uv\" <<'EOF'\n"
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "target=''\n"
+            "for arg in \"$@\"; do\n"
+            "  target=\"$arg\"\n"
+            "done\n"
+            "mkdir -p \"$target/bin\"\n"
+            "cat > \"$target/bin/python\" <<'PYEOF'\n"
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n"
+            "PYEOF\n"
+            "chmod +x \"$target/bin/python\"\n"
+            "exit 0\n"
+            "EOF\n"
+            "chmod +x \"$UV_UNMANAGED_INSTALL/uv\"\n",
+            encoding="utf-8",
+        )
+        fake_uv_installer.chmod(0o755)
 
         bad_stub = workspace.root / ".bad-python" / "python3"
         bad_stub.parent.mkdir(parents=True, exist_ok=True)
@@ -697,21 +762,15 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         bad_stub.chmod(0o755)
 
-        good_python = workspace.root / ".good-python" / "python3.13"
-        good_python.parent.mkdir(parents=True, exist_ok=True)
-        good_python.write_text(
-            "#!/bin/sh\n"
-            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
-            encoding="utf-8",
-        )
-        good_python.chmod(0o755)
-
         marker_path = workspace.root / "runtime" / "bootstrap-python.txt"
         env = {
             **os.environ,
-            "PATH": f"{good_python.parent}:{os.environ.get('PATH', '')}",
             "DOCMASON_BOOTSTRAP_PYTHON": str(bad_stub),
             "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
+            "DOCMASON_BOOTSTRAP_UV_INSTALLER_URL": f"file://{fake_uv_installer}",
+            "DOCMASON_SHARED_BOOTSTRAP_CACHE": str(
+                workspace.root / ".shared-bootstrap-cache"
+            ),
         }
         completed = subprocess.run(
             [str(script_path), "--yes", "--json"],
@@ -724,6 +783,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         self.assertTrue(marker_path.read_text(encoding="utf-8").strip())
+        self.assertIn("controlled bootstrap asset path", completed.stderr)
 
     def test_inspect_toolchain_distinguishes_shared_host_bootstrap_from_legacy_external(
         self,
@@ -744,6 +804,12 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_prepare_records_pdf_renderer_readiness_from_repo_local_venv_probe(self) -> None:
         workspace = self.make_workspace()
+
+        brew_call_count = {"value": 0}
+
+        def staged_brew_binary() -> str | None:
+            brew_call_count["value"] += 1
+            return None if brew_call_count["value"] < 4 else "/opt/homebrew/bin/brew"
 
         with (
             mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
@@ -860,6 +926,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             ),
             mock.patch("docmason.commands.find_brew_binary", return_value=None),
             mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "default-permissions",
+                },
+                clear=False,
+            ),
         ):
             report = prepare_workspace(
                 workspace,
@@ -872,16 +946,56 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(report.payload["prepare_status"], "awaiting-confirmation")
         self.assertEqual(
             report.payload["control_plane"]["confirmation_kind"],
-            "high-intrusion-prepare",
+            "host-access-upgrade",
         )
         self.assertIn(
-            "Prepare the workspace now?",
+            "Codex `Default permissions`",
             report.payload["control_plane"]["confirmation_prompt"],
         )
         self.assertEqual(
             report.payload["next_steps"][0],
-            "Run `docmason prepare --yes` to approve and continue.",
+            "Switch Codex to `Full access`, then continue the same task.",
         )
+        self.assertTrue(report.payload["host_access_required"])
+        self.assertEqual(report.payload["machine_baseline_status"], "host-access-upgrade-required")
+
+    def test_prepare_stays_degraded_for_non_native_office_gap(self) -> None:
+        workspace = self.make_workspace()
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch(
+                "docmason.commands.office_renderer_snapshot",
+                return_value={
+                    "required": True,
+                    "ready": False,
+                    "detail": "LibreOffice `soffice` is required but unavailable.",
+                },
+            ),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "claude-code",
+                    "DOCMASON_APPROVAL_MODE": "default",
+                },
+                clear=False,
+            ),
+        ):
+            report = prepare_workspace(
+                workspace,
+                assume_yes=True,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 2)
+        self.assertEqual(report.payload["status"], DEGRADED)
+        self.assertEqual(report.payload["machine_baseline_status"], "not-applicable")
+        self.assertIn(
+            "LibreOffice `soffice` is required but unavailable.",
+            "\n".join(report.lines),
+        )
+        self.assertIn("LibreOffice", " ".join(report.payload["next_steps"]))
 
     def test_prepare_auto_installs_libreoffice_with_brew_when_assume_yes(self) -> None:
         workspace = self.make_workspace()
@@ -914,6 +1028,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 return_value="/opt/homebrew/bin/brew",
             ),
             mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "full-access",
+                },
+                clear=False,
+            ),
         ):
             report = prepare_workspace(
                 workspace,
@@ -925,6 +1047,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
+        self.assertTrue(report.payload["workspace_runtime_ready"])
+        self.assertTrue(report.payload["machine_baseline_ready"])
+        self.assertEqual(report.payload["machine_baseline_status"], "ready")
+        self.assertFalse(report.payload["host_access_required"])
         self.assertIn(
             ["/opt/homebrew/bin/brew", "install", "--cask", "libreoffice-still"],
             seen_commands,
@@ -999,11 +1125,16 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
     def test_prepare_auto_installs_homebrew_before_managed_libreoffice_when_feasible(self) -> None:
         workspace = self.make_workspace()
         seen_commands: list[list[str]] = []
+        brew_call_count = {"value": 0}
 
         def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
             command_list = list(command)
             seen_commands.append(command_list)
             return self.fake_prepare_runner(workspace)(command_list, cwd)
+
+        def staged_brew_binary() -> str | None:
+            brew_call_count["value"] += 1
+            return None if brew_call_count["value"] < 4 else "/opt/homebrew/bin/brew"
 
         with (
             mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
@@ -1051,9 +1182,17 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             ),
             mock.patch(
                 "docmason.commands.find_brew_binary",
-                return_value=None,
+                side_effect=staged_brew_binary,
             ),
             mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "full-access",
+                },
+                clear=False,
+            ),
         ):
             report = prepare_workspace(
                 workspace,
@@ -1065,6 +1204,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
+        self.assertEqual(report.payload["machine_baseline_status"], "ready")
         self.assertIn(
             [
                 "/usr/bin/env",
@@ -1489,6 +1629,41 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         checks = {check["name"]: check for check in doctor_report.payload["checks"]}
         self.assertEqual(checks["control-plane"]["status"], ACTION_REQUIRED)
 
+    def test_status_and_workspace_state_surface_host_access_upgrade_without_prepare_yes(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        ensure_shared_job(
+            workspace,
+            job_key=f"prepare:{workspace.root}:host-access-upgrade:cap",
+            job_family="prepare",
+            criticality="answer-critical",
+            scope={"workspace_root": str(workspace.root)},
+            input_signature="cap",
+            owner={"kind": "command", "id": "prepare-command"},
+            requires_confirmation=True,
+            confirmation_kind="host-access-upgrade",
+            confirmation_prompt=(
+                "DocMason is currently running in Codex `Default permissions`."
+            ),
+            confirmation_reason="machine-baseline",
+        )
+
+        status_report = status_workspace(workspace, editable_install_probe=self.missing_probe)
+        self.assertIn("switch-host-to-full-access", status_report.payload["pending_actions"])
+        self.assertNotIn("prepare --yes", status_report.payload["pending_actions"])
+
+        snapshot = workspace_state_snapshot(workspace)
+        self.assertIn("switch-host-to-full-access", snapshot["next_legal_actions"])
+        self.assertNotIn("prepare --yes", snapshot["next_legal_actions"])
+
+        doctor_report = doctor_workspace(workspace, editable_install_probe=self.missing_probe)
+        checks = {check["name"]: check for check in doctor_report.payload["checks"]}
+        self.assertEqual(
+            checks["control-plane"]["action"],
+            "Switch Codex to `Full access`, then continue the same task.",
+        )
+
     def test_shared_job_acquisition_distinguishes_owner_and_waiter(self) -> None:
         workspace = self.make_workspace()
         owner_run_id = "run-owner"
@@ -1632,6 +1807,19 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_sync_adapters_generates_deterministic_claude_files(self) -> None:
         workspace = self.make_workspace()
+        (workspace.canonical_skills_dir / "ask").mkdir(parents=True)
+        (workspace.canonical_skills_dir / "ask" / "SKILL.md").write_text(
+            "# Ask\n",
+            encoding="utf-8",
+        )
+        self.seed_workflow_metadata(
+            workspace.canonical_skills_dir / "ask",
+            workflow_id="ask",
+            category="answer",
+            mutability="read-only",
+            parallelism="read-only-safe",
+            background_commands=["docmason _ask"],
+        )
         (workspace.canonical_skills_dir / "workspace-doctor").mkdir(parents=True)
         (workspace.canonical_skills_dir / "workspace-doctor" / "SKILL.md").write_text(
             "# Workspace Doctor\n",
@@ -1653,11 +1841,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         workflow_routing_text = workspace.claude_workflow_routing_path.read_text(encoding="utf-8")
         self.assertFalse((workspace.root / "CLAUDE.md").exists())
         self.assertIn("@workflow-routing.md", project_memory_text)
+        self.assertIn("@../../skills/canonical/ask/SKILL.md", project_memory_text)
         self.assertIn("@../../skills/canonical/workspace-bootstrap/SKILL.md", project_memory_text)
         self.assertIn("@../../skills/canonical/workspace-doctor/SKILL.md", project_memory_text)
         self.assertIn("## Foundation Workflows", workflow_routing_text)
         self.assertIn("### `workspace-bootstrap`", workflow_routing_text)
         self.assertIn("### `workspace-doctor`", workflow_routing_text)
+        self.assertIn("### `ask`", workflow_routing_text)
+        self.assertIn("`docmason _ask`", workflow_routing_text)
         self.assertIn("adapters/claude/project-memory.md", report.payload["generated_files"])
         self.assertIn("adapters/claude/workflow-routing.md", report.payload["generated_files"])
         self.assertIn(".claude/skills", report.payload["generated_files"])

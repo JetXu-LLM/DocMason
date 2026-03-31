@@ -270,11 +270,16 @@ class HookEventHandlerTests(unittest.TestCase):
         workspace.bootstrap_state_path.write_text(
             json.dumps(
                 {
-                    "schema_version": 3,
+                    "schema_version": 4,
                     "status": "action-required",
                     "environment_ready": False,
+                    "workspace_runtime_ready": False,
+                    "machine_baseline_ready": True,
+                    "machine_baseline_status": "not-applicable",
+                    "bootstrap_source": "shared-python",
                     "workspace_root": str(workspace.root.resolve()),
                     "isolation_grade": "degraded",
+                    "host_access_required": False,
                 }
             ),
             encoding="utf-8",
@@ -785,7 +790,9 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
                 "record_type": "stop",
                 "session_id": "sess-006",
                 "recorded_at": "2026-03-20T10:00:40Z",
-                "last_assistant_message": "The SDK documentation recommends sequential image reads.",
+                "last_assistant_message": (
+                    "The SDK documentation recommends sequential image reads."
+                ),
                 "stop_reason": "end_turn",
             },
         ]
@@ -796,7 +803,9 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
         turn = transcript["turns"][0]
         self.assertIsNone(turn["operator_evidence"]["classification"])
 
-    def test_stop_text_about_context_budget_does_not_trigger_overload_without_host_signal(self) -> None:
+    def test_stop_text_about_context_budget_does_not_trigger_overload_without_host_signal(
+        self,
+    ) -> None:
         records = [
             {
                 "record_type": "session-start",
@@ -815,7 +824,9 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
                 "record_type": "stop",
                 "session_id": "sess-007",
                 "recorded_at": "2026-03-20T10:00:40Z",
-                "last_assistant_message": "In general, keep the context budget small for future prompts.",
+                "last_assistant_message": (
+                    "In general, keep the context budget small for future prompts."
+                ),
                 "stop_reason": "end_turn",
             },
         ]
@@ -965,6 +976,12 @@ class CLIHookSubcommandTests(unittest.TestCase):
         for event in SUPPORTED_EVENTS:
             args = parser.parse_args(["_hook", event])
             self.assertEqual(args.event_name, event)
+
+    def test_top_level_help_hides_hidden_hook_and_ask_commands(self) -> None:
+        parser = build_parser()
+        help_text = parser.format_help()
+        self.assertNotIn("_hook", help_text)
+        self.assertNotIn("_ask", help_text)
 
 
 class CommittedBootstrapperFilesTests(unittest.TestCase):
