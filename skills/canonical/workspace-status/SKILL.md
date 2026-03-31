@@ -21,6 +21,7 @@ If the agent cannot inspect the filesystem, stop and explain that the current wo
 2. Use the reported `stage`, `bootstrap_state`, `control_plane`, and `pending_actions` as the authoritative workspace status summary.
    - use the `environment` block to distinguish `self-contained`, `mixed`, and `degraded`
    - treat only `self-contained` as ordinary ask-time ready
+     - in practice this is the repo-local steady-state runtime the ask path may trust
 3. Do not claim that a knowledge base exists unless `status` reports it as present.
 4. If the task is ambiguous, interpret `pending_actions` in context rather than as a rigid universal order.
    - missing or stale adapter guidance matters only when the current flow depends on generated adapter files
@@ -43,6 +44,7 @@ If the agent cannot inspect the filesystem, stop and explain that the current wo
 - `bootstrap_state` is the explicit cached-ready summary for ordinary ask-time reuse.
 - `environment.toolchain_mode`, `environment.isolation_grade`, and `environment.entrypoint_health`
   are the stable readiness fields for the prepared runtime.
+- `control_plane` is the authoritative summary for governed waits, approvals, and shared jobs.
 - Pending actions may include `prepare`, `sync-adapters`, `sync`, and `validate-kb`.
 - Control-plane pending confirmations are authoritative status truth, not optional side notes.
 - A staged knowledge base with pending synthesis or blocking validation is reported as `knowledge-base-invalid`.

@@ -23,7 +23,9 @@ If the agent cannot inspect local runtime logs, stop and explain that log review
 1. For an explicit operator refresh, prefer `docmason workflow runtime-log-review --json` so the derived summary and the request-level audit record are regenerated together.
 2. Start with `runtime/logs/review/summary.json` and `runtime/logs/review/benchmark-candidates.json` when they exist.
    - treat live conversation state under `runtime/state/` as the owner and `runtime/logs/conversations/` as projection-only
+     - `projection-only` means a derived mirror, not the primary truth surface
    - require canonical ask ownership before classifying a case as `interactive-ask`; workflow names, conversation linkage, or reconciliation leftovers alone are not enough
+     - here `canonical ask ownership` means the case is backed by a governed ask turn and linked runtime artifacts, not only host transcript residue
 3. Use the summary modes that best match the request:
    - recent activity
    - no-result retrieval sessions
@@ -60,5 +62,6 @@ If the agent cannot inspect local runtime logs, stop and explain that log review
 - Each explicit review invocation should leave one replayable request artifact under `runtime/logs/review/requests/`.
 - The review summary is derived from runtime logs under `runtime/logs/`.
 - The summary should distinguish committed truth from orphaned leftovers instead of reconstructing legality from mixed artifacts.
+- `orphaned leftovers` means reviewable runtime artifacts that are not backed by the committed governing truth for a completed case.
 - `runtime/logs/review/benchmark-candidates.json` is a read-only derived artifact that suggests future benchmark cases from conversation turns, retrieval sessions, and trace outcomes.
 - Real operator and user interactions should stay at the top of the main recent-activity views; evaluation-suite traffic is intentionally demoted into separate synthetic buckets.

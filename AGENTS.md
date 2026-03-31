@@ -50,6 +50,14 @@ Once the adapted workspace is ready and the platform mapping is already establis
 
 - ordinary natural-language questions still enter through canonical `ask`
 
+## First-Contact Hints
+
+- `canonical ask` means the governed DocMason path for one ordinary natural-language request.
+- A practical sign that canonical `ask` really opened is that the request leaves linked runtime artifacts rather than only a host-visible reply, typically under `runtime/answers/`, `runtime/runs/`, and `runtime/logs/`.
+- `explicit operator work` means setup, status, sync, adapter maintenance, log review, or in-place bundle update work; those requests may route directly to the matching top-level workflow.
+- `published KB` means the currently published knowledge-base truth under `knowledge_base/current/`.
+- `control-plane` means the governed wait, approval, and shared-job state under `runtime/control_plane/`.
+
 ## Discovery Boundaries
 
 - Tracked repo search means committed repository files such as code, docs, skills, and tracked samples.

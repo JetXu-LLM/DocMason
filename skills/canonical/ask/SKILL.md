@@ -34,6 +34,9 @@ The routed inner workflow owns the deeper evidence loop.
 - `native turn` means the host's own chat turn before DocMason opens canonical ask handling.
 - `canonical ask turn` means the governed DocMason turn for the current request.
 - `runtime ownership` means the current request has been opened into that canonical ask turn and is now governed by DocMason.
+- `native ledger` means host-side audit capture that is not canonical ask truth by itself.
+- `interaction-ingest` means the runtime holding area for reconciled host activity before any governed promotion.
+- A practical sign that canonical ask really opened is that the request leaves linked runtime artifacts rather than only a host-visible reply, typically under `runtime/answers/`, `runtime/runs/`, and `runtime/logs/`.
 
 ## Required Capabilities
 
@@ -74,6 +77,7 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 4. Check workspace state only when the answer really depends on workspace truth.
    - use `runtime/bootstrap_state.json` as the cached readiness marker
    - treat workspace-dependent ask as legal only when the prepared environment is `self-contained`
+     - `self-contained` means the repo-local steady-state runtime is trusted for ordinary ask work
    - if the environment is `mixed` or `degraded`, let the ask helper repair or surface the governed boundary instead of answering from a partially trusted runtime
    - allow safe silent bootstrap or repair when the workspace-dependent path can continue safely
    - if the environment is ready but no published knowledge base exists yet, route to `knowledge-base-sync` instead of bluffing a workspace-grounded answer

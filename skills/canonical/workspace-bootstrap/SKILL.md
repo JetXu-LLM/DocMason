@@ -24,6 +24,7 @@ If the agent cannot perform these capabilities, stop and explain that the enviro
      rerun deep bootstrap work by default
    - if it belongs to another workspace root, treat that as a moved-repo repair case
    - treat `self-contained` as the only ordinary ask-time ready environment grade
+     - in practice this means the repo-local steady-state runtime is trusted for ordinary work
    - treat `mixed` and `degraded` as repair-needed states
 2. If `.venv` is absent or `docmason` is not yet runnable from the repo-local environment, start with:
    - `./scripts/bootstrap-workspace.sh --yes`
