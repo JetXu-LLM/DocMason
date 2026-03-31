@@ -17,7 +17,7 @@ from unittest import mock
 
 from docmason.commands import DEGRADED, update_core_workspace
 from docmason.project import WorkspacePaths
-from docmason.release_entry import release_entry_snapshot
+from docmason.release_entry import RELEASE_ENTRY_USER_AGENT, release_entry_snapshot
 from docmason.update_core import CLEAN_ASSET_NAME, UpdateCoreError, perform_update_core
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -182,6 +182,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             del timeout
             url = getattr(request, "full_url", request)
             if url == service_url:
+                self.assertEqual(request.headers.get("User-agent"), RELEASE_ENTRY_USER_AGENT)
                 payload = json.loads(request.data.decode("utf-8"))
                 self.assertEqual(payload["trigger"], "update-core")
                 return _FakeResponse(

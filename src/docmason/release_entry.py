@@ -26,6 +26,7 @@ RELEASE_ENTRY_SUPPORTED_CHANNELS = frozenset({"clean", "demo-ico-gcs"})
 DEFAULT_RELEASE_ENTRY_SCOPE = "canonical-ask"
 DEFAULT_RELEASE_ENTRY_COOLDOWN_HOURS = 20
 DEFAULT_RELEASE_ENTRY_TIMEOUT_SECONDS = 2.0
+RELEASE_ENTRY_USER_AGENT = "DocMasonReleaseEntry/1.0 (+https://github.com/JetXu-LLM/DocMason)"
 
 
 def _utc_now() -> str:
@@ -370,6 +371,7 @@ def request_release_entry_service(
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": RELEASE_ENTRY_USER_AGENT,
         },
         method="POST",
     )

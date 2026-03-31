@@ -11,7 +11,11 @@ from unittest import mock
 
 from docmason.commands import READY, doctor_workspace, status_workspace
 from docmason.project import WorkspacePaths, write_json
-from docmason.release_entry import maybe_run_release_entry_check, release_entry_snapshot
+from docmason.release_entry import (
+    RELEASE_ENTRY_USER_AGENT,
+    maybe_run_release_entry_check,
+    release_entry_snapshot,
+)
 from tests.support_ready_workspace import seed_self_contained_bootstrap_state
 
 
@@ -111,6 +115,7 @@ class ReleaseEntryClientTests(unittest.TestCase):
         def _urlopen(request, timeout):  # type: ignore[no-untyped-def]
             del timeout
             self.assertEqual(request.get_method(), "POST")
+            self.assertEqual(request.headers.get("User-agent"), RELEASE_ENTRY_USER_AGENT)
             payload = json.loads(request.data.decode("utf-8"))
             self.assertEqual(payload["schema_version"], 1)
             self.assertEqual(payload["trigger"], "ask-auto")

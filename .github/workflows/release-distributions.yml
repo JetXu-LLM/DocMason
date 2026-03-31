@@ -103,6 +103,7 @@ jobs:
               data=(json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
               headers={
                   "Content-Type": "application/json",
+                  "User-Agent": "DocMasonReleaseEntry/1.0 (+https://github.com/JetXu-LLM/DocMason)",
                   "Authorization": f"Bearer {os.environ['RELEASE_ENTRY_ADMIN_TOKEN']}",
               },
               method="POST",
