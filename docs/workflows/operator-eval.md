@@ -1,57 +1,44 @@
-# Operator Eval
+# Hidden Local Maintenance Workflow
 
-`operator-eval` is the hidden advanced workflow for the local Phase 6b1 operator-quality loop.
+This page exists because the repository still ships a hidden `operator-eval` workflow surface.
+It is not a public product feature, not a recommended contributor starting point, and not part of DocMason's current release direction.
 
-It is intentionally open-source but non-first-contact.
-Ordinary user guidance should continue to center on `ask`, setup, sync, retrieval, trace, and runtime review.
+## Current Status
+
+- local-only
+- hidden from normal user guidance
+- not part of any public benchmark or competition program
+- safe to ignore unless you are maintaining legacy local review or replay tooling
 
 ## Entry Surface
 
-Run the workflow through:
+Run it only from an already prepared source repository:
 
 ```bash
 ./.venv/bin/python -m docmason workflow operator-eval --json
 ```
 
-The workflow reads one request file from:
+## What It Is For
 
-- `runtime/eval/requests/current.json`
+Use this workflow only when a maintainer explicitly needs to inspect or replay local maintenance artifacts under `runtime/eval/`.
+It is not required for ordinary ask, sync, trace, runtime review, or bundle use.
 
-## Supported Actions
+## Artifact Boundary
 
-- `run-suite`
-- `review-regressions`
-- `promote-candidate`
-- `freeze-baseline`
-
-Suite definitions may now include manual `execution_mode="ask-turn"` cases in addition to the
-existing retrieval and trace replay modes. This remains a hidden local operator surface only.
-Ask-turn replay remains auditably synthetic:
-
-- the replayed turn and linked runtime artifacts carry `log_origin="evaluation-suite"`
-- review-facing real buckets ignore those synthetic records
-- `required_run_events` is checked as an ordered run-journal subsequence rather than an unordered set
-- shared-job wait or settle closure is validated from persisted runtime truth, not only case-authored expectations
-
-## Live Artifact Root
-
-All live operator-eval artifacts stay under:
+If this surface is used at all, its live artifacts stay under:
 
 - `runtime/eval/`
-
-Important subtrees:
-
-- `runtime/eval/benchmarks/broad/`
-- `runtime/eval/benchmarks/regression/`
-- `runtime/eval/drafts/candidates/`
+- `runtime/eval/benchmarks/`
 - `runtime/eval/runs/`
 - `runtime/eval/reviews/`
 - `runtime/eval/feedback/`
 
-## Tracked Examples
+Tracked examples under `skills/operator/operator-eval/examples/` are schema examples only.
+They are documentation aids, not live runtime truth.
 
-Tracked schema examples live under:
+## Public Boundary
 
-- `skills/operator/operator-eval/examples/`
-
-Those files are illustrative only and must never be mistaken for live local benchmark truth.
+- public bundles do not depend on this workflow
+- ordinary users should ignore it
+- contributors should not treat it as the preferred quality loop for the project
+- DocMason is not currently pursuing a public evaluation or benchmark track

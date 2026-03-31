@@ -1,48 +1,57 @@
 # Documentation Index
 
-`README.md` is the primary user-facing document.
-It should sell the project honestly, explain the value quickly, and show the default onboarding path.
+`README.md` is the fastest public entry point for DocMason.
+This `docs/` tree is the deeper public reference for users, evaluators, contributors, and installed AI agents working from the tracked repository.
 
-`AGENTS.md` is the minimal top-level routing contract for agents entering the repository.
-Detailed workflow procedures belong in `skills/canonical/` and selected deeper reference pages, not in `AGENTS.md` itself.
+## What belongs here
 
-This `docs/` tree is the public deeper documentation layer for DocMason.
-It is written for users and evaluators first, then for contributors and installed AI agents that need a stable public reference.
-It should explain the current product, how to operate it, and where its public boundaries are.
+Use `docs/` for current public behavior and public operating boundaries:
 
-`docs/` is not the private design stack.
-Private design law, Dao/Fa/Qi/Shu reasoning, detailed technical specifications, implementation programs, and supersession records belong under `planning/`, not here.
+- product shape and supported use cases
+- bundle and workspace boundaries
+- workflow and command reference
+- setup, recovery, and privacy guidance
+- architecture notes that help a public reader understand the product
 
-The main document families in `docs/` are:
+Use `planning/` for private design law, implementation programs, and historical notes.
+Public docs should never require private planning context to make sense.
 
-- product and mental-model explainers
-- task-oriented how-to and operating guides
-- stable public reference for CLI, workflows, architecture, and repository boundaries
-- policy, privacy, distribution, and support-boundary documentation
+## Recommended Reading Paths
 
-The writing standard for `docs/` is:
+### First Evaluation
 
-- human-first but agent-legible
-- current-state and de-phased by default
-- honest about public capability and limits
-- focused on public behavior rather than private design theory
+1. Read `README.md`.
+2. Read [Product Overview](product/README.md).
+3. Read [Distribution And Public Bundles](product/distribution-and-benchmarks.md).
 
-Current documentation areas:
+### Running A Private Workspace
 
-- [Architecture](architecture/README.md)
-- [Product](product/README.md)
-- [Distribution Strategy](product/distribution-and-benchmarks.md)
-- [Setup](setup/manual-workspace-recovery.md)
-- [Workflows](workflows/README.md)
-- [Execution Orchestration](workflows/execution-orchestration.md)
-- [Policies](policies/README.md)
+1. Read `README.md`.
+2. Read [Workflow Overview](workflows/README.md).
+3. Use [Manual Workspace Bootstrap And Recovery](setup/manual-workspace-recovery.md) only when the normal automation path cannot finish honestly.
 
-The current documentation set explains:
+### Contributing
 
-- what DocMason is and how to think about its public product shape
-- how to bootstrap, recover, and operate a workspace through the public entry surfaces
-- the public CLI surface and the public workflow boundary around `ask`
-- the repository's public architecture, policy, privacy, and distribution boundaries
+1. Read [../CONTRIBUTING.md](../CONTRIBUTING.md).
+2. Read [Execution-Orchestration Reference](workflows/execution-orchestration.md).
+3. Read [Architecture Overview](architecture/README.md) and [Policy Index](policies/README.md) as needed.
 
-Some existing pages still contain more historical or internal detail than this standard intends.
-Those pages should be tightened over time toward current-state public reference rather than treated as the public home for private design reasoning.
+## Current Document Map
+
+- [Architecture Overview](architecture/README.md)
+- [Policy Index](policies/README.md)
+- [Product Overview](product/README.md)
+- [Distribution And Public Bundles](product/distribution-and-benchmarks.md)
+- [Workflow Overview](workflows/README.md)
+- [Execution-Orchestration Reference](workflows/execution-orchestration.md)
+- [Manual Workspace Bootstrap And Recovery](setup/manual-workspace-recovery.md)
+
+## Writing Standard
+
+Public docs in this tree should stay:
+
+- current-state, not phase-history-first
+- public and reader-first
+- behavior and boundary focused
+- honest about unsupported or deferred paths
+- consistent with `README.md`, `CONTRIBUTING.md`, and the canonical workflow surfaces

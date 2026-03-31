@@ -1,93 +1,67 @@
-# Distribution Strategy
+# Distribution And Public Bundles
 
-DocMason now uses one canonical source repository plus two generated release channels:
+DocMason ships one canonical source repository plus two generated bundle channels.
 
-- `clean`: empty live workspace for private real use
-- `demo-ico-gcs`: preloaded public sample corpus for product evaluation
+## Why Multiple Channels Exist
 
-Why this shape exists:
+- contributors need the full repository, tests, scripts, and tracked public fixtures
+- private end users need a workspace that starts clean and local
+- public evaluators need a no-private-data demo path
 
-- pure end users need a download-first, no-git-history private workspace
-- evaluators need a fast demo corpus
-- contributors need the full source repository, tests, and public fixtures
+## Not A Benchmark Track
 
-That means the repository distinguishes three boundaries clearly:
+DocMason currently ships public bundles and public sample fixtures.
+It does not maintain a public benchmark package, mirrored benchmark datasets, or a competition submission workflow.
 
-- `original_doc/`: writable live corpus boundary for normal workspace use
-- `sample_corpus/`: tracked public fixture boundary
+## Channels
 
-The canonical repository keeps `original_doc/`, `knowledge_base/`, `runtime/`, and `adapters/`
-empty and gitignored. Public sample content lives under `sample_corpus/` and is copied into
-`original_doc/` only when a contributor or generated demo bundle explicitly materializes it.
+### Canonical Source Repository
 
-## Release Channels
+Use the source repository when you need full repository context.
 
-### Clean
+- includes code, tests, scripts, `sample_corpus/`, planning, and contributor surfaces
+- does not track live private corpus, published KB, or runtime state
+- use this path for issues, pull requests, and maintenance
 
-The clean bundle is for private real use.
+### Clean Bundle
 
-- no `.git`
-- no `tests/`
-- no `sample_corpus/`
-- empty `original_doc/`
-- empty `knowledge_base/`
-- empty `runtime/`
-- empty `adapters/`
-
-### Demo
-
-The demo bundle is for product evaluation.
+Use the clean bundle for private real use.
 
 - no `.git`
 - no `tests/`
-- sample corpus materialized into `original_doc/ico/` and `original_doc/gcs/`
-- empty `knowledge_base/`
-- empty `runtime/`
-- empty `adapters/`
+- empty `original_doc/`, `knowledge_base/`, `runtime/`, and `adapters/`
+- includes the distribution manifest and bounded update contract
 
-### Canonical Source Repo
+### Demo Bundle
 
-The canonical repository remains the contributor and maintainer surface.
+Use the demo bundle for public product evaluation.
 
-- includes `tests/`
-- includes `sample_corpus/`
-- includes release-build and safety tooling
-- does not track live workspace content beneath `original_doc/`
+- no `.git`
+- no `tests/`
+- public sample corpus materialized into `original_doc/`
+- empty `knowledge_base/`, `runtime/`, and `adapters/`
 
-## Release-Entry Update Checks
+## Sample Corpus Boundary
 
-Generated release bundles now carry a bounded release-entry contract:
+Tracked public demo files live under `sample_corpus/` in the source repository.
+They are copied into `original_doc/` only when a contributor explicitly materializes the sample corpus or when the demo bundle is generated.
+`sample_corpus/` is not a substitute for the live private corpus boundary.
 
-- only `clean` and `demo-ico-gcs` bundles participate
-- only canonical `ask` completion can auto-trigger the network call
-- automatic checks run at most once every 20 hours
-- the source repository and fresh clone paths stay automatic-network disabled
-- `docmason update-core` is the explicit in-place core update path for generated bundles
+## What Bundles Do Not Ship
 
-Each generated bundle includes:
+- private documents
+- compiled private knowledge bases
+- local runtime history
+- generated adapters from a specific user's workspace
+- contributor test suites or maintainer-only tooling that is irrelevant to bundle use
 
-- `distribution-manifest.json` with a `release_entry` block
-- `runtime/state/release-client.json` as the single local release-entry control file
+## Update Behavior
 
-The network payload is intentionally narrow:
+Generated bundles may participate in the bounded release-entry contract documented in [Release Entry And Networking](../policies/release-entry-and-networking.md).
+That contract exists only to support update checks and explicit `docmason update-core`; it is not a general telemetry surface.
 
-- `distribution_channel`
-- `source_version`
-- `installation_hash`
-- `trigger`
+## Choosing The Right Path
 
-It never includes corpus content, paths, file names, query text, answer text, source locators,
-environment variables, secrets, machine fingerprints, or IP-derived identifiers.
-
-`DO_NOT_TRACK=1` disables the automatic update check completely.
-Users may also set `automatic_check_enabled` to `false` in `runtime/state/release-client.json`.
-An explicit `docmason update-core` command still contacts the release-entry service, because it is
-a direct user-requested update action rather than a background automatic check.
-
-When a newer bundle release is known, the host-visible final ask reply may include one short update
-reminder.
-The canonical answer file under `runtime/answers/` remains unchanged.
-When the user explicitly updates, DocMason downloads the latest generated clean core, verifies the
-published checksum, preserves local workspace state such as `original_doc/`, `knowledge_base/`,
-`runtime/`, `adapters/`, `.docmason/`, and `.agents/`, and replaces the remaining top-level core
-surface in place.
+- use the source repository if you are contributing or need full repository context
+- use the clean bundle if you want the fastest private start
+- use the demo bundle if you want to see the product over public fixtures before loading your own files

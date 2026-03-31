@@ -211,9 +211,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Hook event name (session, prompt-submit, post-tool-use, stop).",
     )
     subparsers.add_parser("_ask", help=argparse.SUPPRESS)
-    subparsers._choices_actions = [  # type: ignore[attr-defined]
+    subparsers._choices_actions = [
         action
-        for action in subparsers._choices_actions  # type: ignore[attr-defined]
+        for action in subparsers._choices_actions
         if getattr(action, "dest", None) not in {"_hook", "_ask"}
     ]
     return parser

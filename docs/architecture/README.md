@@ -1,59 +1,62 @@
-# Architecture Notes
+# Architecture Overview
 
-DocMason is built around a layered architecture:
+DocMason is a local, file-first, repo-native system.
+The repository is the operating surface; generated bundles are distribution variants of that same surface, not a separate product.
 
-1. workspace bootstrap and orchestration
-2. deterministic preprocessing and evidence preparation
-3. agent-led knowledge construction
-4. knowledge compilation and graph maintenance
-5. retrieval and trace
-6. grounded answer workflow and response contract
-7. benchmark, evaluation, and feedback governance
-8. operator review surface and manual learning lab
-9. adaptive operational learning over private overlays
-10. future local web companion
+## Core Architectural Commitments
 
-Key architectural commitments:
+- file-only persistence rather than a required database service
+- published knowledge under `knowledge_base/current/`
+- `knowledge_base/staging/` as a working area, not reader-facing truth
+- ordinary natural-language work entering through canonical `ask`
+- deterministic preparation, validation, and publication around agent reasoning
+- strict separation between tracked public fixtures and live private workspace content
+- generated adapters translating canonical repository contracts rather than defining parallel truth
 
-- file-only persistent knowledge
-- multimodal evidence preservation
-- Codex on macOS as the current native reference workflow for repository implementation
-- strong provenance
-- strong validation gates
-- elegant adaptation for other agents and environments
+## Public Layers
 
-Phase 6 now implements the stable primitive, workflow-productization, private-first evaluation, and natural-intent routing layers through:
+### Workspace Surfaces
 
-- `AGENTS.md` as the minimal top-level routing contract for agents
-- canonical public workflows under `skills/canonical/`
-- per-workflow execution metadata under `skills/canonical/*/workflow.json`
-- the user-facing `ask` workflow as the default natural entry surface
-- the `docmason` CLI for `prepare`, `doctor`, `status`, `sync`, `retrieve`, `trace`, `validate-kb`, `sync-adapters`, and `update-core`
-- local Claude adapter generation from canonical sources
-- generated Claude workflow-routing guidance derived from canonical workflow metadata
-- staged knowledge-base artifacts under `knowledge_base/staging/`
-- a single published read surface at `knowledge_base/current/`, backed by one hidden published root under `knowledge_base/.published/`
-- the compatibility publish pointer under `knowledge_base/current/` plus `knowledge_base/current-pointer.json`
-- a compact logical publish ledger under `runtime/control_plane/publish_ledger.jsonl`
-- runtime source identity, dependency, and query-log state under `runtime/`
-- runtime conversation-turn state under `runtime/logs/conversations/`
-- runtime interaction-ingest state, attachments, overlays, and reconciliation manifests under `runtime/interaction-ingest/`
-- validation reports that gate publication
-- published retrieval and trace artifacts under the activated published root
-- a shared `docmason.source_references` layer that enriches manifests, retrieval records, trace provenance, and turn-linked runtime logs with normalized source aliases and unit locators
-- published promoted interaction memories under `knowledge_base/current/interaction/`
-- deterministic answer-state classification for answer-first trace runs
-- review-friendly runtime summary artifacts under `runtime/logs/review/`
-- private evaluation runs, scorecards, feedback records, and operator review packs under `runtime/eval/`
-- internal evaluation helpers for replayable suites, baseline comparison, and version capture
-- benchmark-candidate extraction derived from runtime logs and conversation turns
-- compact derived `reference_resolution_summary` labels in review-facing artifacts rather than full duplicated resolver blocks
+- `original_doc/` is the live private source boundary.
+- `knowledge_base/current/` is the current published read surface.
+- `knowledge_base/staging/` is a working area during sync and publication.
+- `runtime/` holds local execution, review, and audit state.
+- `sample_corpus/` holds tracked public demo fixtures.
 
-What remains later-phase work:
+### Execution Surfaces
 
-- a richer operator review surface beyond summary artifacts and canonical review workflows
-- any decision to expose a public evaluation command after the operator surface matures
-- adaptive private overlays
-- later automation such as `watch`
+- ordinary questions go through a supported host agent and canonical `ask`
+- the public CLI handles deterministic setup, sync, and evidence operations
+- `docmason workflow` is the advanced explicit workflow surface
+- canonical workflow contracts live under `skills/canonical/`
 
-Detailed architecture docs will expand further as later roadmap phases are implemented.
+### Evidence Surfaces
+
+- published text, render, structure, notes, and media artifacts
+- retrieval and trace outputs derived from the published corpus
+- source references and locators that keep answer support inspectable
+
+### Distribution Surfaces
+
+- the canonical source repository is the contributor surface
+- the clean bundle is the private real-use distribution surface
+- the demo bundle is the public product-evaluation surface
+
+## Local-Only And Derived Surfaces
+
+Some files exist only to support local execution or maintainer review:
+
+- `runtime/logs/` and `runtime/answers/`
+- request-level review artifacts under `runtime/logs/review/`
+- generated adapters under `adapters/`
+- hidden maintenance or compatibility surfaces that are not part of the default product story
+
+These surfaces may be useful, but they are not a second public contract.
+Derived runtime projections remain local read surfaces rather than canonical authored truth.
+
+## What This Page Does Not Do
+
+This page does not document internal planning stages, private design law, or implementation programs.
+Those belong in `planning/`.
+
+For operator entry points and workflow boundaries, read [Workflow Overview](../workflows/README.md) and [Execution-Orchestration Reference](../workflows/execution-orchestration.md).

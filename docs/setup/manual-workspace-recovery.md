@@ -1,84 +1,70 @@
 # Manual Workspace Bootstrap And Recovery
 
-Use this document only when the normal automation path is unavailable or incomplete:
+Use this page only when the normal automation path cannot finish honestly:
 
 - `./scripts/bootstrap-workspace.sh --yes`
 - `docmason prepare --yes`
 
-This is not the ordinary native Codex/macOS first-run path.
-On that path, DocMason should prefer the controlled bootstrap asset launcher plus the governed
-machine-baseline install flow before dropping here.
+This is a fallback reference, not the ordinary first-run story.
 
-The launcher contract is now strict:
+## Default Expectation
 
-- it performs bounded liveness probing instead of trusting an arbitrary bootstrap interpreter forever
-- it prefers repo-local managed Python, then the repo-local bootstrap venv, then an explicit
-  `DOCMASON_BOOTSTRAP_PYTHON` override, then the controlled UV bootstrap asset path
-- when it has to fetch that controlled bootstrap asset, it should do so through a shared user
-  cache and then build the repo-local bootstrap helper from there
-- it rejects obviously broken bootstrap candidates such as shebang-only recursive stubs,
-  startup-silent candidates, and timed-out launcher chains
+On the native macOS path, DocMason should set up a repo-local managed Python, a repo-local `.venv`, and any needed machine-level dependencies with minimal manual work.
+If the normal automation path succeeds, stop here and use it.
 
-The normal product expectation is still:
+## Recovery Goal
 
-- repo-local managed Python `3.13` under `.docmason/toolchain/python/`
-- repo-local `.venv` anchored to that managed Python
-- editable `docmason` install from the current workspace root
-- `runtime/bootstrap_state.json` recorded with `isolation_grade = self-contained`
-- `doctor --json` as the verification step
+A workspace is ready for ordinary DocMason work when all of the following are true:
 
-This deeper fallback exists for agent environments such as non-native shells, unsupported
-platforms, path-moved workspaces, or tools that cannot run the committed launcher directly.
+1. a bootstrap Python 3.11 or newer is available
+2. `.docmason/toolchain/python/current/bin/python3.13` exists
+3. `.venv/bin/python` resolves under `.docmason/toolchain/python/`
+4. `runtime/bootstrap_state.json` records a self-contained environment
+5. `docmason doctor --json` reports the environment honestly
+6. required machine-level tools are present for the current corpus
 
-## Target End State
+## Lowest-Risk Recovery Order
 
-An environment is good enough for ordinary DocMason work when all of these are true:
+### 1. Confirm The Real Workspace Root
 
-1. A bootstrap or repair Python 3.11 or newer is available.
-2. `.docmason/toolchain/python/current/bin/python3.13` exists.
-3. `.venv/bin/python` resolves under `.docmason/toolchain/python/`.
-4. `runtime/bootstrap_state.json` reports `schema_version = 4` and `isolation_grade = self-contained`.
-5. `docmason doctor --json` reports the environment checks honestly.
-6. On native Codex/macOS, the machine baseline is ready: Homebrew plus LibreOffice are present.
-7. If the current corpus includes Office files, LibreOffice is installed before sync runs.
+The root should contain at least:
 
-## Lowest-Risk Manual Repair Order
+- `pyproject.toml`
+- `docmason.yaml`
+- `src/docmason/`
+- `scripts/`
 
-1. Confirm the real workspace root.
-   - It should contain `pyproject.toml`, `docmason.yaml`, `src/docmason/`, and `scripts/`.
-   - If the repository was moved, always work from the new real path.
+If the repository was moved or renamed, always work from the new real path.
 
-2. If the normal launcher cannot obtain a bootstrap runtime, decide whether you are still on an
-   ordinary path.
-   - For native Codex/macOS ordinary cold starts, go back and complete the governed launcher path
-     first, including any explicit `Default permissions` versus `Full access` boundary.
-   - Only continue here when the launcher itself is unavailable or cannot finish honestly.
+### 2. Choose A Supported Bootstrap Python
 
-3. Find a healthy supported Python.
-   - Preferred manual fallback order: an explicit `DOCMASON_BOOTSTRAP_PYTHON`, then a known-good
-     `python3.13`, `python3.12`, or `python3.11`.
-   - On macOS, Homebrew Python is acceptable for this manual fallback path.
-   - On Linux, use the distro package manager or an already-installed supported Python.
-   - Do not trust a wrapper that resolves to a recursive `#!/usr/bin/env python3` stub or a
-     candidate that hangs on a trivial startup probe.
+Preferred manual fallback order:
 
-4. Run the repo-local prepare flow from source with that bootstrap Python.
+- `DOCMASON_BOOTSTRAP_PYTHON`
+- a known-good `python3.13`
+- `python3.12`
+- `python3.11`
 
-Preferred path:
+On macOS, Homebrew Python is acceptable for this fallback path.
+On Linux, use your distribution package manager or an already installed supported Python.
+
+### 3. Run The Repo-Local Prepare Flow
+
+Preferred command:
 
 ```bash
 PYTHONPATH=src /absolute/path/to/python3.11 -m docmason prepare --yes
 ```
 
-If you want machine-readable output:
+Machine-readable variant:
 
 ```bash
 PYTHONPATH=src /absolute/path/to/python3.11 -m docmason prepare --yes --json
 ```
 
-5. If `prepare` cannot provision `uv` automatically, repair the repo-local bootstrap helper venv.
+### 4. Repair The Bootstrap Helper If `uv` Provisioning Fails
 
-Preferred path:
+If `prepare` cannot provision `uv` automatically, repair the repo-local bootstrap helper venv:
 
 ```bash
 /absolute/path/to/python3.11 -m venv .docmason/toolchain/bootstrap/venv
@@ -87,7 +73,7 @@ Preferred path:
 PYTHONPATH=src .docmason/toolchain/bootstrap/venv/bin/python -m docmason prepare --yes
 ```
 
-6. Verify.
+### 5. Verify The Result
 
 ```bash
 .venv/bin/python -m docmason doctor --json
@@ -101,18 +87,19 @@ The resolved `.venv/bin/python` path should sit under `.docmason/toolchain/pytho
 
 If the repository was renamed or moved:
 
-1. Do not trust an old `.venv` or cached bootstrap marker from the previous path.
-2. Re-run `docmason prepare --yes` from the new workspace root through a supported bootstrap Python.
-3. Confirm that `runtime/bootstrap_state.json` now records the new `workspace_root`.
-4. Confirm that `.venv/bin/python` resolves under the new `.docmason/toolchain/python/` tree.
+1. do not trust an old `.venv` from the previous path
+2. rerun `docmason prepare --yes` from the new workspace root
+3. confirm that `runtime/bootstrap_state.json` now records the new `workspace_root`
+4. confirm that `.venv/bin/python` resolves under the new `.docmason/toolchain/python/` tree
 
-## Office Rendering Requirement
+## Dependency Checks
 
-If the current source corpus includes `.pptx`, `.ppt`, `.docx`, `.doc`, `.xlsx`, or `.xls`,
-DocMason needs LibreOffice before sync can build the knowledge base correctly.
+### Office Files
+
+If the current source corpus includes `.pptx`, `.ppt`, `.docx`, `.doc`, `.xlsx`, or `.xls`, install LibreOffice before syncing.
 
 - native Codex/macOS ordinary path:
-  - prefer returning to the governed launcher and `docmason prepare --yes`
+  - prefer going back to the governed launcher and `docmason prepare --yes`
   - if the thread is still in Codex `Default permissions`, switch it to `Full access` first
 
 - macOS with Homebrew:
@@ -126,7 +113,7 @@ brew install --cask libreoffice-still
   - move the app into `/Applications`
 
 - Linux:
-  - install LibreOffice with the distro package manager or the official packages
+  - install LibreOffice with the distribution package manager or the official packages
   - ensure `soffice` is on `PATH`
 
 Then rerun:
@@ -135,14 +122,14 @@ Then rerun:
 .venv/bin/python -m docmason doctor --json
 ```
 
-## PDF Rendering And Region Extraction Requirement
+### PDF Corpora
 
-If the current source corpus includes `.pdf`, DocMason now expects the full repo-local PDF stack:
+If the current source corpus includes `.pdf`, keep the full repo-local PDF stack installed:
 
-- `PyMuPDF` for region-level visual extraction
-- `pypdfium2` for render generation
-- `pypdf` for conservative text and page handling
-- `pillow` for image output
+- `PyMuPDF`
+- `pypdfium2`
+- `pypdf`
+- `pillow`
 
 Preferred repair path:
 
@@ -150,7 +137,7 @@ Preferred repair path:
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-If you need a narrower manual repair inside an existing `.venv`:
+If you need a narrower repair inside an existing `.venv`:
 
 ```bash
 .venv/bin/python -m pip install --upgrade PyMuPDF pypdfium2 pypdf pillow
@@ -166,8 +153,7 @@ Then rerun:
 ## Windows Or Non-Native Agent Environments
 
 Windows is not the primary supported DocMason platform in the current product contract.
-Even so, an advanced agent may still perform a best-effort local bootstrap if the user explicitly
-wants that path.
+Even so, an advanced agent may still perform a best-effort local bootstrap if the user explicitly wants that path.
 
 Use the same invariants:
 
@@ -187,15 +173,13 @@ $env:PYTHONPATH = "src"
 .venv\Scripts\python.exe -m docmason doctor --json
 ```
 
-If this succeeds, the agent should still describe Windows as a compatibility or best-effort path,
-not as the native supported workflow.
+If this succeeds, describe Windows as a compatibility or best-effort path, not as the native supported workflow.
 
-## Agent Rule
+## When To Stop And Ask For Help
 
-If scripts or canonical skills are insufficient for the current shell or platform:
+Stop and escalate when:
 
-- do not stop at “unsupported” if the missing work is only deterministic local setup
-- do the minimal safe repair automatically when no extra permissions are needed
-- ask the user only when permissions, GUI installers, or policy-sensitive package installs are
-  required
-- after manual repair, always rerun `doctor --json`
+- machine-level dependencies require GUI installation or policy approval
+- host permissions are insufficient for the required system changes
+- `doctor --json` still reports a degraded or mixed environment after repair
+- the workspace cannot reach a self-contained repo-local runtime

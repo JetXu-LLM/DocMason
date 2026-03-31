@@ -23,9 +23,12 @@ def seed_repo_local_managed_python(
     python_path = install_root / "bin" / f"python{minor_version}"
     python_path.parent.mkdir(parents=True, exist_ok=True)
     python_path.write_text(
-        "#!/bin/sh\n"
-        f"export PYTHONPATH={shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
-        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        (
+            "#!/bin/sh\n"
+            "export PYTHONPATH="
+            f"{shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n"
+        ),
         encoding="utf-8",
     )
     python_path.chmod(
@@ -85,9 +88,12 @@ def seed_external_python(
     external_python = workspace.root / ".external-python" / "bin" / name
     external_python.parent.mkdir(parents=True, exist_ok=True)
     external_python.write_text(
-        "#!/bin/sh\n"
-        f"export PYTHONPATH={shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
-        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        (
+            "#!/bin/sh\n"
+            "export PYTHONPATH="
+            f"{shlex.quote(str(workspace.root / 'src'))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n"
+        ),
         encoding="utf-8",
     )
     external_python.chmod(

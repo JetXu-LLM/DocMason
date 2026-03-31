@@ -19,14 +19,11 @@ Detailed workflow procedure belongs in `skills/canonical/*/SKILL.md`.
 
 ## Ordinary Front Door
 
-- `ask` is the canonical skill at `skills/canonical/ask/SKILL.md`.
-- It is the user-facing top-level workflow for ordinary natural-language requests.
-- Use it as the default top-level workflow for a new ordinary user request in this workspace unless the request is clearly explicit operator work.
-- `ask` remains the only ordinary natural-language front door.
-- `Plan Mode` or a similar host planning/collaboration mode should not discourage the host from opening canonical `ask` for an ordinary user request; if the current mode still blocks `ask`, the host should use a concise in-band alert or approval question and continue the same user task in the most natural available way rather than silently defaulting to operator-direct or side-path work.
+- `ask` is the canonical skill at `skills/canonical/ask/SKILL.md`. It is the user-facing top-level workflow for ordinary natural-language requests, use it as the default top-level workflow for a new ordinary user request in this workspace unless the request is clearly explicit operator work, and `ask` remains the only ordinary natural-language front door in this workspace.
+- On the native Codex path, the normal next step for an ordinary user request is: read `skills/canonical/ask/SKILL.md`, then open canonical `ask`. Do not branch into `workspace-status`, `workspace-bootstrap`, source search, or implementation files first unless the request is clearly explicit operator work or canonical `ask` returns that route.
 - Ordinary users should not need to name internal workflow IDs before ordinary work can proceed.
-- Reading `AGENTS.md`, reading a skill, reconciling a native thread, calling internal ask lifecycle helpers, or doing direct `retrieve`, `trace`, or raw-source inspection does not open a canonical ask turn.
-- If the current request has not been opened as a canonical ask turn, do not present raw `retrieve`, `trace`, reconciliation, or helper-driven side-path work as a completed ordinary answer. Surface that boundary instead.
+- Reading `AGENTS.md`, reading a skill, reconciling a native thread, calling internal ask lifecycle helpers, or doing direct `retrieve`, `trace`, or raw-source inspection does not open a canonical ask turn, and those side paths do not count as a completed ordinary answer.
+- `Plan Mode` or a similar host planning/collaboration mode should not discourage the host from opening canonical `ask` for an ordinary user request; if the current mode still blocks `ask`, the host should use a concise in-band alert or approval question and continue the same user task in the most natural available way rather than silently defaulting to operator-direct or side-path work.
 
 If the request is clearly explicit operator work, route directly instead:
 
@@ -39,6 +36,8 @@ If the request is clearly explicit operator work, route directly instead:
 - update a generated release bundle in place -> `docmason update-core`
 
 All other workflows are inner, follow-on, or explicit operator workflows; they are not the default top-level path for a new ordinary user request.
+
+## Compatible Host Mapping
 
 If you are not operating on the native Codex path and the platform mapping or workspace readiness is not yet established:
 
@@ -85,7 +84,7 @@ Non-negotiable rule:
 - Prefer `--json` when machine-readable output helps.
 - Do not invent new public commands or claim planned workflows already exist.
 - `ask` is exposed through the canonical skill, not as a public CLI command.
-- When a supported host needs the exact ordinary-ask opening and completion rules, inspect `skills/canonical/ask/SKILL.md` rather than CLI help, hidden-surface probing, or ad hoc source reverse engineering.
+- When a supported host needs the exact ordinary-ask opening and completion rules, inspect the `Canonical Ask Contract` in `skills/canonical/ask/SKILL.md` rather than CLI help, hidden-surface probing, or ad hoc source reverse engineering.
 - Stable command output, JSON payload text, prompts, public docs, code, and comments remain English.
 - Final user-facing replies should normally match the user's language unless they explicitly ask for another language.
 - If you are unsure which command a workflow should use, inspect the matching canonical skill instead of guessing from memory.

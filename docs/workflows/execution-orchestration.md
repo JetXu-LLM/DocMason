@@ -1,14 +1,18 @@
-# Execution-Orchestration Notes
+# Execution-Orchestration Reference
 
-DocMason uses three layers for workflow execution:
+This page is the public advanced reference for how DocMason organizes its commands, workflows, and adapter-facing contracts.
 
-1. the stable public CLI
-2. the canonical vendor-neutral workflows under `skills/canonical/`
-3. the execution-orchestration layer described by `AGENTS.md`, canonical `workflow.json` sidecars, and generated adapter routing docs
+## Public Surfaces
 
-## Public Surface
+DocMason exposes three public execution surfaces:
 
-The public command surface now includes:
+1. supported host-agent entry through canonical `ask`
+2. stable public CLI for deterministic operations
+3. canonical workflow metadata and generated adapter routing for explicit advanced use
+
+## Stable Public CLI
+
+The public CLI includes:
 
 - `docmason prepare`
 - `docmason doctor`
@@ -21,26 +25,19 @@ The public command surface now includes:
 - `docmason update-core`
 - `docmason workflow`
 
-Phase 4b intentionally does not add public `docmason answer` or `docmason review-logs` commands.
-Phase 5 also intentionally keeps benchmarking and evaluation private-first instead of adding a public `docmason eval` command before the operator-review layer exists.
-The Phase 6 hardening patch adds `docmason workflow` as an advanced public execution surface without weakening `ask` as the only natural-language question entry.
+`docmason workflow` is an advanced execution surface for explicit workflow-level invocation.
+Direct operator tools do not replace canonical `ask` for ordinary questions.
 
-Direct public evidence commands such as `retrieve` and `trace` remain legal operator tools.
-They are not ordinary question-completion surfaces, and they do not replace canonical `ask`.
+## Workflow Roles
 
-## Canonical Workflow Surface
-
-The canonical workflow surface includes thirteen workflows, but they are not all peer user-entry points.
-
-### Default Natural-Language Entry
+### Ordinary Questions
 
 - `ask`
 
-`ask` is the user-facing top-level workflow.
-It is the default route for ordinary freeform business questions inside a valid workspace.
-Reading `AGENTS.md`, reading a skill, or reconciling a native thread is not equivalent to opening canonical ask ownership.
+`ask` is the only natural-language front door for ordinary business questions inside a valid workspace.
+Compatible hosts should open canonical `ask` rather than stitching together side paths.
 
-### Explicit Top-Level Operator Workflows
+### Explicit Operator Workflows
 
 - `workspace-bootstrap`
 - `workspace-doctor`
@@ -49,7 +46,7 @@ Reading `AGENTS.md`, reading a skill, or reconciling a native thread is not equi
 - `runtime-log-review`
 - `adapter-sync`
 
-These are direct routes for explicit setup, status, sync, review, and adapter-maintenance intents.
+Use these only when the user is explicitly asking for setup, status, sync, review, or adapter maintenance work.
 
 ### Inner Specialist Workflows
 
@@ -57,82 +54,40 @@ These are direct routes for explicit setup, status, sync, review, and adapter-ma
 - `grounded-composition`
 - `retrieval-workflow`
 - `provenance-trace`
-
-These are specialist inner workflows that the main agent should invoke when a top-level workflow needs supported answering, evidence retrieval, or provenance analysis.
-
-### Supporting Construction And Repair Workflows
-
 - `knowledge-construction`
 - `validation-repair`
 
-These are follow-on workflows used by sync and validation loops rather than ordinary user entry points.
-Under the current autonomous sync path, they are mainly compatibility or recovery workflows rather
-than the normal publication path.
-For multimodal closure, keep the boundary explicit: the public `sync` command publishes deterministic
-truth, while the canonical workflow layer may consume `knowledge_base/staging/hybrid_work.json` and
-write additive `semantic_overlay/` sidecars for queued hard artifacts such as `page-image`, chart,
-table, picture, group, or connector-heavy targets.
-If that queue is still pending, the workflow should report a follow-through state such as
-`needs-hybrid-enrichment` instead of pretending the multimodal lane already finished.
-The queue now carries slot coverage, freshness fingerprints, and focus-render targets so the
-workflow layer can distinguish `candidate-prepared`, `partially-covered`, and truly `covered`
-sources without pushing provider-specific logic into the public CLI.
+These workflows exist so the main agent can do governed work without turning every user into a workflow operator.
+Ordinary users should not need to name them first.
 
-Each workflow directory includes:
+## Public Command Versus Workflow Boundary
 
-- `SKILL.md` for the procedural workflow contract
-- `workflow.json` for lightweight execution metadata such as mutability, parallelism, background-command hints, handoff signals, and user-entry routing hints when relevant
+- `retrieve` and `trace` are legal operator evidence tools
+- they do not replace canonical `ask`
+- `docmason workflow` is useful only when the operator already knows the exact workflow to run
+- generated adapters may restate routing hints, but they do not replace canonical surfaces
 
-## Core Routing Policy
+## Canonical Sources Of Truth
 
-- The main agent owns critical-path reasoning, shared-state mutation, publication, final answers, and final operator-facing conclusions.
-- Deterministic shell steps should run as main-agent or background command steps once parameters are known.
-- Delegation is allowed only for read-only analysis or bounded disjoint per-source work.
-- Do not delegate sync publication, validation sign-off, adapter regeneration sign-off, or final answer integration.
-- The project prefers better end-to-end quality and honest state disclosure over maximum parallelism.
+The public execution contract is layered deliberately:
 
-## User-Intent Policy
+- `AGENTS.md` for first-contact routing
+- canonical `SKILL.md` files for workflow contracts
+- `workflow.json` sidecars for lightweight execution metadata
+- generated adapters as translations of canonical truth
 
-- Ordinary business questions should route to `ask`.
-- If an active native thread has only reconciliation truth and not canonical ask ownership, direct operator evidence may continue with explicit warning context, but that is still not ordinary ask completion.
-- The primary semantic routing decision for `ask` should come from agent-supplied structured analysis rather than growing repo-side keyword classifiers.
-- For odd or non-typical workspace questions, the agent should prefer choosing required published evidence channels over inventing a new special-question taxonomy.
-- Explicit setup, readiness, status, sync, adapter, or runtime-review requests should route to their matching top-level workflows directly.
-- `docmason workflow` is an explicit advanced execution surface, not a replacement for natural-language `ask`.
-- `ask` should choose the narrowest honest evidence basis rather than forcing every question through KB routing.
-- `ask` and public `retrieve` may parse user-native file-plus-locator references implicitly from freeform queries, but public `trace` remains ID-first in Phase 6b2.
-- When the published KB already exposes the needed `text`, `render`, `structure`, `notes`, or `media` artifacts, odd-question handling should stay KB-native rather than jumping straight back to `original_doc/`.
-- If a workspace-dependent question encounters a missing published knowledge base, it should route to workspace bootstrap or knowledge-base sync rather than bluffing an answer.
-- If the published corpus is stale but still usable, `ask` should answer from the published corpus with a concise freshness notice only when the answer path depends on that corpus.
-- If a `workspace-corpus` question genuinely needs fresh local state and the environment is ready, the routed ask path may auto-sync before answering and should keep that transition concise and auditable.
+`workflow.json` exists to help adapters and future routers with metadata such as read-only versus mutating behavior, safe parallelism hints, or expected artifacts.
+It is not a second authored workflow contract.
 
-## Why The Metadata Exists
+## Local-Only And Hidden Surfaces
 
-The `workflow.json` sidecars are execution metadata, not a second authored workflow truth source.
+DocMason may still contain hidden or maintenance-only workflows.
+They are not public first-contact routes and should never be advertised as the normal path for ordinary users.
+The current `operator-eval` surface is in this bucket.
 
-They exist to help adapters and future workflow routers answer questions like:
+## Non-Goals
 
-- is this workflow read-only or mutating?
-- is per-source parallelism safe?
-- which deterministic commands are the right background candidates?
-- what artifacts or completion signal should the main agent expect next?
-- which workflow should be treated as the user-facing natural entry surface?
-
-The canonical workflow semantics still live in:
-
-- `AGENTS.md`
-- canonical `SKILL.md` files
-- the stable public CLI behavior
-
-## Generated Adapter Routing
-
-`docmason sync-adapters` generates:
-
-- `adapters/claude/project-memory.md`
-- `adapters/claude/workflow-routing.md`
-- `.claude/skills/` repo-local thin shims that point back to the canonical skills
-
-The committed `.claude/CLAUDE.md` remains the sole Claude project-memory entry file and
-soft-imports the generated project memory when it is present.
-
-`workflow-routing.md` groups workflows by tier and category so a fresh capable agent can infer the intended product surface without relying on a hidden chat transcript.
+- no alternate ordinary natural-language front door
+- no public `docmason answer`
+- no public `docmason eval`
+- no expectation that reading planning notes or implementation code is required before using the product

@@ -1,70 +1,49 @@
-# Product Notes
+# Product Overview
 
-DocMason is intended to become a top-tier white-collar document copilot for serious private knowledge work.
+DocMason is a repo-native AI application for serious work over private documents.
+It compiles a local, provenance-aware knowledge base so a strong host agent can answer questions against published evidence instead of a flattened text dump.
 
-The product direction is shaped by a few core beliefs:
+## What The Product Is Today
 
-- business documents are often visually meaningful, not just textual
-- strong AI agents should reason over prepared evidence instead of being limited to brittle text dumps
-- deterministic code should prepare evidence, enforce quality, and expose state transitions honestly
-- the compiled knowledge base should optimize first for AI-agent use, with human-readable outputs as a secondary concern
+DocMason currently ships as:
 
-The product surface is intentionally layered:
+- a local workspace for Office files, PDFs, email, markdown, and other supported text inputs
+- a published knowledge base under `knowledge_base/current/`
+- a governed natural-language front door through canonical `ask`
+- deterministic retrieval and provenance tracing over the published corpus
+- generated clean and demo bundles for simpler onboarding
 
-- the public CLI stays small and stable, but it may expand when doing so clearly improves usability and auditability
-- `ask` is the one obvious natural-language entry surface for ordinary business questions
-- a smaller set of explicit top-level operator workflows handles setup, sync, status, adapter refresh, and runtime review
-- inner specialist workflows handle grounded answering, grounded composition, retrieval, provenance tracing, staged authoring, and repair
+## Current Entry Surfaces
 
-The public distribution shape is now also intentionally layered:
+- the source repository is the contributor and maintainer surface
+- the clean bundle is the safest start for private real use
+- the demo bundle is the fastest public evaluation path
+- Codex on macOS is the reference host path; Claude Code and GitHub Copilot remain compatibility paths
 
-- the canonical source repository is the contributor surface
-- the clean release bundle is the safest private-workspace start
-- the demo release bundle is the fastest public product-evaluation start
-- tracked public sample fixtures live under `sample_corpus/`, not under live `original_doc/`
+## What Users Should Expect
 
-See [Distribution Strategy](distribution-and-benchmarks.md) for the deeper rationale.
+- local file ownership and clear corpus boundaries
+- published-KB answers when the question depends on workspace content
+- explicit boundaries when setup, sync, approval, or refresh work is still required
+- public docs that explain shipped behavior rather than private planning history
 
-Phase 4 and Phase 4b established the core operating model:
+## Current Product Boundaries
 
-- deterministic evidence preparation
-- staged agent-authored knowledge objects
-- validation-gated publication
-- incremental maintenance
-- retrieval and provenance trace
-- explicit execution-orchestration policy
-- productized answer and log-review workflows built on the stable CLI rather than new public commands
+- no web UI
+- Windows is not the primary supported platform
+- no public benchmark or competition workflow
+- no default cloud ingestion of corpus data
+- no public command that bypasses canonical `ask` for ordinary questions
+- no promise that hidden maintainer workflows are part of the end-user product
 
-Phase 5 added the private-first evaluation foundation:
+## Product Shape
 
-- replayable local benchmark suites over the current published corpus
-- scorecards, baselines, and regression comparison for grounded workflow behavior
-- structured feedback storage aligned to a frozen taxonomy
-- explicit version capture for corpus, retrieval strategy, and grounded-answer workflow surfaces
-- a deliberate decision to keep evaluation out of the public CLI while still keeping the operator-quality loop local and open-source
+DocMason keeps a small public command surface and pushes most ordinary work through natural language plus governed workflows.
+The repository remains the canonical source of truth; bundles are distribution variants, not a second product.
 
-Phase 6 made everyday use feel more natural:
+## Next References
 
-- `ask` became the default front door for ordinary questions
-- natural freeform asking became the primary UX, with `@ask` only as an optional adapter-local shortcut
-- runtime logs became conversation-native and replayable per turn
-- review artifacts gained benchmark-candidate extraction instead of remaining raw log archives
-
-The Phase 6 follow-on extension added the missing real-session bridge:
-
-- native Codex chat history can be reconciled back into DocMason conversation records
-- raw user text, screenshots, and attachments can be captured into a private interaction-ingest layer
-- pending interaction-derived knowledge is retrievable immediately through a runtime overlay
-- sync stages merged interaction memory candidates and publishes them only after the same staged knowledge-authoring quality contract is satisfied
-- review summaries demote synthetic evaluation traffic so real operator sessions stay visible
-
-The Phase 6 hardening patch closes the next product gaps:
-
-- `ask` now has a stronger repo-side front-controller substrate rather than relying only on skill discipline
-- semantic routing for `ask` now prefers agent-supplied structured analysis rather than large repo-embedded keyword classifiers
-- composition-style research and drafting are explicitly separated from direct grounded answering through `grounded-composition`
-- `docmason workflow` becomes an advanced public execution surface for explicit workflow-level operator and agent use
-- broad interaction memory gains richer semantics and query-time routing instead of naïve flattening
-- external-factual asking now has an explicit support contract so externally verified answers do not get mistaken for KB-grounding failures
-
-The public face of the project should remain modern, credible, and easy to understand without overselling unimplemented functionality.
+- [Distribution And Public Bundles](distribution-and-benchmarks.md)
+- [Workflow Overview](../workflows/README.md)
+- [Architecture Overview](../architecture/README.md)
+- [Policy Index](../policies/README.md)

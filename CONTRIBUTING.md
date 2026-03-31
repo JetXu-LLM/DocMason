@@ -2,66 +2,81 @@
 
 Thank you for contributing.
 
-DocMason is being built as a high-quality open-source repository for multimodal document knowledge work. Contributions should improve the project without weakening its quality bar, privacy posture, or operator experience.
+DocMason aims to be a top-tier public repository for serious document knowledge work.
+Contributions should improve shipped behavior, public clarity, and local operating quality without weakening privacy, provenance, or workflow discipline.
 
 ## Before You Start
 
-- Read [README.md](README.md) for the current project status and positioning.
-- Do not assume future roadmap items are already implemented.
-- Keep changes aligned with the native reference workflow: Codex on macOS first, then elegant adaptation for other agents and environments.
+- read [README.md](README.md) for the public product story
+- read [docs/README.md](docs/README.md) for the public documentation map
+- keep changes aligned with the native reference workflow: Codex on macOS first, then careful compatibility adaptation for other hosts and environments
 
-## Hard Requirements
+## Non-Negotiable Boundaries
 
-- Write code, comments, documentation, prompts, and public-facing repository text in English.
-- Prefer Python unless another language is clearly justified.
-- Keep persistent knowledge artifacts file-based.
-- Do not introduce a required database service.
-- Do not lower the multimodal quality bar just to support weaker agent environments.
+### Public Language And Repository Shape
 
-## Private Data Policy
+- write code, comments, documentation, prompts, and public-facing repository text in English
+- prefer Python unless another language is clearly justified
+- keep persistent knowledge artifacts file-based
+- do not introduce a required database service
 
-- Never commit confidential source documents.
-- Never commit compiled private knowledge bases.
-- Never commit local planning artifacts intended to stay private.
-- Never paste confidential corpus material into public issues or pull requests.
-- Keep live `original_doc/`, `knowledge_base/`, `runtime/`, and `adapters/` out of tracked changes.
+### Private Data Boundaries
 
-## Public Sample Corpus Policy
+- never commit confidential source documents
+- never commit compiled private knowledge bases
+- never commit local planning artifacts intended to stay private
+- never paste confidential corpus material into public issues or pull requests
+- keep live `original_doc/`, `knowledge_base/`, `runtime/`, and `adapters/` out of tracked changes
 
-- Tracked public demo fixtures live under `sample_corpus/`, not under live `original_doc/`.
-- If you want the canonical public demo corpus in your local workspace, ask the agent to use `public-sample-workspace`, or run `python3 scripts/use-sample-corpus.py --preset ico-gcs`.
-- Do not replace `sample_corpus/` with your private corpus.
-- If you expand or refresh the public sample corpus, keep the source URLs, license notes, and local-path manifest honest.
+### Public Docs Standard
 
-## Dependency Policy
+- public docs must be current-state, public-context readable, and free of private planning assumptions
+- do not write `/docs` as design history, phase notes, or internal constitutional theory
+- if behavior changes, update docs, tests, and canonical surfaces together
 
-- Prefer dependencies installable with `uv` or `pip`.
-- Avoid high-friction system dependencies when practical.
-- If a change requires heavy OS-level tooling, large office suites, or other intrusive dependencies, document why and get project-owner confirmation first.
+### Workflow And Product Boundaries
 
-## Quality Expectations
+- `ask` remains the only ordinary natural-language front door
+- do not add public commands or public workflow paths without a clear product reason
+- generated adapters translate canonical surfaces; they should not become hand-maintained parallel truth
 
-- Keep public docs clear and polished.
-- Add or update tests when behavior changes.
-- Prefer explicit failure and strong validation over weak fallback behavior.
-- Keep operator flows simple and obvious.
-- Run `python3 scripts/check-repo-safety.py` before opening a PR if you touched workspace boundaries.
+## Sample Corpus And Bundles
 
-## Pull Request Guidance
+- tracked public demo fixtures live under `sample_corpus/`, not under live `original_doc/`
+- if you want the canonical public demo corpus in a real workspace, ask the agent to use `public-sample-workspace`, or run `python3 scripts/use-sample-corpus.py --preset ico-gcs`
+- do not replace `sample_corpus/` with private corpus material
+- if a change affects release bundles, update scripts, docs, and disclosure text together
+- clean and demo bundles are end-user distribution channels, not alternate source repositories
 
-- Explain what changed and why.
-- Call out any tradeoffs introduced by the change.
-- Mention any user-facing documentation that also needs updating.
-- Mention any heavy dependency or platform implications.
-- Call out whether the change affects `sample_corpus/` or release-bundle behavior.
+## Dependencies And Platform Changes
+
+- prefer dependencies installable through `uv` or `pip`
+- avoid high-friction system dependencies when practical
+- if a change requires heavy OS-level tooling or intrusive machine setup, document why and get project-owner alignment first
+- Windows and non-native host support are compatibility work, not the native design center
+
+## Validation Expectations
+
+- run targeted tests for the behavior you changed
+- run `python3 scripts/check-repo-safety.py` if workspace boundaries might be affected
+- inspect public docs and command text when user-facing wording changes
+- if you touch bundle or update behavior, verify the related docs and scripts stay aligned
+
+## Pull Request Checklist
+
+- explain what changed and why
+- call out user-visible effects
+- call out privacy, provenance, or boundary implications
+- mention any bundle, sample corpus, or adapter impact
+- mention any deferred follow-up instead of silently leaving docs stale
 
 ## Local Setup For Contributors
 
-- Clone the canonical repo.
-- Install the repo hooks with `./scripts/install-git-hooks.sh`.
-- If you want the tracked public demo corpus in your local workspace, ask the agent to use `public-sample-workspace`, or run `python3 scripts/use-sample-corpus.py --preset ico-gcs`.
-- Use the canonical repo for issues, branches, tags, and PRs. The clean/demo release bundles are end-user distribution channels, not alternate sources of truth.
+- clone the canonical repository
+- install the repo hooks with `./scripts/install-git-hooks.sh`
+- materialize the public sample corpus only when you actually need it in a live workspace
+- use the source repository for issues, branches, tags, and pull requests
 
-## Scope Awareness
+## Large Changes
 
-The repository is roadmap-driven. If you want to implement a later-phase capability early, first make sure it does not conflict with the current architecture plan and documented direction.
+If you want to introduce a major new capability or change the product boundary, start with a concise planning note and explicit owner alignment before writing a large patch.

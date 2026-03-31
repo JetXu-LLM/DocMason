@@ -433,7 +433,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.assertTrue(turn["auto_sync_triggered"])
         self.assertFalse(turn["knowledge_base_missing"])
 
-    def test_prepare_ask_turn_delegates_to_launcher_when_prepare_reports_missing_python(self) -> None:
+    def test_prepare_ask_turn_delegates_to_launcher_when_prepare_reports_missing_python(
+        self,
+    ) -> None:
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")
 
@@ -535,10 +537,17 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
 
         with (
             mock.patch("docmason.ask.prepare_workspace", return_value=failed_prepare),
-            mock.patch("docmason.ask.bootstrap_workspace_with_launcher", return_value=launcher_report) as launcher_mock,
+            mock.patch(
+                "docmason.ask.bootstrap_workspace_with_launcher",
+                return_value=launcher_report,
+            ) as launcher_mock,
             mock.patch("docmason.ask.cached_bootstrap_readiness", side_effect=readiness_states),
             mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
-            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-launcher-delegate"}, clear=False),
+            mock.patch.dict(
+                os.environ,
+                {"CODEX_THREAD_ID": "thread-launcher-delegate"},
+                clear=False,
+            ),
         ):
             turn = prepare_ask_turn(
                 workspace,
@@ -635,7 +644,11 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 },
             ]),
             mock.patch("docmason.ask.bootstrap_workspace_with_launcher") as launcher_mock,
-            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-host-access-upgrade"}, clear=False),
+            mock.patch.dict(
+                os.environ,
+                {"CODEX_THREAD_ID": "thread-host-access-upgrade"},
+                clear=False,
+            ),
         ):
             turn = prepare_ask_turn(
                 workspace,
@@ -978,7 +991,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         )
         self.assertEqual(settled["status"], "blocked")
 
-    def test_workspace_state_snapshot_abandons_stale_active_run_without_commit_or_live_jobs(self) -> None:
+    def test_workspace_state_snapshot_abandons_stale_active_run_without_commit_or_live_jobs(
+        self,
+    ) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.create_pdf(workspace.source_dir / "a.pdf")
@@ -1008,7 +1023,10 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.assertEqual(repaired_state["status"], "abandoned")
         self.assertEqual(repaired_state["abandon_reason"], "stale-active-run-repair")
         self.assertTrue(
-            any(action["kind"] == "abandoned-stale-active-run" for action in snapshot["repair_actions"])
+            any(
+                action["kind"] == "abandoned-stale-active-run"
+                for action in snapshot["repair_actions"]
+            )
         )
         self.assertIn("stale-active-run-abandoned", journal_text)
 

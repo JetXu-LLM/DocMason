@@ -35,10 +35,17 @@ fail() {
 
 python_is_supported() {
   local candidate="$1"
+  local first_line=""
   local probe_pid=""
   local ticks=0
 
   if [[ ! -x "$candidate" ]]; then
+    return 1
+  fi
+
+  # A path-bound Python script wrapper is not a stable bootstrap interpreter boundary.
+  first_line="$(head -n 1 "$candidate" 2>/dev/null || true)"
+  if [[ "$first_line" == '#!/usr/bin/env python3' || "$first_line" == '#!/usr/bin/env python' ]]; then
     return 1
   fi
 

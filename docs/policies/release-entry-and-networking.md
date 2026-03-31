@@ -1,23 +1,38 @@
 # Release Entry And Networking
 
-This page defines the shipped networking contract for DocMason release bundles.
+This page defines the shipped networking contract for DocMason-generated release bundles.
 
-## When Networking Can Happen
+## Scope
 
-DocMason itself may only perform a bounded update check requests in these cases:
+This policy applies only to generated `clean` and `demo-ico-gcs` bundles.
+It does not change the default behavior of the canonical source repository or a fresh contributor clone.
 
-- Automatic post-ask update check:
-  - the workspace is a generated `clean` or `demo-ico-gcs` release bundle
-  - canonical `ask` has completed and is returning a final host-visible reply
-  - at least 20 hours have passed since the last automatic release-entry check
-- Explicit update request:
-  - the workspace is a generated `clean` or `demo-ico-gcs` release bundle
-  - the operator explicitly runs `docmason update-core`
-  - or a compatible host explicitly invokes the same operator action on the user's behalf
+## Default Networking Posture
 
-The source repository and fresh-clone contributor path do not perform this automatic check.
-When `--bundle <path>` is supplied to `docmason update-core`, DocMason applies that local clean
-bundle without contacting the release-entry service.
+- source repository and fresh clone: no automatic DocMason network check
+- generated bundles: bounded release-entry check only
+- host agents such as Codex, Claude Code, and GitHub Copilot have their own network behavior outside this contract
+
+## When DocMason Can Contact The Release-Entry Service
+
+### Automatic Post-Ask Check
+
+An automatic check is allowed only when all of the following are true:
+
+- the workspace is a generated `clean` or `demo-ico-gcs` bundle
+- canonical `ask` has already completed
+- at least 20 hours have passed since the last automatic check
+- automatic checks are still enabled locally
+- `DO_NOT_TRACK=1` is not set
+
+### Explicit Update Request
+
+An explicit release-entry request is allowed when:
+
+- the operator runs `docmason update-core`
+- or a compatible host runs the same operator action on the user's behalf
+
+If `--bundle <path>` is supplied to `docmason update-core`, DocMason updates from that local bundle and does not need the release-entry service.
 
 ## What Is Sent
 
@@ -29,14 +44,16 @@ The release-entry client sends only:
 - `installation_hash`
 - `trigger`
 
-Current shipped trigger markers are:
+Current trigger values are:
 
-- `ask-auto` for the bounded automatic post-ask check
-- `update-core` for the explicit `docmason update-core` path
+- `ask-auto`
+- `update-core`
 
-`installation_hash` is a random local pseudonymous identifier created inside the bundle-local
-`runtime/state/release-client.json` file.
-It is not derived from machine traits, user identity, corpus contents, or filesystem paths.
+The same narrow request may also be used by the release-entry service to record one deduplicated bundle-level daily-activity event.
+That accounting happens outside the product truth surface.
+
+`installation_hash` is a bundle-local random pseudonymous identifier stored in `runtime/state/release-client.json`.
+It is not derived from machine traits, filesystem paths, or user identity.
 
 ## What Is Never Sent
 
@@ -55,11 +72,11 @@ DocMason does not send any of the following through the release-entry check:
 
 ## Local Control
 
-The single local release-entry control file is:
+Local bundle state is stored in:
 
 - `runtime/state/release-client.json`
 
-To disable the automatic check for the current bundle, set:
+To disable automatic checks for the current bundle, set:
 
 ```json
 {
@@ -67,15 +84,13 @@ To disable the automatic check for the current bundle, set:
 }
 ```
 
-`DO_NOT_TRACK=1` disables the automatic post-ask check and bundle-only DAU recording regardless of
-the local file setting.
-It does not block an explicit `docmason update-core` command, because that command is a direct
-user-requested maintenance action.
+`DO_NOT_TRACK=1` disables the automatic post-ask check and the bundle-level daily-activity recording that piggybacks on it.
+It does not block an explicit `docmason update-core` request, because that is a direct user action.
 
-## Reset
+## User-Visible Behavior
 
-To reset the local release-entry state, remove:
+- a final host-visible ask reply may include a short update notice when a newer bundle exists
+- the canonical answer file is not rewritten by that notice
+- `docmason update-core` downloads the latest clean core, verifies published checksums, preserves local workspace state, and replaces the updatable top-level core surface
 
-- `runtime/state/release-client.json`
-
-The next eligible automatic check will recreate the file with a new random local installation hash.
+For bundle contents and channel boundaries, read [Distribution And Public Bundles](../product/distribution-and-benchmarks.md).
