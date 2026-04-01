@@ -441,7 +441,9 @@ def _current_published_source_dir(paths: WorkspacePaths) -> Path | None:
     return None
 
 
-def _current_snapshot_id(paths: WorkspacePaths, *, current_source_dir: Path | None = None) -> str | None:
+def _current_snapshot_id(
+    paths: WorkspacePaths, *, current_source_dir: Path | None = None
+) -> str | None:
     current_manifest = read_json(paths.current_publish_manifest_path)
     if isinstance(current_manifest.get("snapshot_id"), str) and current_manifest.get("snapshot_id"):
         return str(current_manifest["snapshot_id"])
@@ -452,7 +454,9 @@ def _current_snapshot_id(paths: WorkspacePaths, *, current_source_dir: Path | No
 
     if isinstance(current_source_dir, Path):
         source_manifest = read_json(current_source_dir / "publish_manifest.json")
-        if isinstance(source_manifest.get("snapshot_id"), str) and source_manifest.get("snapshot_id"):
+        if isinstance(source_manifest.get("snapshot_id"), str) and source_manifest.get(
+            "snapshot_id"
+        ):
             return str(source_manifest["snapshot_id"])
         if current_source_dir.parent in {
             paths.knowledge_base_versions_dir,

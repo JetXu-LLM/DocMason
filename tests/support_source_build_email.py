@@ -107,11 +107,16 @@ class SourceBuildEmailTests(unittest.TestCase):
             ),
             html_body=(
                 "<p>Roadmap decisions are tracked in the attached note.</p>"
-                "<p><img src=\"cid:chart-1\" /></p>"
+                '<p><img src="cid:chart-1" /></p>'
             ),
             inline_image_cid="chart-1",
             attachments=[
-                (b"Roadmap note line 1.\nRoadmap note line 2.\n", "text", "plain", "roadmap-notes.txt"),
+                (
+                    b"Roadmap note line 1.\nRoadmap note line 2.\n",
+                    "text",
+                    "plain",
+                    "roadmap-notes.txt",
+                ),
                 (b"\x00\x01\x02", "application", "octet-stream", "raw.bin"),
                 (nested.as_bytes(policy=policy.default), "message", "rfc822", "forwarded.eml"),
             ],
@@ -258,7 +263,9 @@ class SourceBuildEmailTests(unittest.TestCase):
         status = status_workspace(workspace)
         doctor = doctor_workspace(workspace)
 
-        self.assertEqual(status.payload["source_documents"]["tiers"]["first_class_email"]["total"], 1)
+        self.assertEqual(
+            status.payload["source_documents"]["tiers"]["first_class_email"]["total"], 1
+        )
         self.assertEqual(
             doctor.payload["supported_input_tiers"]["first_class_email"],
             ["eml"],
@@ -289,7 +296,8 @@ class SourceBuildEmailTests(unittest.TestCase):
         child_catalog = next(
             source
             for source in catalog["sources"]
-            if source["current_path"] == "original_doc/delivery.eml#attachment/002-roadmap-notes.txt"
+            if source["current_path"]
+            == "original_doc/delivery.eml#attachment/002-roadmap-notes.txt"
         )
         self.assertEqual(child_catalog["source_origin"], "derived-attachment")
         self.assertEqual(child_catalog["parent_source_id"], parent_source_id)
@@ -300,7 +308,9 @@ class SourceBuildEmailTests(unittest.TestCase):
         self.assertEqual(parent_manifest["document_type"], "email")
         self.assertTrue(parent_manifest["child_source_ids"])
         self.assertTrue(parent_manifest["published_attachment_assets"])
-        self.assertEqual(parent_evidence["attachments"][1]["child_source_id"], child_catalog["source_id"])
+        self.assertEqual(
+            parent_evidence["attachments"][1]["child_source_id"], child_catalog["source_id"]
+        )
         self.assertIn("media/001-chart.png", parent_evidence["embedded_media"])
         self.assertIn("attachments/003-raw.bin", parent_manifest["published_attachment_assets"])
         self.assertTrue(parent_evidence["deterministic_linked_sources"])
@@ -326,7 +336,9 @@ class SourceBuildEmailTests(unittest.TestCase):
         )
         self.assertEqual(retrieval["reference_resolution"]["source_match_status"], "exact")
         self.assertEqual(retrieval["results"][0]["document_type"], "email")
-        self.assertEqual(retrieval["results"][0]["matched_units"][0]["unit_type"], "email-attachment")
+        self.assertEqual(
+            retrieval["results"][0]["matched_units"][0]["unit_type"], "email-attachment"
+        )
         self.assertEqual(
             retrieval["results"][0]["matched_units"][0]["child_source_id"],
             child_catalog["source_id"],

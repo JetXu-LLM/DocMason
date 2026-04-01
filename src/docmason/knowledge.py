@@ -101,7 +101,11 @@ from .source_references import (
     enrich_source_manifest_reference_fields,
 )
 from .text_sources import ParsedUnit, parse_text_source
-from .versioning import migrate_legacy_publish_storage, publish_staging_snapshot, publish_storage_summary
+from .versioning import (
+    migrate_legacy_publish_storage,
+    publish_staging_snapshot,
+    publish_storage_summary,
+)
 
 PLACEHOLDER_TERMS = ("todo", "tbd", "placeholder", "lorem ipsum", "fill in")
 DOCX_ORDERED_STEP_PATTERN = re.compile(r"^\s*(\d+)(?:[.)-])\s+")
@@ -6421,10 +6425,12 @@ def sync_workspace(
                 scoped_contract_repair_used = True
             else:
                 rebuild_required = True
-                _catalog_sources, _source_summaries, _ambiguous, build_stats = build_staging_artifacts(
-                    paths,
-                    active_sources,
-                    office_snapshot["binary"],
+                _catalog_sources, _source_summaries, _ambiguous, build_stats = (
+                    build_staging_artifacts(
+                        paths,
+                        active_sources,
+                        office_snapshot["binary"],
+                    )
                 )
         elif rebuild_required:
             _catalog_sources, _source_summaries, _ambiguous, build_stats = build_staging_artifacts(
@@ -6443,13 +6449,18 @@ def sync_workspace(
         rebuild_telemetry["scoped_contract_repair_source_count"] = int(
             build_stats.get("scoped_repaired_sources", 0) or 0
         )
+        staging_mode = "refreshed"
+        if scoped_contract_repair_used:
+            staging_mode = "scoped-repaired"
+        elif rebuild_required:
+            staging_mode = "rebuilt"
         autonomous_steps.append(
             {
                 "step": "stage",
                 "status": "completed",
                 "detail": (
                     f"Staging "
-                    f"{'scoped-repaired' if scoped_contract_repair_used else ('rebuilt' if rebuild_required else 'refreshed')} with "
+                    f"{staging_mode} with "
                     f"reused_sources={build_stats['reused_sources']} and "
                     f"rebuilt_sources={build_stats['rebuilt_sources']} and "
                     f"scoped_repaired_sources={build_stats.get('scoped_repaired_sources', 0)}."

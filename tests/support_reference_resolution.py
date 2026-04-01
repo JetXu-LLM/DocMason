@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-import io
 
 from docmason.ask import complete_ask_turn, prepare_ask_turn
-from docmason.cli import build_parser, main as docmason_main
+from docmason.cli import build_parser
+from docmason.cli import main as docmason_main
 from docmason.commands import retrieve_knowledge, sync_workspace, trace_knowledge
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import _effective_source_ids_from_reference, run_retrieval_query
@@ -890,8 +891,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         workbook_source_manifest = {
             "source_id": "workbook-1",
             "current_path": (
-                "original_doc/reviews/round1/"
-                "Evaluation Score Card_Round 1_Bravo.xlsx"
+                "original_doc/reviews/round1/Evaluation Score Card_Round 1_Bravo.xlsx"
             ),
             "document_type": "xlsx",
             "source_family": "corpus",
@@ -1343,8 +1343,7 @@ class ReferenceResolutionTests(unittest.TestCase):
                 trace_ids=[trace_report.payload["trace_id"]],
                 answer_file_path=turn["answer_file_path"],
                 response_excerpt=(
-                    "The architecture strategy connects the operating model to "
-                    "implementation."
+                    "The architecture strategy connects the operating model to implementation."
                 ),
                 status="answered",
             )

@@ -21,7 +21,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from docmason.cli import build_parser, main as docmason_main
+from docmason.cli import build_parser
+from docmason.cli import main as docmason_main
 from docmason.commands import READY, doctor_workspace
 from docmason.conversation import detect_agent_surface
 from docmason.hooks import (

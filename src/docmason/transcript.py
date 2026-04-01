@@ -559,7 +559,9 @@ def _match_native_turns_to_mirror_turns(
     return matched
 
 
-def _claude_optional_fields(payload: dict[str, Any], field_names: tuple[str, ...]) -> dict[str, Any]:
+def _claude_optional_fields(
+    payload: dict[str, Any], field_names: tuple[str, ...]
+) -> dict[str, Any]:
     record: dict[str, Any] = {}
     for field_name in field_names:
         if field_name not in payload:
@@ -762,7 +764,10 @@ def _classify_claude_operator_evidence(
         return {
             "status": "degraded",
             "classification": "incomplete-session",
-            "detail": "Claude session ended without a clean stop or native final assistant closure.",
+            "detail": (
+                "Claude session ended without a clean stop or native final "
+                "assistant closure."
+            ),
         }
     return {
         "status": "captured",
@@ -839,7 +844,11 @@ def load_claude_code_native_transcript(transcript_path: str | Path) -> dict[str,
                         }
                     )
                 continue
-            if record_type == "assistant" and isinstance(message, dict) and current_turn is not None:
+            if (
+                record_type == "assistant"
+                and isinstance(message, dict)
+                and current_turn is not None
+            ):
                 content = message.get("content")
                 for text in _claude_text_chunks(content):
                     current_turn["assistant_messages"].append(
@@ -930,7 +939,11 @@ def load_claude_code_transcript(
                     "source": "hook-mirror",
                     "stop_reason": None,
                     "session_end_reason": None,
-                    "diagnostics": {"detail": "A new prompt started before the previous turn closed."},
+                    "diagnostics": {
+                        "detail": (
+                            "A new prompt started before the previous turn closed."
+                        )
+                    },
                 }
                 current_turn["operator_evidence"] = _classify_claude_operator_evidence(
                     closure=current_turn["closure"],
@@ -1077,7 +1090,10 @@ def load_claude_code_transcript(
                         turn.get("attachments", []),
                         native_turn.get("attachments", []),
                     )
-                if not turn.get("completed_at") and isinstance(native_turn.get("completed_at"), str):
+                if not turn.get("completed_at") and isinstance(
+                    native_turn.get("completed_at"),
+                    str,
+                ):
                     turn["completed_at"] = native_turn.get("completed_at")
                     turn["closure"] = {
                         "status": "completed",
@@ -1090,7 +1106,11 @@ def load_claude_code_transcript(
                         closure=turn["closure"],
                         assistant_final_text=str(turn.get("assistant_final_text") or ""),
                     )
-                if not attachments_captured and isinstance(turn.get("attachments"), list) and turn.get("attachments"):
+                if (
+                    not attachments_captured
+                    and isinstance(turn.get("attachments"), list)
+                    and turn.get("attachments")
+                ):
                     attachments_captured = True
 
     transcript = {

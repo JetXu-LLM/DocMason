@@ -39,13 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
         "set-version",
         help="Update `pyproject.toml` to the committed release version.",
     )
-    set_parser.add_argument("version", help="PEP 440 package version, for example `0.1.0rc3`.")
+    set_parser.add_argument("version", help="PEP 440 package version, for example `0.1.0`.")
 
     validate_parser = subparsers.add_parser(
         "validate-tag",
         help="Validate that a release tag matches the committed package version.",
     )
-    validate_parser.add_argument("tag", help="Git tag to validate, for example `v0.1.0-rc3`.")
+    validate_parser.add_argument("tag", help="Git tag to validate, for example `v0.1.0`.")
     return parser
 
 

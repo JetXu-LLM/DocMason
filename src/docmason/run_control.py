@@ -451,7 +451,9 @@ def repair_stale_active_runs(paths: WorkspacePaths) -> list[dict[str, Any]]:
         if not state or state.get("status") != "active":
             continue
 
-        opened_at = _parse_timestamp(state.get("opened_at")) or _parse_timestamp(state.get("updated_at"))
+        opened_at = _parse_timestamp(state.get("opened_at")) or _parse_timestamp(
+            state.get("updated_at")
+        )
         if opened_at is None or opened_at >= cutoff:
             continue
         if read_json(run_commit_path(paths, run_id)):

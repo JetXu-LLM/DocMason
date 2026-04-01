@@ -18,8 +18,6 @@ from typing import Any
 
 from .project import (
     WorkspacePaths,
-    isoformat_timestamp,
-    read_json,
     relative_paths,
     source_index,
     source_inventory_signature,

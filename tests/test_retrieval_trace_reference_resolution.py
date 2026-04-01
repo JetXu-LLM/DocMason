@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 
 from docmason.commands import retrieve_knowledge, trace_knowledge
-from tests.support_reference_resolution import ReferenceResolutionTests
 from tests.support_public_corpus import build_public_markdown_workspace
+from tests.support_reference_resolution import ReferenceResolutionTests
 from tests.support_retrieval_trace_core import RetrievalTraceCoreTests
 
 
@@ -28,7 +28,10 @@ class PublicCorpusRetrievalTraceTests(unittest.TestCase):
 
             self.assertEqual(result.exit_code, 0)
             top_result = result.payload["results"][0]
-            self.assertEqual(top_result["current_path"], "original_doc/gcs/oasis-campaign-planning.md")
+            self.assertEqual(
+                top_result["current_path"],
+                "original_doc/gcs/oasis-campaign-planning.md",
+            )
             self.assertIn("Guide to Campaign Planning: OASIS", top_result["title"])
 
     def test_public_corpus_trace_returns_ico_governance_source_details(self) -> None:

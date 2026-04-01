@@ -25,8 +25,8 @@ from docmason.commands import (
     sync_workspace,
     validate_knowledge_base,
 )
-from docmason.coordination import lease_dir, workspace_lease
 from docmason.control_plane import load_shared_job
+from docmason.coordination import lease_dir, workspace_lease
 from docmason.evidence_artifacts import compile_pptx_visual_artifacts
 from docmason.hybrid import (
     materialize_focus_render_assets,
@@ -35,9 +35,9 @@ from docmason.hybrid import (
 )
 from docmason.knowledge import (
     _ThirdPartyDiagnosticCapture,
-    build_single_source_artifacts,
     build_docx_source,
     build_pptx_source,
+    build_single_source_artifacts,
     build_xlsx_source,
     locate_previous_source_dir,
     render_pdf_document,
@@ -1421,9 +1421,7 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
 
         artifact_index = read_json(source_dir / "artifact_index.json")
         picture_artifact = next(
-            item
-            for item in artifact_index["artifacts"]
-            if item.get("artifact_type") == "picture"
+            item for item in artifact_index["artifacts"] if item.get("artifact_type") == "picture"
         )
         self.assertTrue(picture_artifact["focus_render_assets"])
         self.assertTrue(picture_artifact["focus_render_assets"][0].startswith("media/rId"))
@@ -1431,17 +1429,13 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
 
         layout = read_json(source_dir / "visual_layout" / "section-001.json")
         picture_region = next(
-            item
-            for item in layout["regions"]
-            if item.get("artifact_type") == "picture"
+            item for item in layout["regions"] if item.get("artifact_type") == "picture"
         )
         self.assertEqual(
             picture_region["focus_render_assets"][0],
             picture_artifact["focus_render_assets"][0],
         )
-        self.assertTrue(
-            source_artifact_contract_complete(source_dir, document_type="docx")
-        )
+        self.assertTrue(source_artifact_contract_complete(source_dir, document_type="docx"))
 
     def test_locate_previous_source_dir_prefers_richer_current_semantic_snapshot(self) -> None:
         workspace = self.make_workspace()
@@ -1638,7 +1632,9 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertEqual(second_sync.payload["hybrid_enrichment"]["mode"], "covered")
         settled = second_sync.payload["lane_b_follow_up"]["settled_job"]
         self.assertEqual(settled["job_id"], follow_up["job_id"])
-        self.assertEqual(load_shared_job(workspace, str(follow_up["job_id"]))["status"], "completed")
+        self.assertEqual(
+            load_shared_job(workspace, str(follow_up["job_id"]))["status"], "completed"
+        )
 
     def test_legacy_publish_storage_migration_backfills_ledger_and_removes_archives(self) -> None:
         workspace = self.make_workspace()

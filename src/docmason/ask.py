@@ -802,11 +802,17 @@ def _ensure_workspace_environment(
             run_id=run_id,
             stage="prepare",
             event_type="auto-prepare-delegated-launcher",
-            payload={"reason": summary.get("detail"), "launcher": "./scripts/bootstrap-workspace.sh"},
+            payload={
+                "reason": summary.get("detail"),
+                "launcher": "./scripts/bootstrap-workspace.sh",
+            },
         )
         launcher_report = bootstrap_workspace_with_launcher(paths)
         summary = _auto_prepare_summary(launcher_report)
-        refreshed = cached_bootstrap_readiness(paths, require_sync_capability=require_sync_capability)
+        refreshed = cached_bootstrap_readiness(
+            paths,
+            require_sync_capability=require_sync_capability,
+        )
     return bool(refreshed["ready"]), refreshed, True, reason, summary
 
 

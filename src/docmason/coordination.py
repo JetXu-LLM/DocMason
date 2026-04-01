@@ -107,12 +107,12 @@ def workspace_lease(
                 json.dumps(payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        except FileNotFoundError:
+        except FileNotFoundError as error:
             if time.monotonic() >= deadline:
                 raise LeaseConflictError(
                     f"Could not acquire workspace lease for `{resource}` "
                     f"within {timeout_seconds:.1f}s."
-                )
+                ) from error
             time.sleep(poll_interval_seconds)
             continue
         break

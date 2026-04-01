@@ -264,7 +264,7 @@ def parse_args() -> argparse.Namespace:
         "--version",
         default=None,
         help=(
-            "Release tag recorded in distribution manifests, for example `v0.1.0-rc3`. "
+            "Release tag recorded in distribution manifests, for example `v0.1.0`. "
             "Defaults to the tag implied by the committed package version."
         ),
     )

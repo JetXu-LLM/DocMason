@@ -47,7 +47,6 @@ class ProbeExecution:
 
 ProbeRunner = Callable[[Sequence[str], Path, float], ProbeExecution]
 
-
 def _resolved_path(path: Path) -> Path | None:
     try:
         return path.resolve(strict=True)
@@ -94,7 +93,9 @@ def _parse_python_version(value: str | None) -> tuple[int, int] | None:
         return None
 
 
-def _default_probe_runner(command: Sequence[str], cwd: Path, timeout_seconds: float) -> ProbeExecution:
+def _default_probe_runner(
+    command: Sequence[str], cwd: Path, timeout_seconds: float
+) -> ProbeExecution:
     probe_env = {
         key: value
         for key, value in os.environ.items()
@@ -198,7 +199,11 @@ def _latest_managed_python_root(paths: WorkspacePaths) -> Path | None:
     if not paths.toolchain_python_installs_dir.exists():
         return None
     candidates = sorted(
-        (candidate for candidate in paths.toolchain_python_installs_dir.iterdir() if candidate.is_dir()),
+        (
+            candidate
+            for candidate in paths.toolchain_python_installs_dir.iterdir()
+            if candidate.is_dir()
+        ),
         key=_toolchain_install_root_mtime,
         reverse=True,
     )
@@ -347,7 +352,11 @@ def toolchain_repair_detail(toolchain: dict[str, Any]) -> str:
 
 def managed_python_executable_path(paths: WorkspacePaths) -> Path:
     """Return the canonical repo-local managed Python executable path."""
-    return paths.toolchain_python_current_dir / "bin" / f"python{PREPARED_WORKSPACE_PYTHON_BASELINE}"
+    return (
+        paths.toolchain_python_current_dir
+        / "bin"
+        / f"python{PREPARED_WORKSPACE_PYTHON_BASELINE}"
+    )
 
 
 def managed_python_install_root(paths: WorkspacePaths) -> Path | None:
@@ -433,7 +442,11 @@ def inspect_toolchain(
             if isinstance(state.get("managed_python_version"), str)
             and state.get("managed_python_version")
             and _same_path(
-                Path(managed_python_executable) if isinstance(managed_python_executable, str) else None,
+                (
+                    Path(managed_python_executable)
+                    if isinstance(managed_python_executable, str)
+                    else None
+                ),
                 (
                     Path(str(state.get("managed_python_executable")))
                     if isinstance(state.get("managed_python_executable"), str)

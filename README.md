@@ -145,7 +145,7 @@ Generated `clean` and `demo-ico-gcs` release bundles may only perform a bounded 
 
 ## Current Status
 
-DocMason is **pre-alpha**, but ships the functional core of the local workflow:
+DocMason is **alpha**, and already ships the functional core of the local workflow:
 - Workspace repair and rapid bootstrapping
 - Knowledge-base structural sync and incremental refresh
 - Deterministic retrieval and provenance trace boundaries

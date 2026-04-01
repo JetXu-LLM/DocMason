@@ -43,18 +43,31 @@ class PublicCorpusSyncAndMaterializationTests(unittest.TestCase):
             for entry in manifest["sources"]
             for output in entry["managed_outputs"]
         }
-        self.assertIn("ico/ico-ai-risk-toolkit--ai-and-data-protection-risk-toolkit-v11.xlsx", managed_paths)
-        self.assertIn("gcs/gcs-oasis--guide-to-campaign-planning-oasis-framework.pdf", managed_paths)
-        self.assertIn("gcs/gcs-modern-media-operations--modern-media-operation-guide-word-accessible.docx", managed_paths)
+        self.assertIn(
+            "ico/ico-ai-risk-toolkit--ai-and-data-protection-risk-toolkit-v11.xlsx", managed_paths
+        )
+        self.assertIn(
+            "gcs/gcs-oasis--guide-to-campaign-planning-oasis-framework.pdf", managed_paths
+        )
+        self.assertIn(
+            "gcs/gcs-modern-media-operations--modern-media-operation-guide-word-accessible.docx",
+            managed_paths,
+        )
 
     def test_sample_corpus_contains_supported_multiformat_public_inputs(self) -> None:
         corpus_root = ROOT / "sample_corpus" / "ico-gcs"
         expected = [
             corpus_root / "ico" / "about-the-ico.md",
-            corpus_root / "ico" / "ico-ai-risk-toolkit--ai-and-data-protection-risk-toolkit-v11.xlsx",
+            corpus_root
+            / "ico"
+            / "ico-ai-risk-toolkit--ai-and-data-protection-risk-toolkit-v11.xlsx",
             corpus_root / "gcs" / "gcs-oasis--oasis-template.pptx",
-            corpus_root / "gcs" / "gcs-evaluation-cycle--2024-02-13-gcs-evaluation-cycle-final-official.pdf",
-            corpus_root / "gcs" / "gcs-modern-media-operations--modern-media-operation-guide-word-accessible.docx",
+            corpus_root
+            / "gcs"
+            / "gcs-evaluation-cycle--2024-02-13-gcs-evaluation-cycle-final-official.pdf",
+            corpus_root
+            / "gcs"
+            / "gcs-modern-media-operations--modern-media-operation-guide-word-accessible.docx",
         ]
         for path in expected:
             self.assertTrue(path.exists(), f"Expected public sample artifact to exist: {path}")
@@ -79,11 +92,15 @@ class PublicCorpusSyncAndMaterializationTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((target / "ico" / "about-the-ico.md").exists())
+            campaign_template_name = (
+                "gcs-evaluation-cycle--2024-08-22-"
+                "evaluation-cycle-campaign-template-off-sen.pptx"
+            )
             self.assertTrue(
                 (
                     target
                     / "gcs"
-                    / "gcs-evaluation-cycle--2024-08-22-evaluation-cycle-campaign-template-off-sen.pptx"
+                    / campaign_template_name
                 ).exists()
             )
             marker = json.loads((target / ".docmason-sample.json").read_text(encoding="utf-8"))
