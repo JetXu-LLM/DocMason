@@ -11,7 +11,7 @@
     <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-black?style=flat-square">
     <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square">
     <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square">
-    <img alt="Status" src="https://img.shields.io/badge/status-pre--alpha-orange?style=flat-square">
+    <img alt="Release" src="https://img.shields.io/github/v/release/JetXu-LLM/DocMason?style=flat-square&color=brightgreen">
   </p>
 </div>
 
