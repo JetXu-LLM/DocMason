@@ -204,25 +204,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit machine-readable JSON output.",
     )
 
-    # Hidden hook subcommand — called by .claude/hooks/*.sh scripts.
-    hook_parser = subparsers.add_parser("_hook", help=argparse.SUPPRESS)
-    hook_parser.add_argument(
-        "event_name",
-        help="Hook event name (session, prompt-submit, post-tool-use, stop).",
-    )
-    subparsers.add_parser("_ask", help=argparse.SUPPRESS)
-    subparsers._choices_actions = [
-        action
-        for action in subparsers._choices_actions
-        if getattr(action, "dest", None) not in {"_hook", "_ask"}
-    ]
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the requested DocMason subcommand and return its exit code."""
+    effective = list(argv) if argv is not None else sys.argv[1:]
+    # Hidden internal commands handled before argparse to keep them out of help.
+    if effective and effective[0] == "_hook":
+        from .hooks import run_hook_cli
+
+        return run_hook_cli(effective[1] if len(effective) > 1 else "")
+    if effective and effective[0] == "_ask":
+        return run_hidden_ask_cli(sys.stdin.read())
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(effective)
 
     if args.command == "prepare":
         return emit_report(prepare_workspace(assume_yes=args.yes), as_json=args.json)
@@ -266,12 +262,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         return emit_report(update_core_workspace(bundle=bundle), as_json=args.json)
     if args.command == "workflow":
         return emit_report(run_workflow(args.workflow_id), as_json=args.json)
-    if args.command == "_hook":
-        from .hooks import run_hook_cli
-
-        return run_hook_cli(args.event_name)
-    if args.command == "_ask":
-        return run_hidden_ask_cli(sys.stdin.read())
-
     parser.error(f"Unsupported command: {args.command}")
     return 1

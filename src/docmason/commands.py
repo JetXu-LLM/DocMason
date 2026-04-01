@@ -789,6 +789,71 @@ def make_report(status: str, payload: dict[str, Any], lines: list[str]) -> Comma
     return CommandReport(exit_code=exit_code, payload=payload, lines=lines)
 
 
+def _record_shared_job_settlement(workspace: WorkspacePaths, shared_job: dict[str, Any]) -> None:
+    if not shared_job_is_settled(shared_job):
+        return
+    record_shared_job_settled_once(
+        workspace,
+        run_ids=shared_job.get("attached_run_ids"),
+        job_id=str(shared_job.get("job_id") or ""),
+        status=str(shared_job.get("status") or ""),
+    )
+
+
+def _settle_sync_shared_job(
+    workspace: WorkspacePaths,
+    shared_job: dict[str, Any],
+    *,
+    result: dict[str, Any] | None = None,
+    unexpected_error: Exception | None = None,
+) -> dict[str, Any]:
+    if not shared_job:
+        return {}
+    if shared_job_is_settled(shared_job):
+        _record_shared_job_settlement(workspace, shared_job)
+        return shared_job
+    job_id = str(shared_job.get("job_id") or "")
+    if not job_id:
+        return shared_job
+    if unexpected_error is not None:
+        detail = str(unexpected_error).strip() or type(unexpected_error).__name__
+        shared_job = block_shared_job(
+            workspace,
+            job_id,
+            result={
+                "status": "blocked",
+                "detail": (
+                    "Unexpected sync failure: "
+                    f"{type(unexpected_error).__name__}: {detail}"
+                ),
+            },
+        )
+    elif isinstance(result, dict):
+        if result["status"] in {"valid", "warnings"} and (
+            bool(result.get("published")) or bool(result.get("publish_skipped"))
+        ):
+            shared_job = complete_shared_job(workspace, job_id, result=result)
+        elif result["status"] in {"action-required", "blocking-errors"}:
+            shared_job = block_shared_job(
+                workspace,
+                job_id,
+                result={"detail": result.get("detail"), "status": result.get("status")},
+            )
+        elif not shared_job_is_settled(shared_job):
+            shared_job = block_shared_job(
+                workspace,
+                job_id,
+                result={
+                    "status": "blocked",
+                    "detail": (
+                        f"Sync returned non-terminal status: {result.get('status')}"
+                    ),
+                },
+            )
+    _record_shared_job_settlement(workspace, shared_job)
+    return shared_job
+
+
 def bootstrap_workspace_with_launcher(
     paths: WorkspacePaths | None = None,
     *,
@@ -3089,30 +3154,19 @@ def sync_workspace(
             return make_report(DEGRADED, payload, lines)
     else:
         shared_job = {}
-    result = _run_phase4_sync(
-        workspace,
-        autonomous=autonomous,
-        owner=effective_owner,
-        run_id=run_id,
-    )
+    try:
+        result = _run_phase4_sync(
+            workspace,
+            autonomous=autonomous,
+            owner=effective_owner,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        if autonomous and shared_job:
+            _settle_sync_shared_job(workspace, shared_job, unexpected_error=exc)
+        raise
     if autonomous and shared_job:
-        if result["status"] in {"valid", "warnings"} and (
-            bool(result.get("published")) or bool(result.get("publish_skipped"))
-        ):
-            shared_job = complete_shared_job(workspace, str(shared_job["job_id"]), result=result)
-        elif result["status"] in {"action-required", "blocking-errors"}:
-            shared_job = block_shared_job(
-                workspace,
-                str(shared_job["job_id"]),
-                result={"detail": result.get("detail"), "status": result.get("status")},
-            )
-        if shared_job_is_settled(shared_job):
-            record_shared_job_settled_once(
-                workspace,
-                run_ids=shared_job.get("attached_run_ids"),
-                job_id=str(shared_job.get("job_id") or ""),
-                status=str(shared_job.get("status") or ""),
-            )
+        shared_job = _settle_sync_shared_job(workspace, shared_job, result=result)
     status = validation_command_status(result["status"])
     hybrid_mode = None
     if isinstance(result.get("hybrid_enrichment"), dict):

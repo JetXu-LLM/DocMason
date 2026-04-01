@@ -455,12 +455,19 @@ def write_semantic_overlay(source_dir: Path, payload: dict[str, Any]) -> str:
         "source_fingerprint": payload.get("source_fingerprint") or source_fingerprint,
         "unit_evidence_fingerprint": payload.get("unit_evidence_fingerprint")
         or compute_unit_evidence_fingerprint(source_dir, unit_id),
-        "covered_slots": payload.get("covered_slots")
-        or infer_overlay_slots(
-            payload,
-            fallback_reason=str(payload.get("eligible_reason") or ""),
+        "covered_slots": (
+            payload.get("covered_slots")
+            if isinstance(payload.get("covered_slots"), list)
+            else infer_overlay_slots(
+                payload,
+                fallback_reason=str(payload.get("eligible_reason") or ""),
+            )
         ),
-        "blocked_slots": payload.get("blocked_slots") or [],
+        "blocked_slots": (
+            payload.get("blocked_slots")
+            if isinstance(payload.get("blocked_slots"), list)
+            else []
+        ),
         "consumed_inputs": consumed_inputs,
         "semantic_labels": payload.get("semantic_labels", []),
         "artifact_annotations": payload.get("artifact_annotations", []),

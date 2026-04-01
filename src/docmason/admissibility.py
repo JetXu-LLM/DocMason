@@ -241,12 +241,18 @@ def evaluate_commit_admissibility(
     if session_has_unresolved_gap:
         latest_gap_source = "query session"
     if trace_payload:
-        if (
-            session_recorded_at is None
-            or trace_recorded_at is None
-            or trace_recorded_at >= session_recorded_at
+        if trace_has_unresolved_gap:
+            if latest_gap_source is None or session_recorded_at is None:
+                latest_gap_source = "trace"
+            elif trace_recorded_at is not None and trace_recorded_at >= session_recorded_at:
+                latest_gap_source = "trace"
+        elif (
+            latest_gap_source == "query session"
+            and session_recorded_at is not None
+            and trace_recorded_at is not None
+            and trace_recorded_at >= session_recorded_at
         ):
-            latest_gap_source = "trace" if trace_has_unresolved_gap else None
+            latest_gap_source = None
     if latest_gap_source and turn.get("published_artifacts_sufficient") is True:
         issues.append(
             "Final turn claims published artifacts are sufficient even though the "

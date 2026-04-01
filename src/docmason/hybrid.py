@@ -833,10 +833,13 @@ def _crop_artifact_render(
         width, height = image.size
         padding_x = max(int(width * 0.01), 8)
         padding_y = max(int(height * 0.01), 8)
-        x0 = max(int(float(normalized_bbox["x0"]) * width) - padding_x, 0)
-        y0 = max(int(float(normalized_bbox["y0"]) * height) - padding_y, 0)
-        x1 = min(int(float(normalized_bbox["x1"]) * width) + padding_x, width)
-        y1 = min(int(float(normalized_bbox["y1"]) * height) + padding_y, height)
+        try:
+            x0 = max(int(float(normalized_bbox["x0"]) * width) - padding_x, 0)
+            y0 = max(int(float(normalized_bbox["y0"]) * height) - padding_y, 0)
+            x1 = min(int(float(normalized_bbox["x1"]) * width) + padding_x, width)
+            y1 = min(int(float(normalized_bbox["y1"]) * height) + padding_y, height)
+        except (KeyError, TypeError, ValueError):
+            return False
         if x1 <= x0 or y1 <= y0:
             return False
         crop_area = (x1 - x0) * (y1 - y0)

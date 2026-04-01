@@ -168,6 +168,15 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertNotIn("--staged-only", pre_push)
         self.assertIn("config core.hooksPath .githooks", install_script)
 
+    def test_release_entry_worker_admin_auth_contract_is_hardened(self) -> None:
+        worker = (ROOT / "ops" / "release-entry" / "worker.js").read_text(encoding="utf-8")
+        self.assertIn("function constantTimeEqual", worker)
+        self.assertIn(
+            "const token = nonemptyString(env.DOCMASON_RELEASE_ENTRY_ADMIN_TOKEN)",
+            worker,
+        )
+        self.assertIn("!token || !constantTimeEqual", worker)
+
     def test_config_declares_native_reference_workflow(self) -> None:
         text = (ROOT / "docmason.yaml").read_text(encoding="utf-8")
         required_snippets = [

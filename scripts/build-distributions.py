@@ -80,7 +80,7 @@ def tracked_files(repo_root: Path) -> list[Path]:
     return sorted(
         path.relative_to(repo_root)
         for path in repo_root.rglob("*")
-        if path.is_file() and ".git" not in path.parts
+        if path.is_file() and not path.is_symlink() and ".git" not in path.parts
     )
 
 
@@ -220,6 +220,8 @@ def sha256_digest(path: Path) -> str:
 def build_zip(source_dir: Path, zip_path: Path) -> None:
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(source_dir.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
             archive.write(path, path.relative_to(source_dir))
 
 

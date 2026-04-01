@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from docmason.cli import build_parser
+from docmason.cli import build_parser, main as docmason_main
 from docmason.commands import READY, doctor_workspace
 from docmason.conversation import detect_agent_surface
 from docmason.hooks import (
@@ -33,6 +33,7 @@ from docmason.hooks import (
 from docmason.project import WorkspacePaths, read_json
 from docmason.transcript import (
     SUPPORTED_PROVIDERS,
+    iter_jsonl,
     load_claude_code_transcript,
     locate_claude_code_session,
     validate_normalized_transcript,
@@ -75,6 +76,21 @@ class HookEventHandlerTests(unittest.TestCase):
         self.assertEqual(records[0]["session_id"], "test-session-001")
         self.assertEqual(records[0]["model"], "claude-sonnet-4.6")
         self.assertEqual(records[0]["transcript_path"], "/tmp/transcript.jsonl")
+
+    def test_hook_records_use_atomic_jsonl_append_helper(self) -> None:
+        payload = {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "test-session-atomic",
+            "prompt": "What changed?",
+            "permission_mode": "default",
+        }
+        with (
+            mock.patch("docmason.hooks._resolve_workspace_root", return_value=self.workspace_root),
+            mock.patch("docmason.hooks.append_jsonl") as append_jsonl,
+        ):
+            handle_hook_event("prompt-submit", json.dumps(payload))
+
+        append_jsonl.assert_called_once()
 
     def test_session_end_writes_mirror_record(self) -> None:
         payload = {
@@ -335,6 +351,23 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
             for record in records:
                 f.write(json.dumps(record) + "\n")
         return path
+
+    def test_iter_jsonl_skips_malformed_lines(self) -> None:
+        path = self.workspace_root / "broken.jsonl"
+        path.write_text(
+            '{"record_type":"good-1"}\nnot json\n["skip-me"]\n{"record_type":"good-2"}\n',
+            encoding="utf-8",
+        )
+
+        records = iter_jsonl(path)
+
+        self.assertEqual(
+            records,
+            [
+                {"record_type": "good-1"},
+                {"record_type": "good-2"},
+            ],
+        )
 
     def _write_native_transcript(self, filename: str, records: list[dict]) -> Path:
         path = self.workspace_root / filename
@@ -965,17 +998,17 @@ class MaybeReconcileActiveThreadTests(unittest.TestCase):
 class CLIHookSubcommandTests(unittest.TestCase):
     """Test the hidden _hook CLI subcommand."""
 
-    def test_parser_accepts_hook_subcommand(self) -> None:
-        parser = build_parser()
-        args = parser.parse_args(["_hook", "session"])
-        self.assertEqual(args.command, "_hook")
-        self.assertEqual(args.event_name, "session")
+    def test_main_dispatches_hook_subcommand(self) -> None:
+        with mock.patch("docmason.hooks.run_hook_cli", return_value=0) as hook_cli:
+            result = docmason_main(["_hook", "session"])
+        hook_cli.assert_called_once_with("session")
+        self.assertEqual(result, 0)
 
-    def test_parser_accepts_all_event_names(self) -> None:
-        parser = build_parser()
+    def test_main_dispatches_all_hook_event_names(self) -> None:
         for event in SUPPORTED_EVENTS:
-            args = parser.parse_args(["_hook", event])
-            self.assertEqual(args.event_name, event)
+            with mock.patch("docmason.hooks.run_hook_cli", return_value=0) as hook_cli:
+                docmason_main(["_hook", event])
+            hook_cli.assert_called_once_with(event)
 
     def test_top_level_help_hides_hidden_hook_and_ask_commands(self) -> None:
         parser = build_parser()

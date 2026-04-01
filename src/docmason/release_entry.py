@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -360,6 +361,9 @@ def request_release_entry_service(
     urlopen: Any | None = None,
 ) -> dict[str, Any]:
     """Call the bounded release-entry service and return parsed release metadata."""
+    parsed_url = urllib.parse.urlsplit(service_url)
+    if parsed_url.scheme != "https" or not parsed_url.netloc:
+        raise ValueError("Release-entry service URL must use HTTPS.")
     request = urllib.request.Request(
         service_url,
         data=_release_entry_request_payload(

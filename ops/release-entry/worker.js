@@ -25,6 +25,20 @@ function currentEventDay() {
   return currentTimestamp().slice(0, 10);
 }
 
+function constantTimeEqual(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") {
+    return false;
+  }
+  let mismatch = left.length ^ right.length;
+  const limit = Math.max(left.length, right.length);
+  for (let index = 0; index < limit; index += 1) {
+    const leftCode = index < left.length ? left.charCodeAt(index) : 0;
+    const rightCode = index < right.length ? right.charCodeAt(index) : 0;
+    mismatch |= leftCode ^ rightCode;
+  }
+  return mismatch === 0;
+}
+
 async function handleAdminPublish(request, env) {
   const payload = await readJson(request);
   const releaseVersion = nonemptyString(payload?.release_version);
@@ -154,9 +168,9 @@ export default {
       return handleCheck(request, env);
     }
     if (request.method === "POST" && url.pathname === "/v1/admin/release-current") {
-      const authHeader = request.headers.get("authorization");
-      const expected = `Bearer ${env.DOCMASON_RELEASE_ENTRY_ADMIN_TOKEN || ""}`;
-      if (!authHeader || authHeader !== expected) {
+      const authHeader = request.headers.get("authorization") || "";
+      const token = nonemptyString(env.DOCMASON_RELEASE_ENTRY_ADMIN_TOKEN);
+      if (!token || !constantTimeEqual(authHeader, `Bearer ${token}`)) {
         return jsonResponse(401, { error: "Unauthorized." });
       }
       return handleAdminPublish(request, env);

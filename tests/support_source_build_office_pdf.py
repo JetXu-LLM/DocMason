@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -27,6 +29,7 @@ from docmason.coordination import lease_dir, workspace_lease
 from docmason.control_plane import load_shared_job
 from docmason.evidence_artifacts import compile_pptx_visual_artifacts
 from docmason.hybrid import (
+    materialize_focus_render_assets,
     required_overlay_slots,
     select_lane_b_batch,
 )
@@ -40,6 +43,7 @@ from docmason.knowledge import (
     render_pdf_document,
     sanitize_text,
     source_artifact_contract_complete,
+    validate_soffice_binary,
 )
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.semantic_overlays import semantic_overlay_candidates, write_semantic_overlay
@@ -722,6 +726,115 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
             item for item in artifact_index["artifacts"] if item.get("unit_id") == "slide-001"
         )
         self.assertEqual(first_slide_artifact["render_page_span"], {"start": 1, "end": 1})
+
+    def test_hidden_pptx_slides_preserve_render_mapping_when_pdf_contains_all_slides(self) -> None:
+        workspace = self.make_workspace()
+        source_path = workspace.source_dir / "hidden-deck-all-slides.pptx"
+        source_dir = workspace.knowledge_base_staging_dir / "sources" / "source-1"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        self.create_pptx_with_hidden_slide(source_path)
+
+        with (
+            mock.patch(
+                "docmason.knowledge.convert_office_to_pdf",
+                return_value=(Path("dummy.pdf"), []),
+            ),
+            mock.patch(
+                "docmason.knowledge.render_pdf_document",
+                return_value=(
+                    [
+                        "renders/page-001.png",
+                        "renders/page-002.png",
+                        "renders/page-003.png",
+                    ],
+                    [],
+                ),
+            ),
+        ):
+            _source_manifest, evidence_manifest = build_pptx_source(
+                workspace,
+                source_path,
+                {
+                    "source_id": "source-1",
+                    "source_fingerprint": "fingerprint-1",
+                    "prior_paths": [],
+                    "document_type": "pptx",
+                    "first_seen_at": "2026-03-16T00:00:00Z",
+                    "last_seen_at": "2026-03-16T00:00:00Z",
+                    "identity_confidence": "new",
+                },
+                source_dir,
+                soffice_binary="soffice",
+            )
+
+        self.assertEqual(evidence_manifest["units"][0]["rendered_asset"], "renders/page-001.png")
+        self.assertTrue(evidence_manifest["units"][1]["hidden"])
+        self.assertEqual(evidence_manifest["units"][1]["rendered_asset"], "renders/page-002.png")
+        self.assertEqual(evidence_manifest["units"][1]["render_ordinal"], 2)
+        self.assertEqual(evidence_manifest["units"][2]["rendered_asset"], "renders/page-003.png")
+
+    def test_materialize_focus_render_assets_ignores_malformed_bbox(self) -> None:
+        from PIL import Image
+
+        workspace = self.make_workspace()
+        source_dir = workspace.knowledge_base_current_dir / "sources" / "source-1"
+        (source_dir / "renders").mkdir(parents=True, exist_ok=True)
+        render_asset = source_dir / "renders" / "page-001.png"
+        Image.new("RGB", (64, 64), color=(255, 255, 255)).save(render_asset, format="PNG")
+        write_json(
+            source_dir / "evidence_manifest.json",
+            {
+                "units": [
+                    {
+                        "unit_id": "page-001",
+                        "render_assets": ["renders/page-001.png"],
+                    }
+                ]
+            },
+        )
+        write_json(
+            source_dir / "artifact_index.json",
+            {
+                "artifacts": [
+                    {
+                        "artifact_id": "artifact-1",
+                        "unit_id": "page-001",
+                        "artifact_type": "chart",
+                        "render_assets": ["renders/page-001.png"],
+                        "render_page_span": {"start": 1, "end": 1},
+                        "normalized_bbox": {
+                            "x0": "oops",
+                            "y0": 0.1,
+                            "x1": 0.8,
+                            "y1": 0.9,
+                        },
+                    }
+                ]
+            },
+        )
+
+        focus_assets = materialize_focus_render_assets(source_dir)
+
+        self.assertEqual(focus_assets["artifact-1"], ["renders/page-001.png"])
+        artifact_index = read_json(source_dir / "artifact_index.json")
+        self.assertEqual(
+            artifact_index["artifacts"][0]["focus_render_assets"],
+            ["renders/page-001.png"],
+        )
+        self.assertFalse((source_dir / "artifact_renders" / "page-001" / "artifact-1.png").exists())
+
+    def test_validate_soffice_binary_times_out_gracefully(self) -> None:
+        with mock.patch(
+            "docmason.knowledge.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=[sys.executable, "--version"],
+                timeout=15.0,
+            ),
+        ):
+            validation = validate_soffice_binary(sys.executable)
+
+        self.assertFalse(validation["ready"])
+        self.assertIn("timed out", validation["detail"])
 
     def test_legacy_ppt_reuses_pptx_builder_via_libreoffice_normalization(self) -> None:
         workspace = self.make_workspace()

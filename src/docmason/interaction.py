@@ -1078,7 +1078,11 @@ def _persist_interaction_entry(
         if isinstance(legacy_interaction_id, str)
         else {}
     )
-    if not isinstance(existing_entry, dict) and isinstance(legacy_entry, dict):
+    if (
+        (not isinstance(existing_entry, dict) or not existing_entry)
+        and isinstance(legacy_entry, dict)
+        and legacy_entry
+    ):
         existing_entry = dict(legacy_entry)
     preserve_promotion = (
         promotable

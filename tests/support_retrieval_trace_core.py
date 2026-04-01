@@ -941,6 +941,41 @@ class RetrievalTraceCoreTests(unittest.TestCase):
             ["renders/page-001.png"],
         )
 
+    def test_write_semantic_overlay_preserves_explicit_empty_covered_slots(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        first_source = (
+            workspace.knowledge_base_staging_dir / "sources" / pending_sources[0]["source_id"]
+        )
+        asset = write_semantic_overlay(
+            first_source,
+            {
+                "source_id": pending_sources[0]["source_id"],
+                "unit_id": "page-001",
+                "eligible_reason": "diagram-or-ui-page",
+                "covered_slots": [],
+                "blocked_slots": ["diagram-summary"],
+                "consumed_inputs": {
+                    "render_assets": ["renders/page-001.png"],
+                },
+                "semantic_labels": [],
+                "artifact_annotations": [],
+                "cross_region_relations": [],
+                "uncertainty_notes": ["Awaiting governed multimodal follow-up."],
+            },
+        )
+
+        overlay = read_json(first_source / asset)
+        self.assertEqual(overlay["covered_slots"], [])
+        self.assertEqual(overlay["blocked_slots"], ["diagram-summary"])
+
     def test_compare_query_applies_coverage_bonus_to_multiple_sources(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)

@@ -23,6 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .project import append_jsonl
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -77,8 +79,7 @@ def _append_record(workspace_root: Path, session_id: str, record: dict[str, Any]
     """Append a single JSON record to the session JSONL mirror file."""
     path = _mirror_path(workspace_root, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    append_jsonl(path, record)
 
 
 def _optional_record_fields(

@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +92,14 @@ from .truth_boundary import (
 
 _HOST_SNIPPET_FILENAMES = frozenset({"<stdin>", "<string>"})
 _NONCANONICAL_HOST_LIFECYCLE_HELPER_DIRECT = "noncanonical-host-lifecycle-helper-direct"
+
+
+@dataclass(frozen=True)
+class _ConfirmationReplyResolution:
+    outcome: str
+    question: str | None = None
+    semantic_analysis: dict[str, Any] | None = None
+    payload: dict[str, Any] | None = None
 
 
 def _host_snippet_lifecycle_helper_violation() -> dict[str, Any] | None:
@@ -998,7 +1007,7 @@ def _maybe_handle_confirmation_reply(
     *,
     question: str,
     semantic_analysis: dict[str, Any] | None,
-) -> tuple[str, dict[str, Any] | None] | None:
+) -> _ConfirmationReplyResolution | None:
     action = normalize_confirmation_reply(question)
     if action is None:
         return None
@@ -1061,11 +1070,14 @@ def _maybe_handle_confirmation_reply(
             )
             + " The current task was not continued."
         )
-        return "declined", _commit_governed_boundary_turn(
-            paths,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            reason=reason,
+        return _ConfirmationReplyResolution(
+            outcome="declined",
+            payload=_commit_governed_boundary_turn(
+                paths,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                reason=reason,
+            ),
         )
     approved_job = approve_shared_job(
         paths,
@@ -1117,7 +1129,7 @@ def _maybe_handle_confirmation_reply(
                 "freshness_notice": report.payload.get("detail"),
             },
         )
-        return "blocked", updated
+        return _ConfirmationReplyResolution(outcome="blocked", payload=updated)
     settled_manifest = load_shared_job(paths, str(manifest["job_id"]))
     if settled_manifest and shared_job_is_settled(settled_manifest):
         finish_run_phase(
@@ -1143,7 +1155,11 @@ def _maybe_handle_confirmation_reply(
         if isinstance(turn.get("semantic_analysis"), dict)
         else semantic_analysis
     )
-    return original_question, restored_analysis
+    return _ConfirmationReplyResolution(
+        outcome="resume",
+        question=original_question,
+        semantic_analysis=restored_analysis,
+    )
 
 
 def begin_lane_c_shared_refresh(
@@ -1774,11 +1790,12 @@ def prepare_ask_turn(
     )
     if confirmation_resolution is not None:
         explicit_continuation = True
-        if confirmation_resolution[0] in {"declined", "blocked"}:
-            return dict(confirmation_resolution[1] or {})
-        question = confirmation_resolution[0]
-        if isinstance(confirmation_resolution[1], dict):
-            semantic_analysis = confirmation_resolution[1]
+        if confirmation_resolution.outcome in {"declined", "blocked"}:
+            return dict(confirmation_resolution.payload or {})
+        if isinstance(confirmation_resolution.question, str):
+            question = confirmation_resolution.question
+        if isinstance(confirmation_resolution.semantic_analysis, dict):
+            semantic_analysis = confirmation_resolution.semantic_analysis
     else:
         maybe_reconcile_active_thread(paths)
     opened = open_conversation_turn(paths, user_question=question, entry_workflow_id="ask")

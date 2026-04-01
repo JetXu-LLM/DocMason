@@ -426,12 +426,6 @@ def answer_mentions_illegal_machine_path(answer_text: str) -> bool:
         prefix = answer_text[max(0, match.start() - 8) : match.start()].lower()
         if prefix.endswith("http://") or prefix.endswith("https://"):
             continue
-        if candidate.startswith("original_doc/"):
-            continue
-        if candidate.startswith("knowledge_base/"):
-            continue
-        if candidate.startswith("runtime/"):
-            continue
         if Path(candidate).is_absolute() or re.match(r"^[A-Za-z]:\\", candidate):
             return True
     return False

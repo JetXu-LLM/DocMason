@@ -36,7 +36,7 @@ from docmason.control_plane import (
     workspace_state_snapshot,
 )
 from docmason.conversation import current_host_execution_context
-from docmason.coordination import LeaseConflictError
+from docmason.coordination import LeaseConflictError, lease_dir, workspace_lease
 from docmason.project import (
     WorkspacePaths,
     cached_bootstrap_readiness,
@@ -45,6 +45,7 @@ from docmason.project import (
     write_json,
 )
 from docmason.toolchain import ProbeExecution, inspect_toolchain
+from docmason.workspace_probe import validate_soffice_binary as validate_probe_soffice_binary
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1339,6 +1340,54 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(report.payload["status"], ACTION_REQUIRED)
         self.assertEqual(report.payload["sync_status"], "coordination-blocked")
         self.assertEqual(report.payload["coordination"]["state"], "blocked")
+
+    def test_sync_blocks_shared_job_when_sync_raises_unexpected_error(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+
+        with mock.patch(
+            "docmason.commands._run_phase4_sync",
+            side_effect=RuntimeError("sync exploded"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "sync exploded"):
+                sync_workspace(workspace)
+
+        job_dirs = sorted(path for path in workspace.shared_jobs_dir.iterdir() if path.is_dir())
+        self.assertEqual(len(job_dirs), 1)
+        manifest = load_shared_job(workspace, job_dirs[0].name)
+        self.assertEqual(manifest["status"], "blocked")
+        result_payload = read_json(job_dirs[0] / "result.json")
+        self.assertIn("Unexpected sync failure", result_payload["result"]["detail"])
+
+    def test_workspace_lease_does_not_steal_fresh_empty_directory(self) -> None:
+        workspace = self.make_workspace()
+        target = lease_dir(workspace, "conversation:fresh-empty")
+        target.mkdir(parents=True, exist_ok=False)
+
+        with self.assertRaises(LeaseConflictError):
+            with workspace_lease(
+                workspace,
+                "conversation:fresh-empty",
+                timeout_seconds=0.05,
+                poll_interval_seconds=0.01,
+                stale_after_seconds=600.0,
+            ):
+                self.fail("workspace_lease should not acquire a fresh empty directory")
+
+        self.assertTrue(target.exists())
+
+    def test_workspace_probe_soffice_timeout_returns_structured_detail(self) -> None:
+        with mock.patch(
+            "docmason.workspace_probe.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=[sys.executable, "--version"],
+                timeout=15.0,
+            ),
+        ):
+            validation = validate_probe_soffice_binary(sys.executable)
+
+        self.assertFalse(validation["ready"])
+        self.assertIn("timed out", validation["detail"])
 
     def test_status_stage_progression_and_pending_actions(self) -> None:
         workspace = self.make_workspace()

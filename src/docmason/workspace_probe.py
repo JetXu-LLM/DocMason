@@ -29,6 +29,7 @@ from .project import (
 )
 
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z]+|[\u4e00-\u9fff]+")
+_SOFFICE_VERSION_TIMEOUT_SECONDS = 15.0
 
 
 def utc_now() -> str:
@@ -98,7 +99,18 @@ def validate_soffice_binary(candidate: str | None) -> dict[str, Any]:
             capture_output=True,
             text=True,
             check=False,
+            timeout=_SOFFICE_VERSION_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired:
+        return {
+            "ready": False,
+            "binary": str(binary),
+            "version": None,
+            "detail": (
+                "The detected LibreOffice command timed out during the version probe "
+                f"after {_SOFFICE_VERSION_TIMEOUT_SECONDS:.1f}s."
+            ),
+        }
     except OSError as exc:
         return {
             "ready": False,

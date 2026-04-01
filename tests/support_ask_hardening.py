@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from docmason.admissibility import evaluate_commit_admissibility
 from docmason.ask import (
     begin_lane_c_shared_refresh,
     complete_ask_turn,
@@ -32,7 +34,7 @@ from docmason.control_plane import complete_shared_job as complete_control_plane
 from docmason.control_plane import ensure_shared_job, lane_c_job_key, load_shared_job
 from docmason.conversation import load_turn_record, update_conversation_turn
 from docmason.front_controller import write_hybrid_refresh_work
-from docmason.host_integration import handle_hidden_ask_request
+from docmason.host_integration import handle_hidden_ask_request, run_hidden_ask_cli
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import (
     _recommended_hybrid_targets,
@@ -1203,6 +1205,79 @@ class AskHardeningTests(unittest.TestCase):
             ["published-artifacts-gap", "source-escalation-required"],
         )
         self.assertIn("missing-ask-owned-trace", blocked_turn["issue_codes"])
+
+    def test_commit_admissibility_keeps_session_gap_when_trace_lacks_timestamp(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-gap-undated"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="Can you answer from the latest published material?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        session_id = "session-gap-undated"
+        trace_id = "trace-gap-undated"
+        write_json(
+            workspace.query_sessions_dir / f"{session_id}.json",
+            {
+                "conversation_id": turn["conversation_id"],
+                "turn_id": turn["turn_id"],
+                "run_id": turn["run_id"],
+                "recorded_at": "2026-03-18T10:00:00Z",
+                "published_artifacts_sufficient": False,
+                "source_escalation_required": True,
+            },
+        )
+        write_json(
+            workspace.retrieval_traces_dir / f"{trace_id}.json",
+            {
+                "conversation_id": turn["conversation_id"],
+                "turn_id": turn["turn_id"],
+                "run_id": turn["run_id"],
+                "published_artifacts_sufficient": True,
+                "source_escalation_required": False,
+            },
+        )
+        update_conversation_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            updates={
+                "session_ids": [session_id],
+                "trace_ids": [trace_id],
+                "published_artifacts_sufficient": True,
+                "source_escalation_required": False,
+            },
+        )
+        updated_turn = load_turn_record(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+        )
+
+        admissibility = evaluate_commit_admissibility(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            run_id=str(turn["run_id"]),
+            turn_snapshot=updated_turn,
+            answer_file_path=None,
+            answer_state=None,
+            support_basis=None,
+            support_manifest_path=None,
+            trace_ids=[trace_id],
+        )
+
+        self.assertFalse(admissibility["allowed"])
+        self.assertEqual(
+            admissibility["issue_codes"][:2],
+            ["published-artifacts-gap", "source-escalation-required"],
+        )
 
     def test_complete_ask_turn_autolinks_unique_runtime_artifacts_before_commit(self) -> None:
         workspace = self.make_workspace()
@@ -3015,6 +3090,49 @@ class AskHardeningTests(unittest.TestCase):
             1,
         )
 
+    def test_record_shared_job_settled_once_skips_malformed_run_journal_lines(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-run-journal"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="Is the runtime ready?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        journal_path = run_journal_path(workspace, str(turn["run_id"]))
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+        journal_path.write_text('{"broken":\n', encoding="utf-8")
+
+        record_shared_job_settled_once(
+            workspace,
+            run_ids=[str(turn["run_id"])],
+            job_id="job-1",
+            status="blocked",
+        )
+
+        valid_entries = []
+        for line in journal_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                valid_entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+        settled_events = [
+            entry
+            for entry in valid_entries
+            if entry.get("event_type") == "shared-job-settled"
+            and isinstance(entry.get("payload"), dict)
+            and entry["payload"].get("job_id") == "job-1"
+        ]
+        self.assertEqual(len(settled_events), 1)
+
     def test_agent_semantic_analysis_routes_non_english_questions(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -3156,6 +3274,61 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(turn["answer_state"], "abstained")
         self.assertEqual(turn["host_provider"], "codex")
         self.assertEqual(turn["host_thread_ref"], "thread-hidden-boundary")
+
+    def test_hidden_ask_open_returns_structured_error_payload_on_internal_failure(self) -> None:
+        workspace = self.make_workspace()
+
+        with mock.patch(
+            "docmason.host_integration.open_canonical_ask",
+            side_effect=RuntimeError("open exploded"),
+        ):
+            payload = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": "What changed?",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertFalse(payload["user_reply_allowed"])
+        self.assertEqual(payload["primary_issue_code"], "hidden-ask-open-failed")
+        self.assertIn("open exploded", payload["detail"])
+
+    def test_hidden_ask_progress_returns_structured_error_payload_on_internal_failure(self) -> None:
+        workspace = self.make_workspace()
+
+        with mock.patch(
+            "docmason.host_integration.progress_canonical_ask",
+            side_effect=RuntimeError("progress exploded"),
+        ):
+            payload = handle_hidden_ask_request(
+                {
+                    "action": "progress",
+                    "conversation_id": "conversation-1",
+                    "turn_id": "turn-1",
+                    "completion_status": "covered",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertFalse(payload["user_reply_allowed"])
+        self.assertEqual(payload["primary_issue_code"], "hidden-ask-progress-failed")
+        self.assertEqual(payload["conversation_id"], "conversation-1")
+        self.assertEqual(payload["turn_id"], "turn-1")
+
+    def test_hidden_ask_cli_emits_json_when_internal_error_escapes(self) -> None:
+        with mock.patch(
+            "docmason.host_integration.handle_hidden_ask_request",
+            side_effect=RuntimeError("cli exploded"),
+        ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            exit_code = run_hidden_ask_cli('{"action":"open","question":"hi"}')
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["primary_issue_code"], "hidden-ask-open-failed")
+        self.assertIn("cli exploded", payload["detail"])
 
     def test_hidden_ask_finalize_quarantines_noncanonical_answer_file(self) -> None:
         workspace = self.make_workspace()

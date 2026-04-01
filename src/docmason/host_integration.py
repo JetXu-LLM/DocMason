@@ -117,7 +117,10 @@ def _answer_text(paths: WorkspacePaths, answer_file_path: str | None) -> str | N
         path = paths.root / path
     if not path.exists():
         return None
-    text = path.read_text(encoding="utf-8").strip()
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
     return text or None
 
 
@@ -192,6 +195,29 @@ def _turn_detail(turn: dict[str, Any], *, fallback: str | None = None) -> str | 
         if candidate is not None:
             return candidate
     return None
+
+
+def _hidden_ask_exception_payload(
+    *,
+    action: str | None,
+    exc: Exception,
+    conversation_id: str | None = None,
+    turn_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_action = action if action in {"open", "progress", "finalize"} else "request"
+    detail = str(exc).strip() or type(exc).__name__
+    payload = {
+        "status": "blocked",
+        "user_reply_allowed": False,
+        "detail": f"Hidden ask {normalized_action} failed: {detail}",
+        "primary_issue_code": f"hidden-ask-{normalized_action}-failed",
+        "issue_codes": [f"hidden-ask-{normalized_action}-failed"],
+    }
+    if conversation_id is not None:
+        payload["conversation_id"] = conversation_id
+    if turn_id is not None:
+        payload["turn_id"] = turn_id
+    return payload
 
 
 def _bundle_notice(turn: dict[str, Any], *, user_reply_allowed: bool) -> str | None:
@@ -551,70 +577,76 @@ def handle_hidden_ask_request(
     """Handle one hidden host-integration ask request."""
     workspace = paths or locate_workspace()
     action = _nonempty_string(request.get("action"))
-    if action == "open":
-        question = _nonempty_string(request.get("question"))
-        if question is None:
-            return {
-                "status": "blocked",
-                "user_reply_allowed": False,
-                "detail": "Hidden ask open requires a non-empty question.",
-                "primary_issue_code": "missing-question",
-                "issue_codes": ["missing-question"],
-            }
-        return open_canonical_ask(
-            workspace,
-            question=question,
-            semantic_analysis=(
-                request.get("semantic_analysis")
-                if isinstance(request.get("semantic_analysis"), dict)
-                else None
-            ),
-            log_origin=_nonempty_string(request.get("log_origin")),
-            host_provider=_nonempty_string(request.get("host_provider")),
-            host_thread_ref=_nonempty_string(request.get("host_thread_ref")),
-            host_identity_source=_nonempty_string(request.get("host_identity_source")),
-        )
-    if action == "finalize":
-        conversation_id = _nonempty_string(request.get("conversation_id"))
-        turn_id = _nonempty_string(request.get("turn_id"))
-        if conversation_id is None or turn_id is None:
-            return {
-                "status": "blocked",
-                "user_reply_allowed": False,
-                "detail": "Hidden ask finalize requires conversation_id and turn_id.",
-                "primary_issue_code": "missing-turn-reference",
-                "issue_codes": ["missing-turn-reference"],
-            }
-        return finalize_canonical_ask(
-            workspace,
+    conversation_id = _nonempty_string(request.get("conversation_id"))
+    turn_id = _nonempty_string(request.get("turn_id"))
+    try:
+        if action == "open":
+            question = _nonempty_string(request.get("question"))
+            if question is None:
+                return {
+                    "status": "blocked",
+                    "user_reply_allowed": False,
+                    "detail": "Hidden ask open requires a non-empty question.",
+                    "primary_issue_code": "missing-question",
+                    "issue_codes": ["missing-question"],
+                }
+            return open_canonical_ask(
+                workspace,
+                question=question,
+                semantic_analysis=(
+                    request.get("semantic_analysis")
+                    if isinstance(request.get("semantic_analysis"), dict)
+                    else None
+                ),
+                log_origin=_nonempty_string(request.get("log_origin")),
+                host_provider=_nonempty_string(request.get("host_provider")),
+                host_thread_ref=_nonempty_string(request.get("host_thread_ref")),
+                host_identity_source=_nonempty_string(request.get("host_identity_source")),
+            )
+        if action == "finalize":
+            if conversation_id is None or turn_id is None:
+                return {
+                    "status": "blocked",
+                    "user_reply_allowed": False,
+                    "detail": "Hidden ask finalize requires conversation_id and turn_id.",
+                    "primary_issue_code": "missing-turn-reference",
+                    "issue_codes": ["missing-turn-reference"],
+                }
+            return finalize_canonical_ask(
+                workspace,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                request=request,
+            )
+        if action == "progress":
+            if conversation_id is None or turn_id is None:
+                return {
+                    "status": "blocked",
+                    "user_reply_allowed": False,
+                    "detail": "Hidden ask progress requires conversation_id and turn_id.",
+                    "primary_issue_code": "missing-turn-reference",
+                    "issue_codes": ["missing-turn-reference"],
+                }
+            return progress_canonical_ask(
+                workspace,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                request=request,
+            )
+        return {
+            "status": "blocked",
+            "user_reply_allowed": False,
+            "detail": "Hidden ask action must be `open`, `progress`, or `finalize`.",
+            "primary_issue_code": "unsupported-hidden-ask-action",
+            "issue_codes": ["unsupported-hidden-ask-action"],
+        }
+    except Exception as exc:
+        return _hidden_ask_exception_payload(
+            action=action,
+            exc=exc,
             conversation_id=conversation_id,
             turn_id=turn_id,
-            request=request,
         )
-    if action == "progress":
-        conversation_id = _nonempty_string(request.get("conversation_id"))
-        turn_id = _nonempty_string(request.get("turn_id"))
-        if conversation_id is None or turn_id is None:
-            return {
-                "status": "blocked",
-                "user_reply_allowed": False,
-                "detail": "Hidden ask progress requires conversation_id and turn_id.",
-                "primary_issue_code": "missing-turn-reference",
-                "issue_codes": ["missing-turn-reference"],
-            }
-        return progress_canonical_ask(
-            workspace,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            request=request,
-        )
-    return {
-        "status": "blocked",
-        "user_reply_allowed": False,
-        "detail": "Hidden ask action must be `open`, `progress`, or `finalize`.",
-        "primary_issue_code": "unsupported-hidden-ask-action",
-        "issue_codes": ["unsupported-hidden-ask-action"],
-    }
 
 
 def run_hidden_ask_cli(stdin_text: str) -> int:
@@ -623,6 +655,15 @@ def run_hidden_ask_cli(stdin_text: str) -> int:
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
     except json.JSONDecodeError:
         payload = {"action": None}
-    result = handle_hidden_ask_request(payload if isinstance(payload, dict) else {})
+    request = payload if isinstance(payload, dict) else {}
+    try:
+        result = handle_hidden_ask_request(request)
+    except Exception as exc:
+        result = _hidden_ask_exception_payload(
+            action=_nonempty_string(request.get("action")),
+            exc=exc,
+            conversation_id=_nonempty_string(request.get("conversation_id")),
+            turn_id=_nonempty_string(request.get("turn_id")),
+        )
     sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
     return 0

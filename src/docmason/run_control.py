@@ -409,7 +409,10 @@ def record_shared_job_settled_once(
             for line in journal_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
-                payload = json.loads(line)
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if payload.get("event_type") != "shared-job-settled":
                     continue
                 event_payload = payload.get("payload")

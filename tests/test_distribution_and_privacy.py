@@ -384,6 +384,71 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                 names = set(archive.namelist())
             self.assertNotIn("ops/release-entry/worker.js", names)
 
+    def test_build_distributions_non_git_fallback_skips_symlinked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            tempdir = Path(tempdir_name)
+            repo_root = tempdir / "repo"
+            repo_root.mkdir()
+            outside_file = tempdir / "outside-secret.txt"
+            outside_file.write_text("do not package\n", encoding="utf-8")
+
+            (repo_root / "README.md").write_text("repo\n", encoding="utf-8")
+            (repo_root / "AGENTS.md").write_text("agents\n", encoding="utf-8")
+            (repo_root / "pyproject.toml").write_text(
+                "[project]\nname='docmason'\nversion='0.0.0'\n",
+                encoding="utf-8",
+            )
+            (repo_root / "docmason.yaml").write_text(
+                "workspace:\n  source_dir: original_doc\n",
+                encoding="utf-8",
+            )
+            (repo_root / "original_doc").mkdir()
+            (repo_root / "original_doc" / ".gitkeep").write_text("", encoding="utf-8")
+            (repo_root / "runtime").mkdir()
+            (repo_root / "knowledge_base").mkdir()
+            (repo_root / "adapters").mkdir()
+            (repo_root / "sample_corpus" / "ico-gcs" / "ico").mkdir(parents=True)
+            (repo_root / "sample_corpus" / "ico-gcs" / "gcs").mkdir(parents=True)
+            (repo_root / "sample_corpus" / "ico-gcs" / "ico" / "fixture.md").write_text(
+                "fixture\n",
+                encoding="utf-8",
+            )
+            (repo_root / "sample_corpus" / "ico-gcs" / "gcs" / "fixture.md").write_text(
+                "fixture\n",
+                encoding="utf-8",
+            )
+            (repo_root / "leak.txt").symlink_to(outside_file)
+
+            output_dir = tempdir / "dist"
+            result = subprocess.run(
+                [
+                    PYTHON,
+                    str(ROOT / "scripts" / "build-distributions.py"),
+                    "--repo-root",
+                    str(repo_root),
+                    "--output-dir",
+                    str(output_dir),
+                    "--version",
+                    "test-build",
+                    "--github-repo",
+                    "example/DocMason",
+                    "--update-service-url",
+                    "https://updates.example.invalid/v1/check",
+                    "--source-commit",
+                    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                    "--source-ref",
+                    "refs/tags/test-build",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with zipfile.ZipFile(output_dir / "DocMason-clean.zip") as archive:
+                names = set(archive.namelist())
+            self.assertNotIn("leak.txt", names)
+
     def test_source_repo_release_entry_remains_disabled_by_default(self) -> None:
         snapshot = release_entry_snapshot(WorkspacePaths(root=ROOT))
         self.assertFalse(snapshot["bundle_detected"])
@@ -427,6 +492,39 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             state = json.loads(workspace.release_client_state_path.read_text(encoding="utf-8"))
             self.assertEqual(state["last_known_latest_version"], "v0.2.0")
             self.assertEqual(state["last_check_status"], "manual-ok-no-update")
+
+    def test_update_core_rejects_release_asset_outside_trusted_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            tempdir = Path(tempdir_name)
+            workspace = self.make_bundle_workspace(tempdir, source_version="v0.1.0")
+            response = {
+                "schema_version": 1,
+                "current_release": {
+                    "distribution_channel": "clean",
+                    "latest_version": "v0.2.0",
+                    "published_at": "2026-03-30T12:00:00Z",
+                    "release_url": "https://github.com/example/DocMason/releases/tag/v0.2.0",
+                    "asset_url": (
+                        "https://github.com/evil/DocMason/releases/download/v0.2.0/"
+                        "DocMason-clean.zip"
+                    ),
+                    "asset_name": "DocMason-clean.zip",
+                },
+            }
+
+            with self.assertRaises(UpdateCoreError) as raised:
+                perform_update_core(
+                    workspace,
+                    now=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+                    urlopen=self.fake_urlopen(
+                        service_url="https://updates.example.invalid/v1/check",
+                        service_payload=response,
+                        downloads={},
+                    ),
+                )
+
+            self.assertEqual(raised.exception.code, "invalid-release-entry-response")
+            self.assertEqual((workspace.root / "README.md").read_text(encoding="utf-8"), "old\n")
 
     def test_update_core_network_update_works_when_dnt_and_local_disable_are_set(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:
@@ -588,6 +686,46 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                 original_state,
             )
 
+    def test_update_core_accepts_multiline_checksum_file_when_later_line_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            tempdir = Path(tempdir_name)
+            workspace = self.make_bundle_workspace(tempdir, source_version="v0.1.0")
+            bundle_zip = self.make_clean_bundle_zip(tempdir, version="v0.2.0")
+            bundle_bytes = bundle_zip.read_bytes()
+            sha_text = (
+                "0" * 64
+                + "  Some-Other-Asset.zip\n"
+                + f"{hashlib.sha256(bundle_bytes).hexdigest()}  {CLEAN_ASSET_NAME}\n"
+            )
+            response = {
+                "schema_version": 1,
+                "current_release": {
+                    "distribution_channel": "clean",
+                    "latest_version": "v0.2.0",
+                    "published_at": "2026-03-30T12:00:00Z",
+                    "release_url": "https://github.com/example/DocMason/releases/tag/v0.2.0",
+                    "asset_url": CLEAN_RELEASE_DOWNLOAD_URL,
+                    "asset_name": "DocMason-clean.zip",
+                },
+            }
+            downloads = {
+                CLEAN_RELEASE_DOWNLOAD_URL: bundle_bytes,
+                CLEAN_RELEASE_SHA_URL: sha_text.encode("utf-8"),
+            }
+
+            result = perform_update_core(
+                workspace,
+                now=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+                urlopen=self.fake_urlopen(
+                    service_url="https://updates.example.invalid/v1/check",
+                    service_payload=response,
+                    downloads=downloads,
+                ),
+            )
+
+            self.assertEqual(result["update_core_status"], "updated")
+            self.assertEqual((workspace.root / "README.md").read_text(encoding="utf-8"), "new\n")
+
     def test_update_core_download_failure_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:
             tempdir = Path(tempdir_name)
@@ -689,6 +827,35 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "apply-failed")
             self.assertEqual((workspace.root / "README.md").read_text(encoding="utf-8"), "old\n")
             self.assertTrue((workspace.root / "OLD_ONLY.txt").exists())
+            self.assertFalse((workspace.root / "NEW_ONLY.txt").exists())
+
+    def test_update_core_rejects_zip_with_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            tempdir = Path(tempdir_name)
+            workspace = self.make_bundle_workspace(tempdir, source_version="v0.1.0")
+            bundle_zip = tempdir / CLEAN_ASSET_NAME
+            with zipfile.ZipFile(bundle_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "distribution-manifest.json",
+                    json.dumps(
+                        {
+                            "distribution_channel": "clean",
+                            "asset_name": CLEAN_ASSET_NAME,
+                            "source_version": "v0.2.0",
+                            "source_repo": "example/DocMason",
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n",
+                )
+                archive.writestr("README.md", "new\n")
+                archive.writestr("../../escaped.txt", "owned\n")
+
+            with self.assertRaises(UpdateCoreError) as raised:
+                perform_update_core(workspace, bundle_path=bundle_zip)
+
+            self.assertEqual(raised.exception.code, "invalid-bundle")
+            self.assertEqual((workspace.root / "README.md").read_text(encoding="utf-8"), "old\n")
             self.assertFalse((workspace.root / "NEW_ONLY.txt").exists())
 
     def test_update_docmason_core_preserves_local_workspace_data(self) -> None:

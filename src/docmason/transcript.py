@@ -144,7 +144,12 @@ def iter_jsonl(path: Path) -> list[dict[str, Any]]:
     """Read a JSONL file into a list of JSON objects."""
     payloads: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        record = json.loads(line)
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if isinstance(record, dict):
             payloads.append(record)
     return payloads

@@ -139,6 +139,7 @@ BENIGN_THIRD_PARTY_DIAGNOSTIC_SUBSTRINGS = (
     "cannot parse header or footer so it will be ignored",
     "ignoring wrong pointing object",
 )
+_SOFFICE_VERSION_TIMEOUT_SECONDS = 15.0
 
 
 def utc_now() -> str:
@@ -245,8 +246,14 @@ class _ThirdPartyDiagnosticCapture:
                 sys.stderr.flush()
             except Exception:
                 pass
-            os.dup2(self._stderr_fd, 2)
-            os.close(self._stderr_fd)
+            try:
+                os.dup2(self._stderr_fd, 2)
+            finally:
+                try:
+                    os.close(self._stderr_fd)
+                except OSError:
+                    pass
+                self._stderr_fd = None
         raw_lines: list[str] = []
         if self._stderr_file is not None:
             self._stderr_file.seek(0)
@@ -404,7 +411,18 @@ def validate_soffice_binary(candidate: str | None) -> dict[str, Any]:
             capture_output=True,
             text=True,
             check=False,
+            timeout=_SOFFICE_VERSION_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired:
+        return {
+            "ready": False,
+            "binary": str(binary),
+            "version": None,
+            "detail": (
+                "The detected LibreOffice command timed out during the version probe "
+                f"after {_SOFFICE_VERSION_TIMEOUT_SECONDS:.1f}s."
+            ),
+        }
     except OSError as exc:
         return {
             "ready": False,
@@ -1242,6 +1260,33 @@ def pptx_slide_hidden(slide: Any) -> bool:
     return bool(slide._element.get("show") == "0")
 
 
+def _pptx_slide_render_assignments(
+    *,
+    hidden_flags: list[bool],
+    rendered_assets: list[str],
+) -> list[tuple[str | None, int | None]]:
+    assignments: list[tuple[str | None, int | None]] = [
+        (None, None) for _ in hidden_flags
+    ]
+    if not hidden_flags or not rendered_assets:
+        return assignments
+    if len(rendered_assets) == len(hidden_flags):
+        return [
+            (asset, index)
+            for index, asset in enumerate(rendered_assets, start=1)
+        ]
+    visible_render_index = 0
+    for slide_index, hidden in enumerate(hidden_flags):
+        if hidden or visible_render_index >= len(rendered_assets):
+            continue
+        assignments[slide_index] = (
+            rendered_assets[visible_render_index],
+            visible_render_index + 1,
+        )
+        visible_render_index += 1
+    return assignments
+
+
 def build_pdf_source(
     paths: WorkspacePaths,
     source_path: Path,
@@ -1377,11 +1422,15 @@ def build_pptx_source(
     units: list[dict[str, Any]] = []
     all_texts: list[str] = []
     embedded_media: list[str] = []
-    visible_render_index = 0
     if presentation is not None:
+        hidden_flags = [pptx_slide_hidden(slide) for slide in presentation.slides]
+        render_assignments = _pptx_slide_render_assignments(
+            hidden_flags=hidden_flags,
+            rendered_assets=rendered_assets,
+        )
         for index, slide in enumerate(presentation.slides, start=1):
             unit_id = f"slide-{index:03d}"
-            hidden = pptx_slide_hidden(slide)
+            hidden = hidden_flags[index - 1]
             visible_texts = pptx_texts_from_slide(slide)
             slide_title = ""
             try:
@@ -1411,11 +1460,7 @@ def build_pptx_source(
                     "hidden": hidden,
                 },
             )
-            rendered_asset = None
-            if not hidden and visible_render_index < len(rendered_assets):
-                rendered_asset = rendered_assets[visible_render_index]
-                visible_render_index += 1
-            render_ordinal = visible_render_index if rendered_asset else None
+            rendered_asset, render_ordinal = render_assignments[index - 1]
             units.append(
                 {
                     "unit_id": unit_id,

@@ -208,6 +208,28 @@ class ReleaseEntryClientTests(unittest.TestCase):
         self.assertFalse(result["attempted"])
         self.assertEqual(result["release_entry_status"]["disabled_reason"], "local-config")
 
+    def test_release_entry_check_rejects_non_https_service_url(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_bundle(workspace, update_service_url="http://updates.example.invalid/v1/check")
+        called = False
+
+        def failing_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+            del request, timeout
+            nonlocal called
+            called = True
+            raise AssertionError("urlopen should not run for a non-HTTPS release-entry URL")
+
+        result = maybe_run_release_entry_check(
+            workspace,
+            now=datetime(2026, 3, 30, 1, 0, tzinfo=UTC),
+            urlopen=failing_urlopen,
+        )
+
+        self.assertFalse(called)
+        self.assertTrue(result["attempted"])
+        persisted = json.loads(workspace.release_client_state_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["last_check_status"], "network-error")
+
     def test_release_entry_check_respects_cooldown(self) -> None:
         workspace = self.make_workspace()
         self.seed_bundle(workspace)

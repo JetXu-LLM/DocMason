@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import shutil
 import tempfile
+import urllib.parse
 import urllib.request
 import zipfile
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .project import WorkspacePaths
@@ -40,6 +43,7 @@ DOWNLOAD_TIMEOUT_SECONDS = max(DEFAULT_RELEASE_ENTRY_TIMEOUT_SECONDS, 20.0)
 CHECK_TIMEOUT_SECONDS = max(DEFAULT_RELEASE_ENTRY_TIMEOUT_SECONDS, 10.0)
 UPDATE_CORE_STATUS_UPDATED = "updated"
 UPDATE_CORE_STATUS_ALREADY_CURRENT = "already-current"
+_SOURCE_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 class UpdateCoreError(RuntimeError):
@@ -107,6 +111,44 @@ def _download_to_path(
         shutil.copyfileobj(response, handle)
 
 
+def _normalized_source_repo(value: Any) -> str | None:
+    repo = _nonempty_string(value)
+    if repo is None or not _SOURCE_REPO_PATTERN.fullmatch(repo):
+        return None
+    return repo
+
+
+def _validated_trusted_github_release_url(
+    url: str,
+    *,
+    source_repo: str,
+    kind: str,
+) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https":
+        raise UpdateCoreError(
+            "invalid-release-entry-response",
+            f"The release-entry service returned a non-HTTPS {kind} URL.",
+        )
+    if parsed.hostname != "github.com":
+        raise UpdateCoreError(
+            "invalid-release-entry-response",
+            f"The release-entry service returned a non-GitHub {kind} URL.",
+        )
+    expected_prefix = (
+        f"/{source_repo}/releases/tag/"
+        if kind == "release"
+        else f"/{source_repo}/releases/download/"
+    )
+    if not parsed.path.startswith(expected_prefix):
+        raise UpdateCoreError(
+            "invalid-release-entry-response",
+            "The release-entry service returned an update URL outside the trusted "
+            f"GitHub release boundary for `{source_repo}`.",
+        )
+    return url
+
+
 def _download_text(
     url: str,
     *,
@@ -146,14 +188,11 @@ def _expected_sha256(sha256_text: str, *, asset_name: str) -> str:
                 "The published checksum file is malformed.",
             )
         if candidate_name != asset_name:
-            raise UpdateCoreError(
-                "invalid-checksum",
-                f"The published checksum file does not describe `{asset_name}`.",
-            )
+            continue
         return digest
     raise UpdateCoreError(
         "missing-checksum",
-        "The published checksum file is empty.",
+        f"The published checksum file does not describe `{asset_name}`.",
     )
 
 
@@ -181,7 +220,13 @@ def _load_bundle_context(paths: WorkspacePaths) -> dict[str, Any]:
     distribution_channel = _nonempty_string(bundle.get("distribution_channel"))
     current_version = _nonempty_string(bundle.get("current_version"))
     update_service_url = _nonempty_string(bundle.get("update_service_url"))
-    if distribution_channel is None or current_version is None or update_service_url is None:
+    source_repo = _normalized_source_repo(manifest.get("source_repo"))
+    if (
+        distribution_channel is None
+        or current_version is None
+        or update_service_url is None
+        or source_repo is None
+    ):
         raise UpdateCoreError(
             "invalid-bundle-manifest",
             "The generated bundle manifest is incomplete.",
@@ -190,6 +235,7 @@ def _load_bundle_context(paths: WorkspacePaths) -> dict[str, Any]:
         "distribution_channel": distribution_channel,
         "current_version": current_version,
         "update_service_url": update_service_url,
+        "source_repo": source_repo,
         "automatic_check_enabled_by_default": bool(
             bundle.get("automatic_check_enabled_by_default")
         ),
@@ -230,6 +276,7 @@ def _read_bundle_manifest_from_zip(bundle_path: Path) -> dict[str, Any]:
 def _clean_bundle_download_urls(
     *,
     current_channel: str,
+    source_repo: str,
     release_metadata: dict[str, Any],
 ) -> tuple[str, str]:
     release_url = _nonempty_string(release_metadata.get("release_url"))
@@ -241,12 +288,28 @@ def _clean_bundle_download_urls(
                 "invalid-release-entry-response",
                 "The release-entry service did not return a clean bundle asset.",
             )
+        _validated_trusted_github_release_url(
+            asset_url,
+            source_repo=source_repo,
+            kind="asset",
+        )
+        if release_url is not None:
+            _validated_trusted_github_release_url(
+                release_url,
+                source_repo=source_repo,
+                kind="release",
+            )
         return asset_url, asset_url + ".sha256"
     if release_url is None or "/releases/tag/" not in release_url:
         raise UpdateCoreError(
             "invalid-release-entry-response",
             "The release-entry service did not return a usable GitHub release URL.",
         )
+    _validated_trusted_github_release_url(
+        release_url,
+        source_repo=source_repo,
+        kind="release",
+    )
     download_root = release_url.replace("/releases/tag/", "/releases/download/", 1)
     asset_url = f"{download_root}/{CLEAN_ASSET_NAME}"
     return asset_url, asset_url + ".sha256"
@@ -320,7 +383,43 @@ def _download_remote_update_bundle(
 def _extract_bundle(bundle_path: Path, destination: Path) -> Path:
     try:
         with zipfile.ZipFile(bundle_path) as archive:
-            archive.extractall(destination)
+            destination.mkdir(parents=True, exist_ok=True)
+            destination_root = destination.resolve()
+            for member in archive.infolist():
+                mode = member.external_attr >> 16
+                if (mode & 0o170000) == 0o120000:
+                    raise UpdateCoreError(
+                        "invalid-bundle",
+                        "The bundle archive contains an unsupported symbolic link entry.",
+                    )
+                raw_name = member.filename.replace("\\", "/")
+                normalized = PurePosixPath(raw_name)
+                if normalized.is_absolute() or ".." in normalized.parts:
+                    raise UpdateCoreError(
+                        "invalid-bundle",
+                        f"The bundle archive contains an unsafe member path: {member.filename}",
+                    )
+                parts = [part for part in normalized.parts if part not in {"", "."}]
+                if not parts:
+                    continue
+                target_path = destination.joinpath(*parts)
+                resolved_target = target_path.resolve(strict=False)
+                if os.path.commonpath([str(destination_root), str(resolved_target)]) != str(
+                    destination_root
+                ):
+                    raise UpdateCoreError(
+                        "invalid-bundle",
+                        f"The bundle archive escapes the extraction root: {member.filename}",
+                    )
+                if member.is_dir():
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member, "r") as source, target_path.open("wb") as handle:
+                    shutil.copyfileobj(source, handle)
+                file_mode = mode & 0o777
+                if file_mode:
+                    target_path.chmod(file_mode)
     except (OSError, zipfile.BadZipFile) as exc:
         raise UpdateCoreError(
             "invalid-bundle",
@@ -474,6 +573,7 @@ def perform_update_core(
 
         bundle_download_url, checksum_url = _clean_bundle_download_urls(
             current_channel=str(bundle_context["distribution_channel"]),
+            source_repo=str(bundle_context["source_repo"]),
             release_metadata=release_metadata,
         )
         with tempfile.TemporaryDirectory(prefix="docmason-update-core-") as tempdir_name:

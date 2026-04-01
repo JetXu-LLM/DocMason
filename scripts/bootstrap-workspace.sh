@@ -118,6 +118,14 @@ ensure_bootstrap_cache_root() {
   mkdir -p "$cache_root"
 }
 
+validate_bootstrap_uv_installer_url() {
+  local url="$1"
+  if [[ "$url" =~ ^https://astral\.sh/uv(/[^/?#]+)?/install\.sh$ ]]; then
+    return 0
+  fi
+  fail "The controlled UV bootstrap asset URL must remain an official Astral HTTPS installer URL."
+}
+
 install_controlled_bootstrap_uv() {
   local cache_root="$1"
   local installer_path="$cache_root/uv-installer.sh"
@@ -131,6 +139,7 @@ install_controlled_bootstrap_uv() {
 
   command -v curl >/dev/null 2>&1 || fail "The controlled bootstrap asset requires `curl`."
   command -v sh >/dev/null 2>&1 || fail "The controlled bootstrap asset requires `/bin/sh`."
+  validate_bootstrap_uv_installer_url "$BOOTSTRAP_UV_INSTALLER_URL"
 
   log "Downloading the controlled UV bootstrap asset..."
   curl -LsSf "$BOOTSTRAP_UV_INSTALLER_URL" -o "$installer_path" \

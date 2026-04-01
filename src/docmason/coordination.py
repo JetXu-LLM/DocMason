@@ -14,6 +14,8 @@ from typing import Any
 
 from .project import WorkspacePaths, read_json
 
+_FRESH_LEASE_WRITE_GRACE_SECONDS = 1.0
+
 
 class LeaseConflictError(RuntimeError):
     """Raised when a shared workspace lease cannot be acquired safely."""
@@ -44,13 +46,20 @@ def _utc_now() -> str:
 
 
 def _stale_lease(path: Path, *, stale_after_seconds: float) -> bool:
-    payload = read_json(path / "lease.json")
+    lease_file = path / "lease.json"
+    if not lease_file.exists():
+        try:
+            age_seconds = time.time() - path.stat().st_mtime
+        except OSError:
+            return True
+        return age_seconds > min(stale_after_seconds, _FRESH_LEASE_WRITE_GRACE_SECONDS)
+    payload = read_json(lease_file)
     created_at = payload.get("created_at")
     if not isinstance(created_at, str) or not created_at:
         return True
     try:
         created = created_at.replace("Z", "+00:00")
-        age_seconds = time.time() - Path(path / "lease.json").stat().st_mtime
+        age_seconds = time.time() - lease_file.stat().st_mtime
     except OSError:
         return True
     _ = created
@@ -93,10 +102,19 @@ def workspace_lease(
                 ) from error
             time.sleep(poll_interval_seconds)
             continue
-        (target / "lease.json").write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        try:
+            (target / "lease.json").write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        except FileNotFoundError:
+            if time.monotonic() >= deadline:
+                raise LeaseConflictError(
+                    f"Could not acquire workspace lease for `{resource}` "
+                    f"within {timeout_seconds:.1f}s."
+                )
+            time.sleep(poll_interval_seconds)
+            continue
         break
     try:
         yield payload
