@@ -8,10 +8,21 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+
+from docmason.release_version import (  # noqa: E402
+    read_project_version,
+    release_tag_for_version,
+    validate_release_tag,
+)
 
 COMMON_TOP_LEVEL_EXCLUDES = {
     ".docmason",
@@ -57,6 +68,16 @@ RELEASE_ENTRY_SCHEMA_VERSION = 1
 RELEASE_ENTRY_STATE_SCHEMA_VERSION = 1
 DEFAULT_RELEASE_ENTRY_SCOPE = "canonical-ask"
 DEFAULT_RELEASE_ENTRY_COOLDOWN_HOURS = 20
+
+
+def resolved_release_tag(version: str | None, *, repo_root: Path) -> str:
+    """Return the release tag used in bundle manifests after validation."""
+    committed_version = read_project_version(repo_root / "pyproject.toml")
+    expected_tag = release_tag_for_version(committed_version)
+    if version is None:
+        return expected_tag
+    validate_release_tag(version, expected_version=committed_version)
+    return version
 
 
 def utc_now() -> str:
@@ -241,8 +262,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--version",
-        default="local-dev",
-        help="Version string to record in distribution manifests and asset names.",
+        default=None,
+        help=(
+            "Release tag recorded in distribution manifests, for example `v0.1.0-rc3`. "
+            "Defaults to the tag implied by the committed package version."
+        ),
     )
     parser.add_argument(
         "--github-repo",
@@ -278,6 +302,7 @@ def main() -> int:
     repo_root = args.repo_root.resolve()
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    release_tag = resolved_release_tag(args.version, repo_root=repo_root)
     source_commit = args.source_commit or default_source_commit(repo_root)
     source_ref = args.source_ref or default_source_ref(repo_root)
 
@@ -289,7 +314,7 @@ def main() -> int:
             stage_bundle(
                 repo_root,
                 staging_root,
-                version=args.version,
+                version=release_tag,
                 channel=channel,
                 github_repo=args.github_repo,
                 update_service_url=args.update_service_url or None,

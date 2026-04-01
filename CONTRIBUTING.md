@@ -24,13 +24,13 @@ Contributions should improve shipped behavior, public clarity, and local operati
 
 - never commit confidential source documents
 - never commit compiled private knowledge bases
-- never commit local planning artifacts intended to stay private
+- never commit private local design artifacts that are not meant for the public repository
 - never paste confidential corpus material into public issues or pull requests
 - keep live `original_doc/`, `knowledge_base/`, `runtime/`, and `adapters/` out of tracked changes
 
 ### Public Docs Standard
 
-- public docs must be current-state, public-context readable, and free of private planning assumptions
+- public docs must be current-state, public-context readable, and free of private design-note assumptions
 - do not write `/docs` as design history, phase notes, or internal constitutional theory
 - if behavior changes, update docs, tests, and canonical surfaces together
 
@@ -79,4 +79,4 @@ Contributions should improve shipped behavior, public clarity, and local operati
 
 ## Large Changes
 
-If you want to introduce a major new capability or change the product boundary, start with a concise planning note and explicit owner alignment before writing a large patch.
+If you want to introduce a major new capability or change the product boundary, start with a concise private design note and explicit owner alignment before writing a large patch.

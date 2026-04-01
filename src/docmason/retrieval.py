@@ -99,11 +99,6 @@ ABSTENTION_MARKERS = (
     "i don't have enough evidence",
     "insufficient evidence",
     "cannot verify",
-    "无法回答",
-    "无法确定",
-    "证据不足",
-    "不能确认",
-    "不能判断",
 )
 GROUNDING_STOPWORDS = {
     "a",
@@ -151,10 +146,6 @@ COMPARATIVE_TOKENS = {
     "different",
     "between",
     "against",
-    "对比",
-    "比较",
-    "差异",
-    "区别",
 }
 
 

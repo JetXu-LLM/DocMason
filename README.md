@@ -15,14 +15,14 @@
   </p>
 </div>
 
-Most workspace AI tools flatten your complex office documents into a single unstructured blob. When you ask a hard question, the answer sounds plausible — but it's impossible to trace back to reality.
+Most workspace AI tools flatten your complex office documents into a single unstructured blob. They can summarize a file or retrieve a quote, but once the question gets hard, it becomes difficult to verify how the answer maps back to the source.
 
-**DocMason** is built around a different thesis: **answers must be traceable**. It creates a local, file-based knowledge base over your private decks, spreadsheets, documents, and PDFs, so your AI agent can reason over multimodal PowerPoint, Word, Excel, and PDF evidence instead of a flattened text blob. It then retrieves real evidence bundles with strict source provenance. A local repo, running as a deep-research AI app on Codex — no hidden backends, no cloud ingestion. Just local files and answers you can actually verify.
+**DocMason** is built around a different thesis: **answers must be traceable**. It creates a local, file-based knowledge base over your private decks, spreadsheets, documents, PDFs, screenshots, and notes, so your AI agent can reason over multimodal evidence instead of a flattened text blob. It is not lightweight doc chat over anonymous chunks; it retrieves real evidence bundles with strict source provenance. A local repo, running as a deep-research AI app on Codex — no hidden backends, no cloud ingestion. Just local files and answers you can actually verify.
 
 ## Start Here
 
 - **[Download DocMason](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip)**: The ready-to-use workspace — everything you need to start with your private files. No `.git`, no test suites, just empty workspace directories.
-- **[See a Public Proof Case](#public-proof-case)**: Try the official ICO + GCS public demo corpus to see what a rigorously traceable answer looks like before using your own files.
+- **[Try the Public Demo Bundle](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-demo-ico-gcs.zip)**: The fastest public proof path if you want to see a rigorously traceable answer before using your own files.
 
 *Native path is Codex on macOS. Claude Code is also well supported.*
 

@@ -2715,7 +2715,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "支持。阿里云短信服务支持 HTTPS API，请使用 HTTPS 端口和官方 endpoint。",
+            "Yes. Aliyun SMS supports HTTPS API access through the documented HTTPS endpoint.",
             encoding="utf-8",
         )
         first_completion = complete_ask_turn(
@@ -2724,7 +2724,7 @@ class AskHardeningTests(unittest.TestCase):
             turn_id=turn["turn_id"],
             inner_workflow_id="grounded-answer",
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="支持 HTTPS API。",
+            response_excerpt="Supports HTTPS API access.",
             question_domain=turn["question_domain"],
             support_basis="external-source-verified",
             support_manifest_sources=[
@@ -2756,7 +2756,7 @@ class AskHardeningTests(unittest.TestCase):
                 answer_state=trace["answer_state"],
                 render_inspection_required=trace["render_inspection_required"],
                 answer_file_path=turn["answer_file_path"],
-                response_excerpt="支持 HTTPS API。",
+                response_excerpt="Supports HTTPS API access.",
                 question_domain=turn["question_domain"],
                 support_basis="external-source-verified",
                 support_manifest_path=first_completion["support_manifest_path"],
@@ -2799,7 +2799,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-support-2"}, clear=False):
             warm = prepare_ask_turn(
                 workspace,
-                question="Aliyun SMS 是否支持 HTTPS 接口？",
+                question="Does Aliyun SMS support HTTPS API access?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -3136,11 +3136,52 @@ class AskHardeningTests(unittest.TestCase):
     def test_agent_semantic_analysis_routes_non_english_questions(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
+        question = "".join(
+            chr(value)
+            for value in (
+                12450,
+                12522,
+                12496,
+                12496,
+                12463,
+                12521,
+                12454,
+                12489,
+                12398,
+                32,
+                83,
+                77,
+                83,
+                32,
+                65,
+                80,
+                73,
+                32,
+                12399,
+                32,
+                72,
+                84,
+                84,
+                80,
+                83,
+                32,
+                12395,
+                23550,
+                24540,
+                12375,
+                12390,
+                12356,
+                12414,
+                12377,
+                12363,
+                65311,
+            )
+        )
 
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-jp"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="アリババクラウドの SMS API は HTTPS に対応していますか？",
+                question=question,
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -3950,6 +3991,149 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(completed["trace_ids"], [trace_report.payload["trace_id"]])
         self.assertEqual(completed["canonical_turn_state"], "committed")
 
+    def test_hidden_ask_finalize_does_not_guess_ambiguous_runtime_artifacts(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say about architecture strategy?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-ambiguous",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        self.assertEqual(opened["status"], "execute")
+        governed_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        evidence_requirements = governed_turn.get("semantic_analysis", {}).get(
+            "evidence_requirements"
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects architecture strategy to implementation.\n",
+            encoding="utf-8",
+        )
+
+        for _ in range(2):
+            retrieve_corpus(
+                workspace,
+                query="campaign planning brief architecture strategy",
+                top=2,
+                graph_hops=0,
+                document_types=None,
+                source_ids=None,
+                include_renders=False,
+                log_context=opened["log_context"],
+                question_domain=governed_turn["question_domain"],
+                evidence_requirements=evidence_requirements,
+            )
+            trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=opened["log_context"],
+            )
+
+        failed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(failed["status"], "blocked")
+        self.assertFalse(failed["user_reply_allowed"])
+        self.assertIn("missing-ask-owned-trace", failed["issue_codes"])
+        quarantined_path = workspace.root / str(failed["noncanonical_answer_file_path"])
+        self.assertTrue(quarantined_path.exists())
+
+    def test_hidden_ask_finalize_accepts_explicit_artifact_ids_for_ambiguous_answer_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say about architecture strategy?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-explicit-artifacts",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        self.assertEqual(opened["status"], "execute")
+        governed_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        evidence_requirements = governed_turn.get("semantic_analysis", {}).get(
+            "evidence_requirements"
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects architecture strategy to implementation.\n",
+            encoding="utf-8",
+        )
+
+        selected_trace: dict[str, object] | None = None
+        for _ in range(2):
+            retrieve_corpus(
+                workspace,
+                query="campaign planning brief architecture strategy",
+                top=2,
+                graph_hops=0,
+                document_types=None,
+                source_ids=None,
+                include_renders=False,
+                log_context=opened["log_context"],
+                question_domain=governed_turn["question_domain"],
+                evidence_requirements=evidence_requirements,
+            )
+            selected_trace = trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=opened["log_context"],
+            )
+
+        assert selected_trace is not None
+        completed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+                "session_ids": [str(selected_trace["session_id"])],
+                "trace_ids": [str(selected_trace["trace_id"])],
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["session_ids"], [selected_trace["session_id"]])
+        self.assertEqual(completed["trace_ids"], [selected_trace["trace_id"]])
+        self.assertEqual(completed["canonical_turn_state"], "committed")
+
     def test_hidden_ask_finalize_exposes_bundle_notice_for_committed_composition_turn(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -3971,6 +4155,8 @@ class AskHardeningTests(unittest.TestCase):
         answer_path.write_text("# Final Composition\n\nSummary.\n", encoding="utf-8")
 
         bundle_path = f"runtime/agent-work/{opened['conversation_id']}/{opened['turn_id']}"
+        selected_session_id = "session-composition-selected"
+        selected_trace_id = "trace-composition-selected"
 
         def fake_complete(*args: object, **kwargs: object) -> dict[str, object]:
             del args
@@ -3995,7 +4181,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch(
             "docmason.host_integration.complete_ask_turn",
             side_effect=fake_complete,
-        ):
+        ) as complete_turn:
             completed = handle_hidden_ask_request(
                 {
                     "action": "finalize",
@@ -4003,11 +4189,15 @@ class AskHardeningTests(unittest.TestCase):
                     "turn_id": opened["turn_id"],
                     "answer_file_path": opened["answer_file_path"],
                     "response_excerpt": "Summary.",
+                    "session_ids": [selected_session_id],
+                    "trace_ids": [selected_trace_id],
                 },
                 paths=workspace,
             )
 
         self.assertEqual(completed["status"], "completed")
+        self.assertEqual(complete_turn.call_args.kwargs["session_ids"], [selected_session_id])
+        self.assertEqual(complete_turn.call_args.kwargs["trace_ids"], [selected_trace_id])
         self.assertEqual(completed["bundle_paths"], [bundle_path])
         self.assertEqual(
             completed["bundle_notice"],

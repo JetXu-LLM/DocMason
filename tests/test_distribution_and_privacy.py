@@ -18,6 +18,7 @@ from unittest import mock
 from docmason.commands import DEGRADED, update_core_workspace
 from docmason.project import WorkspacePaths
 from docmason.release_entry import RELEASE_ENTRY_USER_AGENT, release_entry_snapshot
+from docmason.release_version import read_project_version, release_tag_for_version
 from docmason.update_core import CLEAN_ASSET_NAME, UpdateCoreError, perform_update_core
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -221,6 +222,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
     def test_build_distributions_outputs_clean_and_demo_bundles(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:
             tempdir = Path(tempdir_name)
+            expected_tag = release_tag_for_version(read_project_version(ROOT / "pyproject.toml"))
             result = subprocess.run(
                 [
                     PYTHON,
@@ -230,7 +232,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                     "--output-dir",
                     str(tempdir),
                     "--version",
-                    "test-build",
+                    expected_tag,
                     "--github-repo",
                     "example/DocMason",
                     "--update-service-url",
@@ -238,7 +240,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                     "--source-commit",
                     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
                     "--source-ref",
-                    "refs/tags/test-build",
+                    f"refs/tags/{expected_tag}",
                 ],
                 check=False,
                 capture_output=True,
@@ -287,14 +289,14 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                 clean_manifest["source_commit"],
                 "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             )
-            self.assertEqual(clean_manifest["source_ref"], "refs/tags/test-build")
+            self.assertEqual(clean_manifest["source_ref"], f"refs/tags/{expected_tag}")
 
             with zipfile.ZipFile(demo_zip) as archive:
                 names = set(archive.namelist())
                 manifest = json.loads(archive.read("distribution-manifest.json").decode("utf-8"))
             self.assertEqual(manifest["distribution_channel"], "demo-ico-gcs")
             self.assertEqual(manifest["asset_name"], "DocMason-demo-ico-gcs.zip")
-            self.assertEqual(manifest["source_version"], "test-build")
+            self.assertEqual(manifest["source_version"], expected_tag)
             self.assertEqual(
                 manifest["release_entry"]["distribution_channel"],
                 "demo-ico-gcs",
@@ -303,7 +305,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                 manifest["source_commit"],
                 "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             )
-            self.assertEqual(manifest["source_ref"], "refs/tags/test-build")
+            self.assertEqual(manifest["source_ref"], f"refs/tags/{expected_tag}")
             self.assertIn(".github/copilot-instructions.md", names)
             self.assertNotIn(".github/workflows/release-distributions.yml", names)
             self.assertIn("original_doc/ico/about-the-ico.md", names)
@@ -365,7 +367,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                     "--output-dir",
                     str(output_dir),
                     "--version",
-                    "test-build",
+                    "v0.0.0",
                     "--github-repo",
                     "example/DocMason",
                     "--update-service-url",
@@ -373,7 +375,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                     "--source-commit",
                     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
                     "--source-ref",
-                    "refs/tags/test-build",
+                    "refs/tags/v0.0.0",
                 ],
                 check=False,
                 capture_output=True,
@@ -429,7 +431,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                     "--output-dir",
                     str(output_dir),
                     "--version",
-                    "test-build",
+                    "v0.0.0",
                     "--github-repo",
                     "example/DocMason",
                     "--update-service-url",
@@ -437,7 +439,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                     "--source-commit",
                     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
                     "--source-ref",
-                    "refs/tags/test-build",
+                    "refs/tags/v0.0.0",
                 ],
                 check=False,
                 capture_output=True,
@@ -448,6 +450,28 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             with zipfile.ZipFile(output_dir / "DocMason-clean.zip") as archive:
                 names = set(archive.namelist())
             self.assertNotIn("leak.txt", names)
+
+    def test_build_distributions_rejects_mismatched_release_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            tempdir = Path(tempdir_name)
+            result = subprocess.run(
+                [
+                    PYTHON,
+                    str(ROOT / "scripts" / "build-distributions.py"),
+                    "--repo-root",
+                    str(ROOT),
+                    "--output-dir",
+                    str(tempdir),
+                    "--version",
+                    "v9.9.9",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not match committed project version", result.stderr)
 
     def test_source_repo_release_entry_remains_disabled_by_default(self) -> None:
         snapshot = release_entry_snapshot(WorkspacePaths(root=ROOT))

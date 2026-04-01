@@ -753,6 +753,35 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         fake_uv_installer.chmod(0o755)
 
+        fake_bin_dir = workspace.root / ".fake-bin"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        fake_curl = fake_bin_dir / "curl"
+        fake_curl.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "output=''\n"
+            "url=''\n"
+            "while [ \"$#\" -gt 0 ]; do\n"
+            "  case \"$1\" in\n"
+            "    -o)\n"
+            "      output=\"$2\"\n"
+            "      shift 2\n"
+            "      ;;\n"
+            "    -*)\n"
+            "      shift\n"
+            "      ;;\n"
+            "    *)\n"
+            "      url=\"$1\"\n"
+            "      shift\n"
+            "      ;;\n"
+            "  esac\n"
+            "done\n"
+            "[ \"$url\" = \"https://astral.sh/uv/install.sh\" ]\n"
+            f"cp {shlex.quote(str(fake_uv_installer))} \"$output\"\n",
+            encoding="utf-8",
+        )
+        fake_curl.chmod(0o755)
+
         bad_stub = workspace.root / ".bad-python" / "python3"
         bad_stub.parent.mkdir(parents=True, exist_ok=True)
         bad_stub.write_text(
@@ -768,10 +797,11 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             **os.environ,
             "DOCMASON_BOOTSTRAP_PYTHON": str(bad_stub),
             "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
-            "DOCMASON_BOOTSTRAP_UV_INSTALLER_URL": f"file://{fake_uv_installer}",
+            "DOCMASON_BOOTSTRAP_UV_INSTALLER_URL": "https://astral.sh/uv/install.sh",
             "DOCMASON_SHARED_BOOTSTRAP_CACHE": str(
                 workspace.root / ".shared-bootstrap-cache"
             ),
+            "PATH": str(fake_bin_dir) + os.pathsep + os.environ.get("PATH", ""),
         }
         completed = subprocess.run(
             [str(script_path), "--yes", "--json"],

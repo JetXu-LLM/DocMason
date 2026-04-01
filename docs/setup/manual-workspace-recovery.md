@@ -46,7 +46,7 @@ Preferred manual fallback order:
 - `python3.11`
 
 On macOS, Homebrew Python is acceptable for this fallback path.
-On Linux, use your distribution package manager or an already installed supported Python.
+On a non-native or experimental host path, bring your own already installed supported Python.
 
 ### 3. Run The Repo-Local Prepare Flow
 
@@ -112,8 +112,8 @@ brew install --cask libreoffice-still
   - install LibreOffice from `https://www.libreoffice.org/download/download/`
   - move the app into `/Applications`
 
-- Linux:
-  - install LibreOffice with the distribution package manager or the official packages
+- non-native or experimental host paths:
+  - install a compatible LibreOffice build with your operating system package manager or the official packages
   - ensure `soffice` is on `PATH`
 
 Then rerun:

@@ -7,9 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version string recorded in bundle manifests."
-        required: true
-        default: "manual-build"
+        description: "Optional release tag. When omitted, the workflow uses the tag implied by the committed package version."
+        required: false
       publish_release:
         description: "Publish or update a GitHub release with the generated bundles."
         required: true
@@ -32,9 +31,13 @@ jobs:
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
+          elif [ -n "${{ inputs.version }}" ]; then
             echo "value=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$(python scripts/release-version.py print-tag)" >> "$GITHUB_OUTPUT"
           fi
+      - name: Validate committed release version
+        run: python scripts/release-version.py validate-tag "${{ steps.version.outputs.value }}"
       - name: Build release bundles
         run: |
           python scripts/build-distributions.py \

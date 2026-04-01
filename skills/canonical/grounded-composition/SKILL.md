@@ -70,6 +70,10 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - which source or unit supports each major claim
    - which artifact supports each visual, tabular, or layout-sensitive claim
    - whether the current support set still lacks balance across compared documents
+   - when draft, rewrite, or retrace work creates more than one ask-owned retrieve session or more than one plausible final trace candidate, also keep an explicit artifact ledger:
+     - preserve the selected ask-owned `session_ids` that support the final deliverable
+     - preserve the selected `trace_ids` that bind the answer-file version you intend to commit
+     - return those selected IDs to the main agent for finalize-time use instead of leaving ambiguity to `complete_ask_turn()`
 6. Do not route simple direct factual questions into composition just because the wording is polite or open-ended.
 7. Write the main user-facing result to the canonical answer file under `runtime/answers/`.
    - keep that canonical answer file for the final result only, not process chatter

@@ -24,7 +24,7 @@ project:
 knowledge_base:
   multimodal: true
   primary_artifact_shape: json-plus-markdown
-  bilingual_outputs: true
+  bilingual_outputs: false
   human_readable_views: optional
   preserve_unknown_boundaries: true
   publish_model: single-current-plus-logical-publish-ledger

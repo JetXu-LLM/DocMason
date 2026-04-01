@@ -449,6 +449,12 @@ def finalize_canonical_ask(
             conversation_id=conversation_id,
             turn_id=turn_id,
             inner_workflow_id=str(turn.get("inner_workflow_id") or "grounded-answer"),
+            session_ids=(
+                _string_list(request.get("session_ids")) if "session_ids" in request else None
+            ),
+            trace_ids=(
+                _string_list(request.get("trace_ids")) if "trace_ids" in request else None
+            ),
             answer_file_path=_nonempty_string(request.get("answer_file_path")),
             response_excerpt=_nonempty_string(request.get("response_excerpt")),
             support_basis=_nonempty_string(request.get("support_basis")),

@@ -20,6 +20,9 @@
 # Repo-local generated skill shims
 /.claude/skills
 
+# Repo-local toolchain and bootstrap state
+/.docmason/
+
 # Python environments and packaging artifacts
 /.venv/
 /venv/

@@ -347,16 +347,16 @@ class SourceBuildTextTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        tex_path = workspace.source_dir / "推荐系统基础.tex"
+        tex_path = workspace.source_dir / "recommendation-system-fundamentals.tex"
         tex_path.write_text(
             "\n".join(
                 [
                     "\\documentclass{ctexart}",
                     "",
-                    "\\title{推荐系统基础与工程实践}",
+                    "\\title{Recommendation Systems in Practice}",
                     "\\author{DocMason}",
                     "",
-                    "\\section{引言}",
+                    "\\section{Introduction}",
                 ]
             ),
             encoding="utf-8",
@@ -370,7 +370,7 @@ class SourceBuildTextTests(unittest.TestCase):
         self.assertEqual(plain.units[1].title, "Real Title")
         self.assertEqual(plain.units[2].title, "Status IN PROGRESS")
         self.assertEqual(yaml.source_title, "Project Launch")
-        self.assertEqual(tex.source_title, "推荐系统基础与工程实践")
+        self.assertEqual(tex.source_title, "Recommendation Systems in Practice")
 
     def test_status_and_doctor_report_tiered_input_contract(self) -> None:
         workspace = self.make_workspace()

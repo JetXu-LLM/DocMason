@@ -6,9 +6,11 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+import io
 
 from docmason.ask import complete_ask_turn, prepare_ask_turn
-from docmason.cli import build_parser
+from docmason.cli import build_parser, main as docmason_main
 from docmason.commands import retrieve_knowledge, sync_workspace, trace_knowledge
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import _effective_source_ids_from_reference, run_retrieval_query
@@ -1352,7 +1354,12 @@ class ReferenceResolutionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["trace", "--source-ref", "Platform Review slide 35"])
 
-    def test_cli_parser_accepts_hidden_ask_subcommand(self) -> None:
-        parser = build_parser()
-        args = parser.parse_args(["_ask"])
-        self.assertEqual(args.command, "_ask")
+    def test_cli_dispatches_hidden_ask_subcommand(self) -> None:
+        with (
+            mock.patch("docmason.cli.run_hidden_ask_cli", return_value=0) as hidden_ask,
+            mock.patch("sys.stdin", io.StringIO("")),
+        ):
+            result = docmason_main(["_ask"])
+
+        hidden_ask.assert_called_once_with("")
+        self.assertEqual(result, 0)

@@ -90,4 +90,4 @@ The current `operator-eval` surface is in this bucket.
 - no alternate ordinary natural-language front door
 - no public `docmason answer`
 - no public `docmason eval`
-- no expectation that reading planning notes or implementation code is required before using the product
+- no expectation that reading private design notes or implementation code is required before using the product

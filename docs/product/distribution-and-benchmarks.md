@@ -19,7 +19,7 @@ It does not maintain a public benchmark package, mirrored benchmark datasets, or
 
 Use the source repository when you need full repository context.
 
-- includes code, tests, scripts, `sample_corpus/`, planning, and contributor surfaces
+- includes code, tests, scripts, `sample_corpus/`, and contributor surfaces
 - does not track live private corpus, published KB, or runtime state
 - use this path for issues, pull requests, and maintenance
 

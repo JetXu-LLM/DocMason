@@ -56,7 +56,7 @@ Derived runtime projections remain local read surfaces rather than canonical aut
 
 ## What This Page Does Not Do
 
-This page does not document internal planning stages, private design law, or implementation programs.
-Those belong in `planning/`.
+This page does not document internal design stages, private design law, or implementation programs.
+Those belong in the repository's private design stack.
 
 For operator entry points and workflow boundaries, read [Workflow Overview](../workflows/README.md) and [Execution-Orchestration Reference](../workflows/execution-orchestration.md).

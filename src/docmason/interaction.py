@@ -340,13 +340,6 @@ def _looks_like_constraint_update(text: str) -> bool:
         "wrong",
         "should",
         "must",
-        "强调",
-        "重新考虑",
-        "补充",
-        "修正",
-        "约束",
-        "需要",
-        "应该",
     )
     return any(marker in normalized for marker in markers)
 
@@ -379,7 +372,7 @@ def classify_continuation_type(
 def _relation_type_from_entry(entry: dict[str, Any]) -> str:
     user_text = str(entry.get("user_text", "")).lower()
     continuation_type = entry.get("continuation_type")
-    if any(marker in user_text for marker in ("correct", "incorrect", "修正", "纠正")):
+    if any(marker in user_text for marker in ("correct", "incorrect")):
         return "corrects-source"
     if entry.get("attachment_ids"):
         return "visual-reference-for"
@@ -387,7 +380,7 @@ def _relation_type_from_entry(entry: dict[str, Any]) -> str:
         return "constraint-for"
     if continuation_type == "mixed":
         return "clarifies-source"
-    if any(marker in user_text for marker in ("extend", "additional", "补充", "增加")):
+    if any(marker in user_text for marker in ("extend", "additional")):
         return "extends-source"
     return "derived-from-turn"
 

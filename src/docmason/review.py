@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any
-import uuid
 
 from .control_plane import load_shared_job, load_shared_jobs_index
 from .conversation import (
@@ -42,13 +42,25 @@ def _review_request_stable_summary(summary: dict[str, Any], *, final_status: str
     recent_query_sessions = summary.get("query_sessions", {}).get("recent", [])
     recent_retrieval_traces = summary.get("retrieval_traces", {}).get("recent", [])
     benchmark_candidates = summary.get("benchmark_candidates", {}).get("candidate_cases", [])
+    recent_conversation_count = (
+        len(recent_conversations) if isinstance(recent_conversations, list) else 0
+    )
+    recent_query_session_count = (
+        len(recent_query_sessions) if isinstance(recent_query_sessions, list) else 0
+    )
+    recent_trace_count = (
+        len(recent_retrieval_traces) if isinstance(recent_retrieval_traces, list) else 0
+    )
+    candidate_case_count = (
+        len(benchmark_candidates) if isinstance(benchmark_candidates, list) else 0
+    )
     return (
         "runtime-log-review "
         f"status={final_status}; "
-        f"recent_conversations={len(recent_conversations) if isinstance(recent_conversations, list) else 0}; "
-        f"recent_query_sessions={len(recent_query_sessions) if isinstance(recent_query_sessions, list) else 0}; "
-        f"recent_retrieval_traces={len(recent_retrieval_traces) if isinstance(recent_retrieval_traces, list) else 0}; "
-        f"candidate_cases={len(benchmark_candidates) if isinstance(benchmark_candidates, list) else 0}"
+        f"recent_conversations={recent_conversation_count}; "
+        f"recent_query_sessions={recent_query_session_count}; "
+        f"recent_retrieval_traces={recent_trace_count}; "
+        f"candidate_cases={candidate_case_count}"
     )
 
 
@@ -157,18 +169,20 @@ def record_runtime_review_request(
     inferred_context = _latest_runtime_review_turn(paths)
     request_id = str(uuid.uuid4())
     stable_summary = _review_request_stable_summary(summary, final_status=final_status)
-    effective_conversation_id = (
-        _nonempty_string(conversation_id) or _nonempty_string(inferred_context.get("conversation_id"))
-    )
-    effective_turn_id = _nonempty_string(turn_id) or _nonempty_string(inferred_context.get("turn_id"))
-    effective_run_id = _nonempty_string(run_id) or _nonempty_string(inferred_context.get("run_id"))
-    effective_request_text = (
-        _nonempty_string(request_text) or _nonempty_string(inferred_context.get("request_text"))
-    )
+    inferred_conversation_id = _nonempty_string(inferred_context.get("conversation_id"))
+    inferred_turn_id = _nonempty_string(inferred_context.get("turn_id"))
+    inferred_run_id = _nonempty_string(inferred_context.get("run_id"))
+    inferred_request_text = _nonempty_string(inferred_context.get("request_text"))
+    effective_conversation_id = _nonempty_string(conversation_id) or inferred_conversation_id
+    effective_turn_id = _nonempty_string(turn_id) or inferred_turn_id
+    effective_run_id = _nonempty_string(run_id) or inferred_run_id
+    effective_request_text = _nonempty_string(request_text) or inferred_request_text
     effective_entry_surface = _nonempty_string(entry_surface)
     if effective_entry_surface is None:
         effective_entry_surface = (
-            "ask/runtime-log-review" if effective_turn_id is not None else "workflow/runtime-log-review"
+            "ask/runtime-log-review"
+            if effective_turn_id is not None
+            else "workflow/runtime-log-review"
         )
     consulted_ids = _review_consulted_runtime_ids(summary)
     artifact = {
@@ -690,12 +704,6 @@ def _question_mentions_ambiguity(text: str) -> bool:
         "final negotiated",
         "award decision",
         "exact dependency order",
-        "矛盾",
-        "冲突",
-        "歧义",
-        "最终合同",
-        "最终中标",
-        "精确顺序",
     )
     return any(marker in normalized for marker in markers)
 

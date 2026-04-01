@@ -25,7 +25,7 @@ DocMason currently ships as:
 - local file ownership and clear corpus boundaries
 - published-KB answers when the question depends on workspace content
 - explicit boundaries when setup, sync, approval, or refresh work is still required
-- public docs that explain shipped behavior rather than private planning history
+- public docs that explain shipped behavior rather than private design-history context
 
 ## Current Product Boundaries
 

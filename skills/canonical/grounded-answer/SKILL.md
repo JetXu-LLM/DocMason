@@ -62,6 +62,11 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
    - `docmason trace --source-id <source_id> --json`
    - `docmason trace --answer-file <path> --json`
    - `docmason trace --session-id <session_id> --json`
+   - when the same live turn creates more than one ask-owned retrieve session or more than one plausible final trace candidate, keep an explicit artifact ledger while you work:
+     - preserve the selected ask-owned `session_ids` that support the final answer
+     - preserve the selected `trace_ids` that bind the final answer-file version
+     - return those selected IDs to the main agent for finalize-time use instead of leaving commit-time disambiguation to `complete_ask_turn()`
+   - if the turn produced only one ask-owned retrieve session and one final trace, ordinary automatic hydration remains sufficient
 6. Inspect renders when:
    - the strongest support uses low-confidence extracted text
    - a cited unit has little or no text but does have rendered evidence

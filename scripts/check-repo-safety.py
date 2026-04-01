@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate that live workspace directories stay out of tracked Git content."""
+"""Validate that private local directories stay out of tracked Git content."""
 
 from __future__ import annotations
 
@@ -8,7 +8,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-PROTECTED_TOP_LEVEL = {"original_doc", "knowledge_base", "runtime", "adapters"}
+PROTECTED_TOP_LEVEL = {
+    ".docmason",
+    "adapters",
+    "knowledge_base",
+    "original_doc",
+    "planning",
+    "runtime",
+}
 ALLOWED_TRACKED_FILES = {
     "original_doc/.gitkeep",
     "knowledge_base/.gitkeep",
@@ -67,7 +74,7 @@ def main() -> int:
     if violations:
         mode = "staged" if args.staged_only else "tracked"
         print(
-            f"DocMason safety check failed: found {mode} paths beneath protected workspace "
+            f"DocMason safety check failed: found {mode} paths beneath protected private "
             "directories:",
             file=sys.stderr,
         )

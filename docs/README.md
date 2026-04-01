@@ -13,8 +13,8 @@ Use `docs/` for current public behavior and public operating boundaries:
 - setup, recovery, and privacy guidance
 - architecture notes that help a public reader understand the product
 
-Use `planning/` for private design law, implementation programs, and historical notes.
-Public docs should never require private planning context to make sense.
+Keep private design law, implementation programs, and historical notes in the repository's private design stack.
+Public docs should never require private design-note context to make sense.
 
 ## Recommended Reading Paths
 

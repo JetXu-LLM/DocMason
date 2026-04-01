@@ -33,10 +33,10 @@ CONFIRMATION_KIND_PROMPTS = {
     ),
 }
 AFFIRMATIVE_CONFIRMATIONS = frozenset(
-    {"y", "yes", "ok", "okay", "start", "continue", "是", "好", "开始", "继续", "确认"}
+    {"y", "yes", "ok", "okay", "start", "continue"}
 )
 NEGATIVE_CONFIRMATIONS = frozenset(
-    {"n", "no", "stop", "cancel", "decline", "否", "不", "不要", "取消"}
+    {"n", "no", "stop", "cancel", "decline"}
 )
 SHARED_JOB_STALE_AFTER = timedelta(minutes=10)
 
