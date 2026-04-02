@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: UP045
 """Read the current host execution context for native Codex cold-start gating.
 
 This helper intentionally uses only the Python standard library and Python 3.9
@@ -16,7 +17,7 @@ import sqlite3
 import sys
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 
 def _nonempty_string(value: Any) -> Optional[str]:
@@ -57,7 +58,7 @@ def _normalized_bool(raw_value: Any) -> Optional[bool]:
     return None
 
 
-def _normalized_writable_roots(raw_value: Any) -> List[str]:
+def _normalized_writable_roots(raw_value: Any) -> list[str]:
     if isinstance(raw_value, list):
         return [item for item in raw_value if isinstance(item, str) and item]
     text = _nonempty_string(raw_value)
@@ -73,7 +74,7 @@ def _normalized_writable_roots(raw_value: Any) -> List[str]:
     return [item for item in text.split(os.pathsep) if item]
 
 
-def _detect_agent_surface(env: Dict[str, str]) -> str:
+def _detect_agent_surface(env: dict[str, str]) -> str:
     explicit = _nonempty_string(env.get("DOCMASON_AGENT_SURFACE"))
     if explicit is not None:
         return explicit.lower()
@@ -119,7 +120,7 @@ def _codex_sessions_root(home_dir: Path) -> Path:
     return home_dir / ".codex" / "sessions"
 
 
-def _codex_thread_metadata(thread_id: str, *, state_db_path: Path) -> Dict[str, Any]:
+def _codex_thread_metadata(thread_id: str, *, state_db_path: Path) -> dict[str, Any]:
     if not state_db_path.exists():
         raise FileNotFoundError(state_db_path)
     with closing(sqlite3.connect(state_db_path)) as connection:
@@ -139,7 +140,7 @@ def _codex_thread_metadata(thread_id: str, *, state_db_path: Path) -> Dict[str, 
 def _locate_codex_rollout_path(
     thread_id: str,
     *,
-    metadata: Dict[str, Any],
+    metadata: dict[str, Any],
     sessions_root: Path,
 ) -> Optional[Path]:
     rollout_hint = metadata.get("rollout_path")
@@ -147,14 +148,14 @@ def _locate_codex_rollout_path(
         hinted = Path(rollout_hint).expanduser()
         if hinted.exists():
             return hinted
-    candidates = sorted(sessions_root.glob("**/rollout-*%s.jsonl" % thread_id))
+    candidates = sorted(sessions_root.glob(f"**/rollout-*{thread_id}.jsonl"))
     if candidates:
         return candidates[-1]
     return None
 
 
-def _latest_codex_turn_context(rollout_path: Path) -> Dict[str, Any]:
-    latest: Dict[str, Any] = {}
+def _latest_codex_turn_context(rollout_path: Path) -> dict[str, Any]:
+    latest: dict[str, Any] = {}
     for line in rollout_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -172,7 +173,7 @@ def _latest_codex_turn_context(rollout_path: Path) -> Dict[str, Any]:
     return latest
 
 
-def _context_from_turn_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _context_from_turn_context(payload: dict[str, Any]) -> dict[str, Any]:
     sandbox_payload = payload.get("sandbox_policy")
     return {
         "sandbox_policy": _normalized_sandbox_policy(sandbox_payload),
@@ -190,7 +191,7 @@ def _context_from_turn_context(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _context_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+def _context_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     sandbox_payload = metadata.get("sandbox_policy")
     decoded_payload = None
     if isinstance(sandbox_payload, str) and sandbox_payload.startswith("{"):
@@ -216,7 +217,7 @@ def _context_from_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def read_host_execution_context(env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def read_host_execution_context(env: Optional[dict[str, str]] = None) -> dict[str, Any]:
     current_env = dict(os.environ if env is None else env)
     provider = _detect_agent_surface(current_env)
     explicit_permission_mode = _nonempty_string(current_env.get("DOCMASON_PERMISSION_MODE"))
@@ -237,8 +238,8 @@ def read_host_execution_context(env: Optional[Dict[str, str]] = None) -> Dict[st
         or current_env.get("DOCMASON_CODEX_WRITABLE_ROOTS")
     )
 
-    metadata: Dict[str, Any] = {}
-    rollout_context: Dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
+    rollout_context: dict[str, Any] = {}
     context_source = "env-override" if (
         explicit_permission_mode is not None
         or explicit_sandbox_policy is not None
@@ -316,7 +317,7 @@ def read_host_execution_context(env: Optional[Dict[str, str]] = None) -> Dict[st
     }
 
 
-def _emit_shell(payload: Dict[str, Any]) -> int:
+def _emit_shell(payload: dict[str, Any]) -> int:
     for key in sorted(payload):
         value = payload[key]
         variable_name = "DOCMASON_HOST_" + key.upper()
@@ -328,11 +329,11 @@ def _emit_shell(payload: Dict[str, Any]) -> int:
             rendered = json.dumps(value, sort_keys=True)
         else:
             rendered = str(value)
-        sys.stdout.write("%s=%s\n" % (variable_name, shlex.quote(rendered)))
+        sys.stdout.write(f"{variable_name}={shlex.quote(rendered)}\n")
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--format",

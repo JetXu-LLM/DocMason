@@ -509,8 +509,12 @@ def finalize_canonical_ask(
             "primary_issue_code": "illegal-finalize-override",
             "issue_codes": ["illegal-finalize-override"],
         }
-    explicit_session_ids = _string_list(request.get("session_ids")) if "session_ids" in request else None
-    explicit_trace_ids = _string_list(request.get("trace_ids")) if "trace_ids" in request else None
+    explicit_session_ids = (
+        _string_list(request.get("session_ids")) if "session_ids" in request else None
+    )
+    explicit_trace_ids = (
+        _string_list(request.get("trace_ids")) if "trace_ids" in request else None
+    )
     inner_workflow_id = str(turn.get("inner_workflow_id") or "grounded-answer")
     requested_answer_file_path = _nonempty_string(request.get("answer_file_path"))
     requested_response_excerpt = _nonempty_string(request.get("response_excerpt"))

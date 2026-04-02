@@ -1255,7 +1255,9 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.seed_active_thread_turn(workspace, front_door_state="canonical-ask")
 
         answer_path = workspace.answers_dir / "thread-operator" / "turn-001.md"
-        answer_path.write_text("The planning brief connects the project outline to implementation.\n")
+        answer_path.write_text(
+            "The planning brief connects the project outline to implementation.\n"
+        )
 
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
             report = trace_knowledge(answer_file=str(answer_path), top=2, paths=workspace)
@@ -1276,7 +1278,9 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.publish_seeded_corpus(workspace)
         self.seed_active_thread_turn(workspace, front_door_state="canonical-ask")
         answer_path = workspace.answers_dir / "thread-operator" / "turn-001.md"
-        answer_path.write_text("The planning brief connects the project outline to implementation.\n")
+        answer_path.write_text(
+            "The planning brief connects the project outline to implementation.\n"
+        )
 
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
             answer_trace_report = trace_knowledge(

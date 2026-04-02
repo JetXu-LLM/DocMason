@@ -1351,8 +1351,14 @@ def build_pdf_source(
         units=units,
         page_texts=page_texts,
     )
+    raw_phase_three_unit_updates = phase_three.get("unit_updates")
+    phase_three_unit_updates: dict[str, Any] = (
+        raw_phase_three_unit_updates
+        if isinstance(raw_phase_three_unit_updates, dict)
+        else {}
+    )
     for unit in units:
-        unit_update = phase_three["unit_updates"].get(str(unit.get("unit_id")), {})
+        unit_update = phase_three_unit_updates.get(str(unit.get("unit_id")), {})
         if isinstance(unit_update, dict):
             unit.update(unit_update)
     materialize_focus_render_assets(source_dir, evidence_manifest={"units": units})
@@ -1506,8 +1512,14 @@ def build_pptx_source(
             "unit_updates": {},
         }
     )
+    raw_phase_three_unit_updates = phase_three.get("unit_updates")
+    phase_three_unit_updates: dict[str, Any] = (
+        raw_phase_three_unit_updates
+        if isinstance(raw_phase_three_unit_updates, dict)
+        else {}
+    )
     for unit in units:
-        unit_update = phase_three["unit_updates"].get(str(unit.get("unit_id")), {})
+        unit_update = phase_three_unit_updates.get(str(unit.get("unit_id")), {})
         if isinstance(unit_update, dict):
             unit.update(unit_update)
     materialize_focus_render_assets(source_dir, evidence_manifest={"units": units})

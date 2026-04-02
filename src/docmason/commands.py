@@ -1940,8 +1940,8 @@ def prepare_workspace(
             confirmation_prompt=str(prepare_host_access["host_access_guidance"]),
             confirmation_reason="; ".join(prepare_host_access["host_access_reasons"]),
         )
-        prepare_shared_job = prepare_job_info["manifest"]
-        confirmation_payload: dict[str, Any] = {
+        host_access_shared_job = prepare_job_info["manifest"]
+        host_access_confirmation_payload: dict[str, Any] = {
             "status": ACTION_REQUIRED,
             "prepare_status": "awaiting-confirmation",
             "actions_performed": actions_performed,
@@ -1956,7 +1956,7 @@ def prepare_workspace(
                 "host_execution": host_execution,
             },
             "control_plane": shared_job_control_plane_payload(
-                prepare_shared_job,
+                host_access_shared_job,
                 next_command=next_command,
             ),
             "workspace_runtime_ready": workspace_runtime_ready,
@@ -1980,7 +1980,7 @@ def prepare_workspace(
             str(prepare_host_access["host_access_guidance"]),
             f"Next step: {next_command}",
         ]
-        return make_report(ACTION_REQUIRED, confirmation_payload, lines)
+        return make_report(ACTION_REQUIRED, host_access_confirmation_payload, lines)
 
     if uv_binary is None:
         should_attempt_uv_install = bool(assume_yes)
