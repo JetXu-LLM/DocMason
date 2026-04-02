@@ -57,7 +57,7 @@ DocMason is built for **deep research** over your real work files — where ever
 
 ## Two Easy Ways to Start
 
-![Two ways to reach your first answer](docs/product/readme-first-minute-flow.svg)
+![Two ways to reach your first answer](./docs/product/readme-first-minute-flow.svg)
 
 - **Path A: Start Small**
   Drop a handful of work files (`.pptx`, `.docx`, `.xlsx`, PDFs) into the `DocMason/original_doc/` folder. Open the DocMason folder in Codex, and ask your question naturally. DocMason intelligently guides you through environment setup and quietly builds the knowledge base in the background — just approve when prompted. After that, you can keep adding or revising files inside `original_doc/`; on the native path, DocMason can quietly and incrementally sync the published knowledge base instead of forcing a full restart.
