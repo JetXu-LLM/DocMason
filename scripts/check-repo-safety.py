@@ -50,6 +50,22 @@ def git_paths(repo_root: Path, command: list[str]) -> list[str]:
     return [item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
 
 
+def inside_git_checkout(repo_root: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Git is required to inspect tracked repository paths.") from exc
+    except subprocess.CalledProcessError:
+        return False
+    return result.stdout.strip() == "true"
+
+
 def tracked_or_staged_paths(repo_root: Path, staged_only: bool) -> list[str]:
     if staged_only:
         return git_paths(repo_root, ["git", "diff", "--cached", "--name-only", "-z"])
@@ -70,6 +86,17 @@ def validate_paths(paths: list[str]) -> list[str]:
 def main() -> int:
     args = parse_args()
     repo_root = args.repo_root.resolve()
+
+    try:
+        git_checkout = inside_git_checkout(repo_root)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if not git_checkout:
+        print("DocMason safety check skipped: repository root is not a Git checkout.")
+        return 0
+
     violations = validate_paths(tracked_or_staged_paths(repo_root, args.staged_only))
     if violations:
         mode = "staged" if args.staged_only else "tracked"

@@ -85,6 +85,7 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
      - segment `semantic_supports`
      - any overlay `covered_slots`, `blocked_slots`, and consumed render inputs when present
      - render refs, page spans, and region boxes when present
+   - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; hidden finalize can safely reuse the latest same-turn selected ledger for an unchanged answer file, but explicit selected IDs remain the preferred handoff, and if finalize later blocks on artifact settlement only, continue from that same file version instead of regenerating identical text
 10. Emit one of these final answer states:
    - `grounded`
    - `partially-grounded`

@@ -303,6 +303,12 @@ class FoundationAndContractTests(unittest.TestCase):
             ask_skill,
         )
         self.assertIn("keep one concise `route_reason`", ask_skill)
+        self.assertIn("`question_class` chooses workflow shape", ask_skill)
+        self.assertIn("`question_domain` chooses evidence basis", ask_skill)
+        self.assertIn(
+            "setting it merely because `question_class = composition`",
+            ask_skill,
+        )
         self.assertIn("route to `knowledge-base-sync`", ask_skill)
         self.assertIn("native ledger", ask_skill)
         self.assertNotIn("default first-contact entry surface", ask_skill)

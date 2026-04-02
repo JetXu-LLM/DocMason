@@ -1912,7 +1912,77 @@ class AskHardeningTests(unittest.TestCase):
             )["turns"][0]["status"],
             "waiting-shared-job",
         )
+        self.assertIsNone(transitioned.get("primary_issue_code"))
+        self.assertEqual(transitioned.get("issue_codes"), [])
         self.assertFalse((workspace.runs_dir / turn["run_id"] / "commit.json").exists())
+
+    def test_complete_ask_turn_clears_stale_issue_codes_when_lane_c_refresh_begins(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-lane-c-clear"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the scanned workflow page show?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                    evidence_requirements={
+                        "prefer_published_artifacts": True,
+                        "preferred_channels": ["render", "media"],
+                        "inspection_scope": "unit",
+                    },
+                ),
+            )
+
+        update_conversation_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            updates={
+                "primary_issue_code": "missing-ask-owned-trace",
+                "issue_codes": ["missing-ask-owned-trace"],
+                "noncanonical_answer_file_path": "runtime/agent-work/demo/noncanonical-answer.md",
+            },
+        )
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The scanned workflow page appears to show a process diagram, but the current published artifacts are insufficient for a reliable semantic answer.",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+
+        transitioned = complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            session_ids=[trace["session_id"]],
+            trace_ids=[trace["trace_id"]],
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="The scanned workflow page needs a governed multimodal refresh before a final answer.",
+            status="answered",
+        )
+
+        self.assertEqual(transitioned["status"], "waiting-shared-job")
+        self.assertIsNone(transitioned.get("primary_issue_code"))
+        self.assertEqual(transitioned.get("issue_codes"), [])
+        refreshed_turn = load_turn_record(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+        )
+        self.assertIsNone(refreshed_turn.get("primary_issue_code"))
+        self.assertEqual(refreshed_turn.get("issue_codes"), [])
+        self.assertIsNone(refreshed_turn.get("noncanonical_answer_file_path"))
 
     def test_workspace_corpus_warm_start_requires_exact_corpus_signature_match(self) -> None:
         workspace = self.make_workspace()
@@ -3316,6 +3386,41 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(turn["host_provider"], "codex")
         self.assertEqual(turn["host_thread_ref"], "thread-hidden-boundary")
 
+    def test_hidden_ask_open_exposes_normalized_routing_summary(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        payload = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "Compare the campaign planning brief with the evaluation plan.",
+                "semantic_analysis": self.semantic_analysis(
+                    question_class="composition",
+                    question_domain="workspace-corpus",
+                    route_reason=(
+                        "The user wants a comparison work product grounded in the "
+                        "published workspace materials."
+                    ),
+                ),
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-routing-summary",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(payload["status"], "execute")
+        self.assertEqual(payload["question_class"], "composition")
+        self.assertEqual(payload["question_domain"], "workspace-corpus")
+        self.assertEqual(payload["analysis_origin"], "agent-supplied")
+        self.assertEqual(
+            payload["route_reason"],
+            "The user wants a comparison work product grounded in the published workspace materials.",
+        )
+
     def test_hidden_ask_open_returns_structured_error_payload_on_internal_failure(self) -> None:
         workspace = self.make_workspace()
 
@@ -3371,7 +3476,9 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(payload["primary_issue_code"], "hidden-ask-open-failed")
         self.assertIn("cli exploded", payload["detail"])
 
-    def test_hidden_ask_finalize_quarantines_noncanonical_answer_file(self) -> None:
+    def test_hidden_ask_finalize_snapshots_noncanonical_answer_file_without_removing_draft(
+        self,
+    ) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.create_pdf(workspace.source_dir / "a.pdf")
@@ -3401,21 +3508,26 @@ class AskHardeningTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        failed = handle_hidden_ask_request(
-            {
-                "action": "finalize",
-                "conversation_id": opened["conversation_id"],
-                "turn_id": opened["turn_id"],
-                "answer_file_path": opened["answer_file_path"],
-            },
-            paths=workspace,
-        )
+        with mock.patch(
+            "docmason.host_integration.complete_ask_turn",
+            side_effect=ValueError("synthetic finalize failure"),
+        ):
+            failed = handle_hidden_ask_request(
+                {
+                    "action": "finalize",
+                    "conversation_id": opened["conversation_id"],
+                    "turn_id": opened["turn_id"],
+                    "answer_file_path": opened["answer_file_path"],
+                },
+                paths=workspace,
+            )
 
         self.assertEqual(failed["status"], "blocked")
         self.assertFalse(failed["user_reply_allowed"])
+        self.assertEqual(failed["answer_file_path"], opened["answer_file_path"])
         quarantined_path = workspace.root / str(failed["noncanonical_answer_file_path"])
         self.assertTrue(quarantined_path.exists())
-        self.assertFalse(answer_path.exists())
+        self.assertTrue(answer_path.exists())
         turn = load_turn_record(
             workspace,
             conversation_id=str(opened["conversation_id"]),
@@ -3425,6 +3537,95 @@ class AskHardeningTests(unittest.TestCase):
             turn["noncanonical_answer_file_path"],
             failed["noncanonical_answer_file_path"],
         )
+
+    def test_hidden_ask_finalize_autotraces_missing_public_trace(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-autotrace",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects strategy to implementation.\n",
+            encoding="utf-8",
+        )
+
+        completed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The planning brief connects strategy to implementation.",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(len(completed["session_ids"]), 1)
+        self.assertEqual(len(completed["trace_ids"]), 1)
+        self.assertEqual(completed["canonical_turn_state"], "committed")
+        self.assertTrue(answer_path.exists())
+
+    def test_hidden_ask_finalize_blocks_cleanly_when_autotrace_recovery_fails(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-autotrace-fail",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects strategy to implementation.\n",
+            encoding="utf-8",
+        )
+
+        with mock.patch(
+            "docmason.host_integration.trace_answer_file",
+            side_effect=RuntimeError("trace exploded"),
+        ):
+            failed = handle_hidden_ask_request(
+                {
+                    "action": "finalize",
+                    "conversation_id": opened["conversation_id"],
+                    "turn_id": opened["turn_id"],
+                    "answer_file_path": opened["answer_file_path"],
+                    "response_excerpt": "The planning brief connects strategy to implementation.",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(failed["status"], "blocked")
+        self.assertFalse(failed["user_reply_allowed"])
+        self.assertIn("missing-ask-owned-trace", failed["issue_codes"])
+        self.assertIn("autotrace-recovery-failed", failed["detail"])
+        self.assertEqual(failed["answer_file_path"], opened["answer_file_path"])
+        self.assertTrue(answer_path.exists())
+        quarantined_path = workspace.root / str(failed["noncanonical_answer_file_path"])
+        self.assertTrue(quarantined_path.exists())
 
     def test_hidden_ask_finalize_rejects_second_finalize_after_commit(self) -> None:
         workspace = self.make_workspace()
@@ -3829,6 +4030,9 @@ class AskHardeningTests(unittest.TestCase):
             },
             paths=workspace,
         )
+        self.assertEqual(opened["question_class"], "answer")
+        self.assertEqual(opened["analysis_origin"], "repair-backstop")
+        self.assertIn("minimal repair/backstop defaults", str(opened["route_reason"]))
 
         def fake_complete(*args: object, **kwargs: object) -> dict[str, object]:
             del args
@@ -3991,7 +4195,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(completed["trace_ids"], [trace_report.payload["trace_id"]])
         self.assertEqual(completed["canonical_turn_state"], "committed")
 
-    def test_hidden_ask_finalize_does_not_guess_ambiguous_runtime_artifacts(self) -> None:
+    def test_hidden_ask_finalize_does_not_guess_ambiguous_runtime_artifacts_without_selected_ledger(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.create_pdf(workspace.source_dir / "a.pdf")
@@ -4044,6 +4248,16 @@ class AskHardeningTests(unittest.TestCase):
                 log_context=opened["log_context"],
             )
 
+        update_conversation_turn(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+            updates={
+                "selected_session_ids": [],
+                "selected_trace_ids": [],
+            },
+        )
+
         failed = handle_hidden_ask_request(
             {
                 "action": "finalize",
@@ -4058,8 +4272,169 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(failed["status"], "blocked")
         self.assertFalse(failed["user_reply_allowed"])
         self.assertIn("missing-ask-owned-trace", failed["issue_codes"])
+        self.assertEqual(failed["answer_file_path"], opened["answer_file_path"])
+        self.assertTrue(answer_path.exists())
         quarantined_path = workspace.root / str(failed["noncanonical_answer_file_path"])
         self.assertTrue(quarantined_path.exists())
+
+    def test_hidden_ask_finalize_reuses_persisted_selected_ledger_for_ambiguous_runtime_artifacts(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say about architecture strategy?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-selected-ledger",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        self.assertEqual(opened["status"], "execute")
+        governed_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        evidence_requirements = governed_turn.get("semantic_analysis", {}).get(
+            "evidence_requirements"
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects architecture strategy to implementation.\n",
+            encoding="utf-8",
+        )
+
+        selected_trace: dict[str, object] | None = None
+        for _ in range(2):
+            retrieve_corpus(
+                workspace,
+                query="campaign planning brief architecture strategy",
+                top=2,
+                graph_hops=0,
+                document_types=None,
+                source_ids=None,
+                include_renders=False,
+                log_context=opened["log_context"],
+                question_domain=governed_turn["question_domain"],
+                evidence_requirements=evidence_requirements,
+            )
+            selected_trace = trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=opened["log_context"],
+            )
+
+        assert selected_trace is not None
+        refreshed_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertEqual(
+            refreshed_turn["selected_session_ids"],
+            [selected_trace["session_id"]],
+        )
+        self.assertEqual(
+            refreshed_turn["selected_trace_ids"],
+            [selected_trace["trace_id"]],
+        )
+
+        completed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["session_ids"], [selected_trace["session_id"]])
+        self.assertEqual(completed["trace_ids"], [selected_trace["trace_id"]])
+        self.assertEqual(completed["canonical_turn_state"], "committed")
+
+    def test_hidden_ask_finalize_ignores_stale_selected_ledger_after_answer_change(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say about architecture strategy?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-stale-selected-ledger",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        self.assertEqual(opened["status"], "execute")
+        governed_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        evidence_requirements = governed_turn.get("semantic_analysis", {}).get(
+            "evidence_requirements"
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects architecture strategy to implementation.\n",
+            encoding="utf-8",
+        )
+
+        for _ in range(2):
+            retrieve_corpus(
+                workspace,
+                query="campaign planning brief architecture strategy",
+                top=2,
+                graph_hops=0,
+                document_types=None,
+                source_ids=None,
+                include_renders=False,
+                log_context=opened["log_context"],
+                question_domain=governed_turn["question_domain"],
+                evidence_requirements=evidence_requirements,
+            )
+            trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=opened["log_context"],
+            )
+
+        answer_path.write_text(
+            "The final answer changed after the last trace and needs retracing.\n",
+            encoding="utf-8",
+        )
+
+        failed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The final answer changed after the last trace and needs retracing.",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(failed["status"], "blocked")
+        self.assertIn("missing-ask-owned-trace", failed["issue_codes"])
+        self.assertEqual(failed["answer_file_path"], opened["answer_file_path"])
+        self.assertTrue(answer_path.exists())
 
     def test_hidden_ask_finalize_accepts_explicit_artifact_ids_for_ambiguous_answer_turn(self) -> None:
         workspace = self.make_workspace()
@@ -4133,6 +4508,110 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(completed["session_ids"], [selected_trace["session_id"]])
         self.assertEqual(completed["trace_ids"], [selected_trace["trace_id"]])
         self.assertEqual(completed["canonical_turn_state"], "committed")
+
+    def test_hidden_ask_finalize_reuses_same_answer_file_after_ambiguous_block(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the campaign planning brief say about architecture strategy?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-ambiguous-retry",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        self.assertEqual(opened["status"], "execute")
+        governed_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        evidence_requirements = governed_turn.get("semantic_analysis", {}).get(
+            "evidence_requirements"
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects architecture strategy to implementation.\n",
+            encoding="utf-8",
+        )
+
+        selected_trace: dict[str, object] | None = None
+        for _ in range(2):
+            retrieve_corpus(
+                workspace,
+                query="campaign planning brief architecture strategy",
+                top=2,
+                graph_hops=0,
+                document_types=None,
+                source_ids=None,
+                include_renders=False,
+                log_context=opened["log_context"],
+                question_domain=governed_turn["question_domain"],
+                evidence_requirements=evidence_requirements,
+            )
+            selected_trace = trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=opened["log_context"],
+            )
+
+        assert selected_trace is not None
+        update_conversation_turn(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+            updates={
+                "selected_session_ids": [],
+                "selected_trace_ids": [],
+            },
+        )
+        blocked = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["answer_file_path"], opened["answer_file_path"])
+        self.assertTrue(answer_path.exists())
+        self.assertTrue(
+            (workspace.root / str(blocked["noncanonical_answer_file_path"])).exists()
+        )
+
+        completed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+                "session_ids": [str(selected_trace["session_id"])],
+                "trace_ids": [str(selected_trace["trace_id"])],
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertTrue(answer_path.exists())
+        refreshed_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertIsNone(refreshed_turn.get("noncanonical_answer_file_path"))
 
     def test_hidden_ask_finalize_exposes_bundle_notice_for_committed_composition_turn(self) -> None:
         workspace = self.make_workspace()

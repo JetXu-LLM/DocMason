@@ -435,6 +435,14 @@ def _governance_invalidation_reasons(
         reasons.append("confirmation-kind-changed")
     if current_basis["confirmation_reason"] != cached_state.get("confirmation_reason"):
         reasons.append("confirmation-reason-changed")
+    if (
+        current_basis["turn_status"] == "awaiting-confirmation"
+        and current_basis["confirmation_kind"] == "host-access-upgrade"
+    ):
+        from .conversation import current_host_execution_context
+
+        if current_host_execution_context().get("full_machine_access"):
+            reasons.append("host-access-upgraded")
     return list(dict.fromkeys(reasons))
 
 
@@ -472,6 +480,64 @@ def _resolved_log_artifact_ids(
     if len(discovered_ids) == 1:
         return discovered_ids
     return []
+
+
+def _resolved_answer_path(paths: WorkspacePaths, answer_file_path: Any) -> Path | None:
+    if not isinstance(answer_file_path, str) or not answer_file_path:
+        return None
+    answer_path = Path(answer_file_path)
+    if not answer_path.is_absolute():
+        answer_path = paths.root / answer_path
+    return answer_path
+
+
+def _answer_text_digest(answer_text: str) -> str:
+    return hashlib.sha256(answer_text.strip().encode("utf-8")).hexdigest()
+
+
+def _selected_turn_log_artifact_ids(
+    paths: WorkspacePaths,
+    *,
+    current_turn: dict[str, Any],
+    answer_file_path: str | None,
+    requested_support_basis: str | None,
+) -> tuple[list[str], list[str]]:
+    if requested_support_basis in {
+        "external-source-verified",
+        "governed-boundary",
+        "model-knowledge",
+    }:
+        return [], []
+    selected_trace_ids = _resolved_string_list(current_turn.get("selected_trace_ids"))
+    if not selected_trace_ids:
+        return [], []
+    latest_selected_trace = _latest_trace_record(paths, selected_trace_ids)
+    if not latest_selected_trace:
+        return [], []
+    current_answer_path = _resolved_answer_path(
+        paths,
+        answer_file_path or current_turn.get("answer_file_path"),
+    )
+    selected_answer_path = _resolved_answer_path(
+        paths,
+        latest_selected_trace.get("answer_file_path"),
+    )
+    if current_answer_path is None or selected_answer_path is None:
+        return [], []
+    if current_answer_path != selected_answer_path or not current_answer_path.exists():
+        return [], []
+    selected_answer_text = latest_selected_trace.get("answer_text")
+    if not isinstance(selected_answer_text, str):
+        return [], []
+    current_answer_digest = _answer_text_digest(
+        current_answer_path.read_text(encoding="utf-8")
+    )
+    if current_answer_digest != _answer_text_digest(selected_answer_text):
+        return [], []
+    selected_session_id = latest_selected_trace.get("session_id")
+    if isinstance(selected_session_id, str) and selected_session_id:
+        return [selected_session_id], selected_trace_ids
+    return _resolved_string_list(current_turn.get("selected_session_ids")), selected_trace_ids
 
 
 def _preview_source_changes(
@@ -699,6 +765,14 @@ def _auto_prepare_summary(report: Any) -> dict[str, Any]:
         "package_manager": environment.get("package_manager"),
         "launcher_delegated": bool(payload.get("launcher_delegated")),
         "launcher_command": payload.get("launcher_command"),
+        "host_access_required": bool(payload.get("host_access_required")),
+        "host_access_guidance": payload.get("host_access_guidance"),
+        "host_access_reasons": list(payload.get("host_access_reasons", [])),
+        "host_execution": dict(payload.get("host_execution", {}))
+        if isinstance(payload.get("host_execution"), dict)
+        else {},
+        "workspace_write_network_access": payload.get("workspace_write_network_access"),
+        "sandbox_writable_roots": list(payload.get("sandbox_writable_roots", [])),
         "manual_recovery_doc": (
             payload.get("manual_recovery_doc")
             or environment.get("manual_recovery_doc")
@@ -788,6 +862,32 @@ def _ensure_workspace_environment(
         return True, cached, False, None, None
 
     reason = str(cached.get("detail") or "The cached bootstrap marker is missing or invalid.")
+    launcher_first = str(cached.get("reason") or "") in {
+        "missing-bootstrap-state",
+        "missing-venv",
+        "broken-venv-symlink",
+        "workspace-root-drift",
+    }
+    if launcher_first:
+        record_run_event_if_present(
+            paths,
+            run_id=run_id,
+            stage="prepare",
+            event_type="auto-prepare-launcher-first",
+            payload={
+                "reason": cached.get("reason"),
+                "detail": cached.get("detail"),
+                "launcher": "./scripts/bootstrap-workspace.sh",
+            },
+        )
+        launcher_report = bootstrap_workspace_with_launcher(paths)
+        summary = _auto_prepare_summary(launcher_report)
+        refreshed = cached_bootstrap_readiness(
+            paths,
+            require_sync_capability=require_sync_capability,
+        )
+        return bool(refreshed["ready"]), refreshed, True, reason, summary
+
     report = _prepare_with_optional_owner(
         paths,
         assume_yes=True,
@@ -904,8 +1004,13 @@ def quarantine_noncanonical_answer_file(
     *,
     conversation_id: str,
     turn_id: str,
+    retain_canonical: bool = False,
 ) -> str | None:
-    """Move one non-canonical answer draft out of the canonical answer path."""
+    """Snapshot one non-canonical answer draft under agent work.
+
+    When ``retain_canonical`` is true, keep the live canonical draft in place so
+    the same turn can continue without rewriting identical answer text.
+    """
     turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
     if isinstance(turn.get("committed_run_id"), str) and turn.get("committed_run_id"):
         return None
@@ -927,7 +1032,10 @@ def quarantine_noncanonical_answer_file(
         paths.agent_work_dir / conversation_id / turn_id / "noncanonical-answer.md"
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(answer_path), str(destination))
+    if retain_canonical:
+        shutil.copy2(str(answer_path), str(destination))
+    else:
+        shutil.move(str(answer_path), str(destination))
     relative_destination = str(destination.relative_to(paths.root))
     update_conversation_turn(
         paths,
@@ -1528,6 +1636,12 @@ def _maybe_begin_lane_c_before_commit(
         updates={
             "session_ids": _resolved_string_list(effective_turn_snapshot.get("session_ids")),
             "trace_ids": _resolved_string_list(effective_turn_snapshot.get("trace_ids")),
+            "selected_session_ids": _resolved_string_list(
+                effective_turn_snapshot.get("session_ids")
+            ),
+            "selected_trace_ids": _resolved_string_list(
+                effective_turn_snapshot.get("trace_ids")
+            ),
             "question_domain": effective_turn_snapshot.get("question_domain"),
             "support_basis": effective_turn_snapshot.get("support_basis"),
             "support_manifest_path": effective_turn_snapshot.get("support_manifest_path"),
@@ -1546,6 +1660,9 @@ def _maybe_begin_lane_c_before_commit(
             "reference_resolution_summary": effective_turn_snapshot.get(
                 "reference_resolution_summary"
             ),
+            "primary_issue_code": None,
+            "issue_codes": [],
+            "noncanonical_answer_file_path": None,
             "source_escalation_required": effective_turn_snapshot.get(
                 "source_escalation_required"
             ),
@@ -2514,6 +2631,28 @@ def complete_ask_turn(
         }
     resolved_front_door_state = normalize_front_door_state(current_turn.get("front_door_state"))
     provisional_answer_file_path = answer_file_path or current_turn.get("answer_file_path")
+    requested_support_basis = (
+        str(support_basis)
+        if isinstance(support_basis, str) and support_basis
+        else (
+            str(current_turn.get("support_basis"))
+            if (
+                isinstance(current_turn.get("support_basis"), str)
+                and current_turn.get("support_basis")
+            )
+            else None
+        )
+    )
+    selected_session_ids, selected_trace_ids = _selected_turn_log_artifact_ids(
+        paths,
+        current_turn=current_turn,
+        answer_file_path=(
+            provisional_answer_file_path
+            if isinstance(provisional_answer_file_path, str)
+            else None
+        ),
+        requested_support_basis=requested_support_basis,
+    )
     discovered_session_ids, discovered_trace_ids = discover_turn_artifact_candidates(
         paths,
         conversation_id=conversation_id,
@@ -2528,12 +2667,12 @@ def complete_ask_turn(
     )
     resolved_session_ids = _resolved_log_artifact_ids(
         explicit_ids=session_ids,
-        current_ids=current_turn.get("session_ids"),
+        current_ids=selected_session_ids or current_turn.get("session_ids"),
         discovered_ids=discovered_session_ids,
     )
     effective_trace_ids = _resolved_log_artifact_ids(
         explicit_ids=trace_ids,
-        current_ids=current_turn.get("trace_ids"),
+        current_ids=selected_trace_ids or current_turn.get("trace_ids"),
         discovered_ids=discovered_trace_ids,
     )
     latest_trace_payload = _latest_trace_record(paths, effective_trace_ids)
@@ -2906,6 +3045,8 @@ def complete_ask_turn(
             "inner_workflow_id": inner_workflow_id,
             "session_ids": resolved_session_ids,
             "trace_ids": effective_trace_ids,
+            "selected_session_ids": resolved_session_ids,
+            "selected_trace_ids": effective_trace_ids,
             "freshness_notice": None,
             "answer_state": effective_answer_state,
             "render_inspection_required": resolved_render_inspection_required,
@@ -2926,6 +3067,7 @@ def complete_ask_turn(
             "mixed_support_explainable": resolved_mixed_support_explainable,
             "primary_issue_code": admissibility_gate_result.get("primary_issue_code"),
             "issue_codes": admissibility_gate_result.get("issue_codes", []),
+            "noncanonical_answer_file_path": None,
             "source_escalation_required": resolved_source_escalation_required,
             "source_escalation_reason": resolved_source_escalation_reason,
             "auto_sync_triggered": resolved_auto_sync_triggered,

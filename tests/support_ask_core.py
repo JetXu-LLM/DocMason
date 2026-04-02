@@ -350,31 +350,29 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
     def test_prepare_ask_turn_auto_prepares_workspace_before_auto_sync(self) -> None:
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")
-        prepare_calls: list[dict[str, object]] = []
 
-        def fake_prepare(*args: object, **kwargs: object) -> object:
-            del args
-            prepare_calls.append(dict(kwargs))
+        def fake_launcher(_paths: WorkspacePaths) -> CommandReport:
             seed_self_contained_bootstrap_state(
                 workspace,
                 prepared_at="2026-03-21T00:00:00Z",
             )
-            return type(
-                "PrepareReport",
-                (),
+            return CommandReport(
+                0,
                 {
-                    "payload": {
-                        "status": "ready",
-                        "actions_performed": ["Created .venv."],
-                        "actions_skipped": [],
-                        "next_steps": [],
-                        "environment": {
-                            "package_manager": "uv",
-                            "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-                        },
-                    }
+                    "status": "ready",
+                    "detail": "Launcher prepared the workspace successfully.",
+                    "actions_performed": ["Created .venv."],
+                    "actions_skipped": [],
+                    "next_steps": [],
+                    "launcher_delegated": True,
+                    "launcher_command": "./scripts/bootstrap-workspace.sh --yes --json",
+                    "environment": {
+                        "package_manager": "uv",
+                        "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                    },
                 },
-            )()
+                [],
+            )
 
         def fake_sync(_paths: WorkspacePaths, assume_yes: bool = False) -> CommandReport:
             del assume_yes
@@ -412,7 +410,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             )
 
         with (
-            mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare),
+            mock.patch("docmason.ask.bootstrap_workspace_with_launcher", side_effect=fake_launcher)
+            as launcher_mock,
+            mock.patch("docmason.ask.prepare_workspace") as prepare_mock,
             mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
             mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-auto-prepare"}, clear=False),
         ):
@@ -428,8 +428,9 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.assertEqual(turn["status"], "prepared")
         self.assertTrue(turn["auto_prepare_triggered"])
         self.assertEqual(turn["auto_prepare_summary"]["status"], "ready")
-        self.assertEqual(len(prepare_calls), 1)
-        self.assertTrue(prepare_calls[0]["assume_yes"])
+        self.assertTrue(turn["auto_prepare_summary"]["launcher_delegated"])
+        launcher_mock.assert_called_once_with(workspace)
+        prepare_mock.assert_not_called()
         self.assertTrue(turn["auto_sync_triggered"])
         self.assertFalse(turn["knowledge_base_missing"])
 
@@ -511,12 +512,12 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             {
                 "ready": False,
                 "detail": "The cached bootstrap marker is missing or invalid.",
-                "reason": "missing-bootstrap-state",
+                "reason": "legacy-bootstrap-state",
             },
             {
                 "ready": False,
                 "detail": "The cached bootstrap marker is missing or invalid.",
-                "reason": "missing-bootstrap-state",
+                "reason": "legacy-bootstrap-state",
             },
             {
                 "ready": False,
@@ -597,21 +598,18 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")
         self.seed_published_kb_stub(workspace)
-        prepare_report = CommandReport(
+        launcher_report = CommandReport(
             1,
             {
                 "status": ACTION_REQUIRED,
-                "prepare_status": "awaiting-confirmation",
                 "detail": "Native Codex machine baseline is missing Homebrew, LibreOffice.",
                 "control_plane": {
                     "state": "awaiting-confirmation",
-                    "shared_job_id": "prepare-job-1",
-                    "job_family": "prepare",
                     "confirmation_kind": "host-access-upgrade",
                     "confirmation_prompt": (
                         "DocMason is currently running in Codex `Default permissions`."
                     ),
-                    "confirmation_reason": "machine-baseline",
+                    "confirmation_reason": "machine-baseline; runtime-downloads",
                 },
                 "host_access_required": True,
                 "host_access_guidance": (
@@ -625,7 +623,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         )
 
         with (
-            mock.patch("docmason.ask.prepare_workspace", return_value=prepare_report),
+            mock.patch("docmason.ask.prepare_workspace") as prepare_mock,
             mock.patch("docmason.ask.cached_bootstrap_readiness", side_effect=[
                 {
                     "ready": False,
@@ -643,7 +641,10 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                     "reason": "missing-bootstrap-state",
                 },
             ]),
-            mock.patch("docmason.ask.bootstrap_workspace_with_launcher") as launcher_mock,
+            mock.patch(
+                "docmason.ask.bootstrap_workspace_with_launcher",
+                return_value=launcher_report,
+            ) as launcher_mock,
             mock.patch.dict(
                 os.environ,
                 {"CODEX_THREAD_ID": "thread-host-access-upgrade"},
@@ -659,7 +660,8 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 ),
             )
 
-        launcher_mock.assert_not_called()
+        prepare_mock.assert_not_called()
+        launcher_mock.assert_called_once_with(workspace)
         self.assertEqual(turn["status"], "awaiting-confirmation")
         self.assertEqual(turn["confirmation_kind"], "host-access-upgrade")
         self.assertIn("Default permissions", str(turn["confirmation_prompt"]))
@@ -844,29 +846,6 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.create_pdf(workspace.source_dir / "example.pdf")
         self.create_pdf(workspace.source_dir / "companion.pdf")
 
-        def fake_prepare(*args: object, **kwargs: object) -> object:
-            del args, kwargs
-            seed_self_contained_bootstrap_state(
-                workspace,
-                prepared_at="2026-03-21T00:00:00Z",
-            )
-            return type(
-                "PrepareReport",
-                (),
-                {
-                    "payload": {
-                        "status": "ready",
-                        "actions_performed": ["Created .venv."],
-                        "actions_skipped": [],
-                        "next_steps": [],
-                        "environment": {
-                            "package_manager": "uv",
-                            "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
-                        },
-                    }
-                },
-            )()
-
         def fake_sync(_paths: WorkspacePaths, assume_yes: bool = False) -> CommandReport:
             del assume_yes
             artifact = workspace.knowledge_base_current_dir / "artifact.md"
@@ -902,8 +881,32 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 [],
             )
 
+        def fake_launcher(_paths: WorkspacePaths) -> CommandReport:
+            seed_self_contained_bootstrap_state(
+                workspace,
+                prepared_at="2026-03-21T00:00:00Z",
+            )
+            return CommandReport(
+                0,
+                {
+                    "status": "ready",
+                    "detail": "Launcher prepared the workspace successfully.",
+                    "actions_performed": ["Created .venv."],
+                    "actions_skipped": [],
+                    "next_steps": [],
+                    "launcher_delegated": True,
+                    "launcher_command": "./scripts/bootstrap-workspace.sh --yes --json",
+                    "environment": {
+                        "package_manager": "uv",
+                        "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                    },
+                },
+                [],
+            )
+
         with (
-            mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare),
+            mock.patch("docmason.ask.bootstrap_workspace_with_launcher", side_effect=fake_launcher),
+            mock.patch("docmason.ask.prepare_workspace") as prepare_mock,
             mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
             mock.patch.dict(
                 os.environ,
@@ -919,6 +922,8 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                     question_domain="workspace-corpus",
                 ),
             )
+
+        prepare_mock.assert_not_called()
 
         conversation = read_json(
             workspace.conversations_dir / f"{turn['conversation_id']}.json"

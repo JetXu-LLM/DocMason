@@ -73,6 +73,10 @@ JSON
 
 - Minimal host hinting rule:
   - `semantic_analysis` is best-effort. For an ordinary native Codex ask, `question_class`, `question_domain`, and one concise `route_reason` are usually enough.
+  - classify by deliverable and evidence basis, not by perceived difficulty:
+    - `question_class` chooses workflow shape. It is not a difficulty score: use `answer` for a direct answer, explanation, or source-backed summary; use `composition` for a new evidence-backed work product or synthesis; use `retrieval`, `provenance`, or `runtime-review` only for explicit evidence, citation, or runtime-review requests.
+    - `question_domain` chooses evidence basis. It is not a mirror of `question_class`: prefer `workspace-corpus`, `external-factual`, or `general-stable` when one of those is the real basis, and reserve `composition` for composition-shaped evidence planning rather than setting it merely because `question_class = composition`.
+    - a compare, draft, or plan request over workspace materials is therefore usually `question_class = composition` with `question_domain = workspace-corpus`.
   - `open` normalizes missing supported routing fields, derives defaults such as `support_strategy`, and may refine reference resolution or workspace notices from repository truth.
 - Native Codex fast path:
   - for an ordinary request on the native Codex path, once repo-local `.venv` is available, call hidden `open` directly with best-effort `semantic_analysis`
@@ -90,7 +94,7 @@ JSON
   - question classification and support-strategy selection
   - workspace gating and knowledge-base freshness checks
   - initial inner-workflow routing plus any confirmation or waiting-state settlement
-- After `open`, treat the returned `status`, `inner_workflow_id`, `support_strategy`, `reference_resolution`, `source_scope_policy`, and notices as the source of truth for the next step. Do not re-derive them from side-path probing before honoring that result.
+- After `open`, treat the returned `status`, `question_class`, `question_domain`, `analysis_origin`, `route_reason`, `inner_workflow_id`, `support_strategy`, `reference_resolution`, `source_scope_policy`, and notices as the source of truth for the next step. Do not re-derive them from side-path probing before honoring that result.
 - Retrieve / trace binding rule:
   - when using public `docmason retrieve` or `docmason trace` inside the same canonical ask turn, export each returned `log_context` field as `DOCMASON_<FIELD>` and then call the public command normally
   - do not switch to direct Python helpers such as `prepare_ask_turn()`, `complete_ask_turn()`, or `trace_answer_file(...)` as a substitute for the supported path
@@ -128,8 +132,27 @@ export DOCMASON_FRONT_DOOR_STATE="canonical-ask"
   "conversation_id": "<conversation_id>",
   "turn_id": "<turn_id>",
   "answer_file_path": "<answer_file_path>",
+  "response_excerpt": "<short excerpt>",
+  "session_ids": ["<selected_session_id>"],
+  "trace_ids": ["<selected_trace_id>"]
+}
+```
+
+- `session_ids` and `trace_ids` are optional advanced-caller fields. Omit them when the turn has exactly one ask-owned retrieve session and one final trace candidate. Supply them only when the caller has already selected the canonical pair among multiple ask-owned candidates.
+- Legal closure handshake for one canonical ask turn:
+
+```bash
+./.venv/bin/python -m docmason trace --answer-file "<answer_file_path>" --json
+
+cat <<'JSON' | ./.venv/bin/python -m docmason _ask
+{
+  "action": "finalize",
+  "conversation_id": "<conversation_id>",
+  "turn_id": "<turn_id>",
+  "answer_file_path": "<answer_file_path>",
   "response_excerpt": "<short excerpt>"
 }
+JSON
 ```
 
 - Completion rule:
@@ -201,7 +224,7 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 7. Complete the turn through the supported completion path.
    - write only the final answer under `runtime/answers/<conversation_id>/<turn_id>.md`
    - keep scratch work under `runtime/agent-work/` when needed
-   - trace the final answer through the shipped trace path
+  - follow the finalize handshake in `Canonical Ask Contract`: run the final trace on the exact answer-file version, then call hidden `finalize`, passing selected artifact IDs only when the turn is ambiguous
    - let the commit barrier run only after the admissibility gate passes
    - preserve `answer_state`, `support_basis`, optional `support_manifest_path`, and linked session or trace IDs
 8. Return the result cleanly.

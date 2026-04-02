@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -781,6 +782,11 @@ def deduplicate(items: list[str]) -> list[str]:
     return ordered
 
 
+def _stable_json_digest(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def make_report(status: str, payload: dict[str, Any], lines: list[str]) -> CommandReport:
     """Translate a logical status into the standard CLI exit-code contract."""
     exit_code = {READY: 0, DEGRADED: 2, ACTION_REQUIRED: 1}[status]
@@ -1222,23 +1228,141 @@ def _native_machine_baseline_install_guidance(
 
 def _codex_full_access_guidance(*, rerun_command: str = "docmason prepare --yes") -> str:
     return (
-        "DocMason is currently running in Codex `Default permissions`. Machine-level setup for "
-        "Homebrew and LibreOffice needs Codex `Full access`. Clicking `Yes` on a single command "
-        "prompt only approves that command; it does not switch the thread out of `Default "
-        "permissions`. Switch this thread to `Full access`, then continue the same task or rerun "
+        "DocMason is currently running in Codex `Default permissions`. This bootstrap step needs "
+        "capabilities that the current thread does not expose there, such as repo-local runtime "
+        "downloads or machine-level setup. Clicking `Yes` on a single command prompt only "
+        "approves that command; it does not switch the thread out of `Default permissions`. "
+        "Switch this thread to `Full access`, then continue the same task or rerun "
         f"`{rerun_command}`."
     )
+
+
+def _generic_host_access_guidance(*, rerun_command: str = "docmason prepare --yes") -> str:
+    return (
+        "DocMason needs broader host permissions or network access before this bootstrap step "
+        "can continue. Allow the higher-access path on the current host, then continue the same "
+        f"task or rerun `{rerun_command}`."
+    )
+
+
+def _workspace_path_is_writable(
+    host_execution: dict[str, Any],
+    *,
+    target_path: Path,
+) -> bool:
+    if bool(host_execution.get("full_machine_access")):
+        return True
+    writable_roots = host_execution.get("sandbox_writable_roots")
+    if not isinstance(writable_roots, list) or not writable_roots:
+        return False
+    try:
+        resolved_target = target_path.resolve()
+    except OSError:
+        resolved_target = target_path
+    for raw_root in writable_roots:
+        if not isinstance(raw_root, str) or not raw_root:
+            continue
+        try:
+            resolved_root = Path(raw_root).expanduser().resolve()
+        except OSError:
+            resolved_root = Path(raw_root).expanduser()
+        with suppress(ValueError):
+            resolved_target.relative_to(resolved_root)
+            return True
+    return False
+
+
+def _host_execution_network_access(host_execution: dict[str, Any]) -> bool | None:
+    if bool(host_execution.get("full_machine_access")):
+        return True
+    value = host_execution.get("workspace_write_network_access")
+    return value if isinstance(value, bool) else None
+
+
+def _prepare_host_access_snapshot(
+    workspace: WorkspacePaths,
+    *,
+    host_execution: dict[str, Any],
+    machine_baseline: dict[str, Any],
+    workspace_runtime_ready: bool,
+    rerun_command: str = "docmason prepare --yes",
+) -> dict[str, Any]:
+    """Classify whether the current host can continue prepare without extra access."""
+    provider = str(host_execution.get("host_provider") or "unknown-agent")
+    permission_mode = str(host_execution.get("permission_mode") or "")
+    full_machine_access = bool(host_execution.get("full_machine_access"))
+    network_access = _host_execution_network_access(host_execution)
+    workspace_root_writable = _workspace_path_is_writable(
+        host_execution,
+        target_path=workspace.root,
+    )
+    writable_roots = host_execution.get("sandbox_writable_roots")
+    writable_roots_known = isinstance(writable_roots, list) and bool(writable_roots)
+    reasons: list[str] = []
+    host_access_required = False
+
+    machine_reasons = machine_baseline.get("host_access_reasons")
+    if isinstance(machine_reasons, list):
+        reasons.extend(
+            str(item)
+            for item in machine_reasons
+            if isinstance(item, str) and item.strip()
+        )
+        host_access_required = host_access_required or bool(
+            machine_baseline.get("host_access_required")
+        )
+
+    if not workspace_runtime_ready:
+        if not workspace_root_writable and not full_machine_access and writable_roots_known:
+            reasons.append(
+                "The current sandbox cannot write the workspace root required for repo-local "
+                "bootstrap."
+            )
+            host_access_required = True
+        if network_access is False:
+            reasons.append(
+                "Repo-local runtime bootstrap needs network downloads, but the current host "
+                "execution context reports network access is disabled."
+            )
+            host_access_required = True
+        elif network_access is None and provider == "codex" and not full_machine_access:
+            reasons.append(
+                "DocMason cannot safely confirm that this Codex turn allows the network "
+                "downloads required for repo-local runtime bootstrap."
+            )
+            host_access_required = True
+
+    reasons = deduplicate(reasons)
+    if host_access_required:
+        guidance = (
+            _codex_full_access_guidance(rerun_command=rerun_command)
+            if provider == "codex"
+            else _generic_host_access_guidance(rerun_command=rerun_command)
+        )
+    else:
+        guidance = None
+
+    return {
+        "host_execution": host_execution,
+        "workspace_write_network_access": network_access,
+        "sandbox_writable_roots": list(host_execution.get("sandbox_writable_roots") or []),
+        "host_access_required": host_access_required,
+        "host_access_guidance": guidance,
+        "host_access_reasons": reasons,
+        "permission_mode": permission_mode or None,
+    }
 
 
 def _machine_baseline_snapshot(
     workspace: WorkspacePaths,
     *,
     office_snapshot: dict[str, Any] | None = None,
+    host_execution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe native machine-baseline readiness separately from repo-local runtime state."""
     from .conversation import current_host_execution_context
 
-    host_execution = current_host_execution_context()
+    host_execution = host_execution or current_host_execution_context()
     office = office_snapshot or office_renderer_snapshot(workspace)
     brew_binary = find_brew_binary()
     brew_ready = bool(brew_binary)
@@ -1257,6 +1381,7 @@ def _machine_baseline_snapshot(
             "libreoffice_binary": office.get("binary"),
             "host_access_required": False,
             "host_access_guidance": None,
+            "host_access_reasons": [],
             "host_execution": host_execution,
         }
 
@@ -1277,23 +1402,39 @@ def _machine_baseline_snapshot(
             "libreoffice_binary": office.get("binary"),
             "host_access_required": False,
             "host_access_guidance": None,
+            "host_access_reasons": [],
             "host_execution": host_execution,
         }
 
     missing_detail = ", ".join(missing_components)
-    if host_execution.get("permission_mode") == "default-permissions":
+    full_machine_access = bool(host_execution.get("full_machine_access"))
+    permission_mode = str(host_execution.get("permission_mode") or "")
+    if not full_machine_access:
         guidance = _codex_full_access_guidance()
         status = "host-access-upgrade-required"
-        detail = (
-            f"Native Codex machine baseline is missing {missing_detail}, and the current thread "
-            "is still in `Default permissions`."
-        )
+        if permission_mode == "default-permissions":
+            detail = (
+                f"Native Codex machine baseline is missing {missing_detail}, and the current "
+                "thread is still in `Default permissions`."
+            )
+        else:
+            detail = (
+                f"Native Codex machine baseline is missing {missing_detail}, and the current "
+                "turn does not expose `Full access` yet."
+            )
         host_access_required = True
+        host_access_reasons = [
+            (
+                "Native Codex machine baseline is missing "
+                f"{missing_detail} and needs machine-level installation."
+            )
+        ]
     else:
         guidance = _native_machine_baseline_install_guidance()
         status = "install-required"
         detail = f"Native Codex machine baseline is missing {missing_detail}."
         host_access_required = False
+        host_access_reasons = []
 
     return {
         "applicable": True,
@@ -1306,6 +1447,7 @@ def _machine_baseline_snapshot(
         "libreoffice_binary": office.get("binary"),
         "host_access_required": host_access_required,
         "host_access_guidance": guidance,
+        "host_access_reasons": host_access_reasons,
         "host_execution": host_execution,
     }
 
@@ -1403,6 +1545,7 @@ def write_bootstrap_ready_marker(
         "last_repair_at": last_repair_at,
         "host_access_required": bool(machine_baseline.get("host_access_required")),
         "host_access_guidance": machine_baseline.get("host_access_guidance"),
+        "host_access_reasons": list(machine_baseline.get("host_access_reasons") or []),
         "libreoffice_executable": office_snapshot.get("binary"),
         "libreoffice_origin": (
             "system-discovery" if office_snapshot.get("binary") else None
@@ -1425,6 +1568,8 @@ def environment_snapshot(
     editable_install_probe: EditableInstallProbe = inspect_editable_install,
 ) -> dict[str, Any]:
     """Summarize repo-local environment readiness for status and doctor flows."""
+    from .conversation import current_host_execution_context
+
     editable_install, editable_detail = editable_install_probe(paths)
     state = bootstrap_state(paths)
     cached = cached_bootstrap_readiness(paths)
@@ -1433,23 +1578,35 @@ def environment_snapshot(
         bootstrap_state=state,
         editable_install=editable_install,
     )
-    machine_baseline_ready = bool(state.get("machine_baseline_ready", True))
+    host_execution = current_host_execution_context()
+    workspace_runtime_ready = bool(
+        state.get(
+            "workspace_runtime_ready",
+            editable_install and toolchain.get("isolation_grade") == "self-contained",
+        )
+    )
+    live_machine_baseline = _machine_baseline_snapshot(
+        paths,
+        host_execution=host_execution,
+    )
+    host_access = _prepare_host_access_snapshot(
+        paths,
+        host_execution=host_execution,
+        machine_baseline=live_machine_baseline,
+        workspace_runtime_ready=workspace_runtime_ready,
+    )
     return {
         "ready": bool(cached.get("ready")),
-        "workspace_runtime_ready": bool(
-            state.get(
-                "workspace_runtime_ready",
-                editable_install and toolchain.get("isolation_grade") == "self-contained",
-            )
-        ),
-        "machine_baseline_ready": machine_baseline_ready,
-        "machine_baseline_status": state.get(
-            "machine_baseline_status",
-            "ready" if machine_baseline_ready else "unknown",
-        ),
+        "workspace_runtime_ready": workspace_runtime_ready,
+        "machine_baseline_ready": bool(live_machine_baseline.get("ready")),
+        "machine_baseline_status": live_machine_baseline.get("status"),
         "bootstrap_source": state.get("bootstrap_source"),
-        "host_access_required": bool(state.get("host_access_required")),
-        "host_access_guidance": state.get("host_access_guidance"),
+        "host_access_required": bool(host_access.get("host_access_required")),
+        "host_access_guidance": host_access.get("host_access_guidance"),
+        "host_access_reasons": list(host_access.get("host_access_reasons") or []),
+        "host_execution": host_execution,
+        "workspace_write_network_access": host_access.get("workspace_write_network_access"),
+        "sandbox_writable_roots": list(host_access.get("sandbox_writable_roots") or []),
         "venv_python": str(paths.venv_python.relative_to(paths.root)),
         "editable_install": editable_install,
         "editable_install_detail": editable_detail,
@@ -1474,6 +1631,7 @@ def environment_snapshot(
         "cached_ready_detail": cached.get("detail"),
         "toolchain": toolchain,
         "bootstrap_state": bootstrap_state_summary(paths),
+        "machine_baseline": live_machine_baseline,
     }
 
 
@@ -1563,7 +1721,10 @@ def workspace_stage(
 
     pending_actions: list[str] = []
     if not environment["ready"] and not host_access_upgrade_pending:
-        pending_actions.append("prepare")
+        if environment.get("host_access_required"):
+            pending_actions.append("switch-host-to-full-access")
+        else:
+            pending_actions.append("prepare")
     if active_confirmation_jobs:
         primary_job = active_confirmation_jobs[0]
         if primary_job.get("job_family") == "prepare":
@@ -1708,6 +1869,101 @@ def prepare_workspace(
     uv_install_command, uv_install_display = preferred_uv_install_command(bootstrap_python)
     if interactive is None:
         interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+    from .conversation import current_host_execution_context
+
+    host_execution = current_host_execution_context()
+    office_snapshot = office_renderer_snapshot(workspace)
+    machine_baseline = _machine_baseline_snapshot(
+        workspace,
+        office_snapshot=office_snapshot,
+        host_execution=host_execution,
+    )
+    workspace_runtime_ready = bool(initial_toolchain.get("isolation_grade") == "self-contained")
+    prepare_host_access = _prepare_host_access_snapshot(
+        workspace,
+        host_execution=host_execution,
+        machine_baseline=machine_baseline,
+        workspace_runtime_ready=workspace_runtime_ready,
+    )
+    if prepare_host_access["host_access_required"]:
+        host_access_signature = _stable_json_digest(
+            {
+                "reasons": prepare_host_access["host_access_reasons"],
+                "provider": host_execution.get("host_provider"),
+                "permission_mode": host_execution.get("permission_mode"),
+            }
+        )
+        next_command = (
+            "Switch Codex to `Full access`, then continue the same task."
+            if str(host_execution.get("host_provider") or "") == "codex"
+            else "Enable the higher-access host mode, then continue the same task."
+        )
+        prepare_job_info = ensure_shared_job(
+            workspace,
+            job_key=(
+                "prepare:"
+                f"{workspace.root}:"
+                "host-access-upgrade:"
+                f"{host_access_signature}"
+            ),
+            job_family="prepare",
+            criticality="answer-critical",
+            scope={
+                "workspace_root": str(workspace.root),
+                "intrusion_class": "host-access-upgrade",
+                "required_capabilities": ["host-access-upgrade"],
+                "host_access_reasons": list(prepare_host_access["host_access_reasons"]),
+            },
+            input_signature=host_access_signature,
+            owner=effective_owner,
+            run_id=run_id,
+            requires_confirmation=True,
+            confirmation_kind="host-access-upgrade",
+            confirmation_prompt=str(prepare_host_access["host_access_guidance"]),
+            confirmation_reason="; ".join(prepare_host_access["host_access_reasons"]),
+        )
+        prepare_shared_job = prepare_job_info["manifest"]
+        confirmation_payload: dict[str, Any] = {
+            "status": ACTION_REQUIRED,
+            "prepare_status": "awaiting-confirmation",
+            "actions_performed": actions_performed,
+            "actions_skipped": actions_skipped,
+            "manual_recovery_doc": manual_workspace_recovery_doc(),
+            "environment": {
+                "python_executable": bootstrap_python,
+                "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+                "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
+                "package_manager": package_manager,
+                "machine_baseline": machine_baseline,
+                "host_execution": host_execution,
+            },
+            "control_plane": shared_job_control_plane_payload(
+                prepare_shared_job,
+                next_command=next_command,
+            ),
+            "workspace_runtime_ready": workspace_runtime_ready,
+            "machine_baseline_ready": bool(machine_baseline.get("ready")),
+            "machine_baseline_status": machine_baseline.get("status"),
+            "bootstrap_source": bootstrap_source,
+            "host_execution": host_execution,
+            "workspace_write_network_access": prepare_host_access.get(
+                "workspace_write_network_access"
+            ),
+            "sandbox_writable_roots": list(
+                prepare_host_access.get("sandbox_writable_roots") or []
+            ),
+            "host_access_required": True,
+            "host_access_guidance": prepare_host_access.get("host_access_guidance"),
+            "host_access_reasons": list(prepare_host_access["host_access_reasons"]),
+            "next_steps": [next_command],
+        }
+        lines = [
+            f"Prepare status: {ACTION_REQUIRED}",
+            str(prepare_host_access["host_access_guidance"]),
+            f"Next step: {next_command}",
+        ]
+        return make_report(ACTION_REQUIRED, confirmation_payload, lines)
 
     if uv_binary is None:
         should_attempt_uv_install = bool(assume_yes)
@@ -1958,10 +2214,10 @@ def prepare_workspace(
         )
 
     prepare_shared_job: dict[str, Any] = {}
-    office_snapshot = office_renderer_snapshot(workspace)
     machine_baseline = _machine_baseline_snapshot(
         workspace,
         office_snapshot=office_snapshot,
+        host_execution=host_execution,
     )
     prepare_requirements = required_prepare_capabilities(
         workspace,
@@ -2031,6 +2287,8 @@ def prepare_workspace(
                     "python_version": ".".join(str(part) for part in sys.version_info[:3]),
                     "venv_python": str(workspace.venv_python.relative_to(workspace.root)),
                     "package_manager": package_manager,
+                    "machine_baseline": machine_baseline,
+                    "host_execution": host_execution,
                 },
                 "control_plane": shared_job_control_plane_payload(
                     prepare_shared_job,
@@ -2043,8 +2301,16 @@ def prepare_workspace(
                 "machine_baseline_ready": bool(machine_baseline.get("ready")),
                 "machine_baseline_status": machine_baseline.get("status"),
                 "bootstrap_source": bootstrap_source,
+                "host_execution": host_execution,
+                "workspace_write_network_access": _host_execution_network_access(
+                    host_execution
+                ),
+                "sandbox_writable_roots": list(
+                    host_execution.get("sandbox_writable_roots") or []
+                ),
                 "host_access_required": bool(machine_baseline.get("host_access_required")),
                 "host_access_guidance": machine_baseline.get("host_access_guidance"),
+                "host_access_reasons": list(machine_baseline.get("host_access_reasons") or []),
                 "next_steps": [
                     (
                         "Switch Codex to `Full access`, then continue the same task."
@@ -2116,7 +2382,7 @@ def prepare_workspace(
         and assume_yes
     ):
         brew_plan = homebrew_auto_install_plan(command_runner=command_runner, cwd=workspace.root)
-        if find_brew_binary() is None and brew_plan["feasible"]:
+        if not bool(machine_baseline.get("brew_ready")) and brew_plan["feasible"]:
             brew_install = command_runner(brew_plan["install_command"], workspace.root)
             if brew_install.exit_code == 0:
                 refreshed_brew = refresh_brew_binary_after_install(brew_plan)
@@ -2135,12 +2401,12 @@ def prepare_workspace(
                 actions_skipped.append(
                     "Homebrew installation failed during prepare. Details: "
                     f"{brew_install.stderr or brew_install.stdout or 'no output'}"
-                )
+                    )
                 next_steps.append(
                     "Install Homebrew manually or install LibreOffice from the official "
                     "macOS installer, then rerun `docmason prepare --yes`."
                 )
-        elif find_brew_binary() is None and not brew_plan["feasible"]:
+        elif not bool(machine_baseline.get("brew_ready")) and not brew_plan["feasible"]:
             actions_skipped.append(
                 "Skipped Homebrew installation because the host does not satisfy the official "
                 f"unattended install preconditions. Details: {brew_plan['detail']}"
@@ -2159,6 +2425,7 @@ def prepare_workspace(
         machine_baseline = _machine_baseline_snapshot(
             workspace,
             office_snapshot=office_snapshot,
+            host_execution=host_execution,
         )
     office_renderer_gap = bool(office_snapshot["required"]) and not bool(
         office_snapshot["ready"]
@@ -2255,8 +2522,12 @@ def prepare_workspace(
         "machine_baseline_ready": bool(machine_baseline.get("ready")),
         "machine_baseline_status": machine_baseline.get("status"),
         "bootstrap_source": bootstrap_source,
+        "host_execution": host_execution,
+        "workspace_write_network_access": _host_execution_network_access(host_execution),
+        "sandbox_writable_roots": list(host_execution.get("sandbox_writable_roots") or []),
         "host_access_required": bool(machine_baseline.get("host_access_required")),
         "host_access_guidance": machine_baseline.get("host_access_guidance"),
+        "host_access_reasons": list(machine_baseline.get("host_access_reasons") or []),
         "actions_performed": actions_performed,
         "actions_skipped": actions_skipped,
         "manual_recovery_doc": manual_workspace_recovery_doc(),
@@ -2277,6 +2548,7 @@ def prepare_workspace(
             "bootstrap_state": str(workspace.bootstrap_state_path.relative_to(workspace.root)),
             "manual_recovery_doc": manual_workspace_recovery_doc(),
             "machine_baseline": machine_baseline,
+            "host_execution": host_execution,
         },
         "next_steps": deduplicate(next_steps),
     }
@@ -2426,7 +2698,24 @@ def doctor_workspace(
             "Run `docmason prepare --yes` to record the current bootstrap marker.",
         )
 
-    machine_baseline = _machine_baseline_snapshot(workspace)
+    if environment["host_access_required"]:
+        host_access_detail = "; ".join(
+            str(item)
+            for item in environment.get("host_access_reasons", [])
+            if isinstance(item, str) and item.strip()
+        ) or str(environment.get("host_access_guidance") or "Higher host access is required.")
+        add_check(
+            "host-access",
+            ACTION_REQUIRED,
+            host_access_detail,
+            str(environment.get("host_access_guidance") or ""),
+        )
+
+    machine_baseline = (
+        dict(environment.get("machine_baseline", {}))
+        if isinstance(environment.get("machine_baseline"), dict)
+        else _machine_baseline_snapshot(workspace)
+    )
     if machine_baseline["status"] == "ready":
         add_check("machine-baseline", READY, machine_baseline["detail"])
     elif machine_baseline["status"] == "host-access-upgrade-required":
@@ -2817,6 +3106,18 @@ def status_workspace(
             f"{payload['environment'].get('machine_baseline_status', 'unknown')}"
         ),
         (
+            "Host network access: "
+            + (
+                "yes"
+                if payload["environment"].get("workspace_write_network_access") is True
+                else (
+                    "no"
+                    if payload["environment"].get("workspace_write_network_access") is False
+                    else "unknown"
+                )
+            )
+        ),
+        (
             "Bootstrap state: "
             + (
                 "ready"
@@ -2881,6 +3182,13 @@ def status_workspace(
     control_plane_repairs = payload.get("control_plane", {}).get("repair_actions", [])
     if isinstance(control_plane_repairs, list) and control_plane_repairs:
         lines.append(f"Control-plane repairs: {len(control_plane_repairs)}")
+    if payload["environment"].get("host_access_required"):
+        lines.append("Host access required: yes")
+    host_access_reasons = payload["environment"].get("host_access_reasons")
+    if isinstance(host_access_reasons, list) and host_access_reasons:
+        lines.append(
+            "Host access reasons: " + "; ".join(str(item) for item in host_access_reasons)
+        )
     if payload["environment"].get("host_access_guidance"):
         lines.append(str(payload["environment"]["host_access_guidance"]))
     rebuild_telemetry = payload["knowledge_base"].get("last_sync_rebuild_telemetry", {})
@@ -4157,7 +4465,7 @@ def run_workflow(
     next_steps: list[str] = []
 
     if workflow_id == "workspace-bootstrap":
-        steps.append(("prepare", prepare_workspace(workspace)))
+        steps.append(("prepare", bootstrap_workspace_with_launcher(workspace)))
         steps.append(("status", status_workspace(workspace)))
     elif workflow_id == "workspace-doctor":
         steps.append(("doctor", doctor_workspace(workspace)))

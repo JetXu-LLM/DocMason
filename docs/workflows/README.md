@@ -40,8 +40,11 @@ Use explicit operator workflows or commands when the task is clearly about:
 1. The user asks naturally through a supported host agent.
 2. DocMason opens or reuses canonical `ask`.
 3. The ask path chooses the narrowest honest evidence basis.
-4. If the workspace is not ready or the published KB is missing or stale, the system routes to the needed governed preparation or sync work.
-5. The final answer is committed only after answer-critical work has settled.
+4. If the workspace is not ready, the ordinary native bootstrap path first routes through the governed launcher `./scripts/bootstrap-workspace.sh --yes --json`.
+5. On native Codex, `Default permissions` and `Full access` are explicit different states. A per-command `Yes` popup is not the same thing as switching the thread to `Full access`.
+6. If the workspace is not ready or the published KB is missing or stale, the system routes to the needed governed preparation or sync work.
+7. Manual workspace recovery is the last fallback, not the normal ordinary-path next step.
+8. The final answer is committed only after answer-critical work has settled.
 
 ## Evidence Rules For Workflow Selection
 
@@ -55,6 +58,8 @@ Use explicit operator workflows or commands when the task is clearly about:
 Some workflows exist for maintainers, compatibility, or local repair.
 They are not part of the normal product story and should not appear as ordinary first-contact steps.
 The hidden `operator-eval` workflow falls into that category and is documented only as a local maintenance note.
+
+For Claude Code and other compatibility hosts, keep higher-access fallback wording brief and host-generic.
 
 ## Next References
 

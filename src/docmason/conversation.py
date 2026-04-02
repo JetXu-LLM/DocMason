@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -187,6 +189,10 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["hybrid_refresh_completion_status"] = None
     if "hybrid_refresh_summary" not in turn:
         turn["hybrid_refresh_summary"] = None
+    if "selected_session_ids" not in turn:
+        turn["selected_session_ids"] = []
+    if "selected_trace_ids" not in turn:
+        turn["selected_trace_ids"] = []
     if "front_door_state" not in turn:
         turn["front_door_state"] = None
     else:
@@ -405,12 +411,81 @@ def _normalized_sandbox_policy(raw_value: Any) -> str | None:
     return text
 
 
-def current_host_execution_context(*, agent_surface: str | None = None) -> dict[str, Any]:
-    """Return the best available host execution-context snapshot for the current thread.
+def _normalized_bool(raw_value: Any) -> bool | None:
+    if isinstance(raw_value, bool):
+        return raw_value
+    text = _nonempty_string(raw_value)
+    if text is None:
+        return None
+    lowered = text.lower()
+    if lowered in {"1", "true", "yes", "enabled"}:
+        return True
+    if lowered in {"0", "false", "no", "disabled", "restricted"}:
+        return False
+    return None
 
-    This helper focuses on the small set of host fields that materially affect DocMason
-    bootstrap and machine-baseline behavior, especially for native Codex cold starts.
-    """
+
+def _normalized_writable_roots(raw_value: Any) -> list[str]:
+    if isinstance(raw_value, list):
+        return [item for item in raw_value if isinstance(item, str) and item]
+    text = _nonempty_string(raw_value)
+    if text is None:
+        return []
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, list):
+            return [item for item in decoded if isinstance(item, str) and item]
+    return [item for item in text.split(os.pathsep) if item]
+
+
+def _host_execution_context_helper_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "scripts" / "read-host-execution-context.py"
+
+
+def _helper_host_execution_context(*, agent_surface: str | None = None) -> dict[str, Any]:
+    helper_path = _host_execution_context_helper_path()
+    if not helper_path.exists():
+        return {}
+    env = dict(os.environ)
+    if isinstance(agent_surface, str) and agent_surface:
+        env["DOCMASON_AGENT_SURFACE"] = agent_surface
+    completed = subprocess.run(
+        [sys.executable, str(helper_path), "--format", "json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    if completed.returncode != 0:
+        return {}
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        "host_provider": (
+            _nonempty_string(payload.get("host_provider")) or agent_surface or "unknown-agent"
+        ),
+        "sandbox_policy": _normalized_sandbox_policy(payload.get("sandbox_policy")),
+        "approval_mode": _nonempty_string(payload.get("approval_mode")),
+        "permission_mode": _nonempty_string(payload.get("permission_mode")),
+        "full_machine_access": bool(payload.get("full_machine_access")),
+        "workspace_write_network_access": _normalized_bool(
+            payload.get("workspace_write_network_access")
+        ),
+        "sandbox_writable_roots": _normalized_writable_roots(
+            payload.get("sandbox_writable_roots")
+        ),
+        "context_source": _nonempty_string(payload.get("context_source")) or "unknown",
+    }
+
+
+def _inline_host_execution_context(*, agent_surface: str | None = None) -> dict[str, Any]:
     provider = agent_surface or detect_agent_surface()
     explicit_permission_mode = _nonempty_string(os.environ.get("DOCMASON_PERMISSION_MODE"))
     explicit_sandbox_policy = _nonempty_string(
@@ -421,14 +496,24 @@ def current_host_execution_context(*, agent_surface: str | None = None) -> dict[
         os.environ.get("DOCMASON_APPROVAL_MODE")
         or os.environ.get("DOCMASON_CODEX_APPROVAL_MODE")
     )
+    explicit_network_access = _normalized_bool(
+        os.environ.get("DOCMASON_WORKSPACE_WRITE_NETWORK_ACCESS")
+        or os.environ.get("DOCMASON_CODEX_NETWORK_ACCESS")
+    )
+    explicit_writable_roots = _normalized_writable_roots(
+        os.environ.get("DOCMASON_SANDBOX_WRITABLE_ROOTS")
+        or os.environ.get("DOCMASON_CODEX_WRITABLE_ROOTS")
+    )
     metadata: dict[str, Any] = {}
     context_source = "env-override" if (
-        explicit_permission_mode or explicit_sandbox_policy or explicit_approval_mode
+        explicit_permission_mode
+        or explicit_sandbox_policy
+        or explicit_approval_mode
+        or explicit_network_access is not None
+        or explicit_writable_roots
     ) else "unknown"
 
-    if provider == "codex" and not (
-        explicit_permission_mode or explicit_sandbox_policy or explicit_approval_mode
-    ):
+    if provider == "codex" and context_source == "unknown":
         thread_id = _nonempty_string(os.environ.get("CODEX_THREAD_ID"))
         if thread_id:
             try:
@@ -439,9 +524,8 @@ def current_host_execution_context(*, agent_surface: str | None = None) -> dict[
             except (FileNotFoundError, KeyError, OSError, ValueError, json.JSONDecodeError):
                 metadata = {}
 
-    sandbox_policy = _normalized_sandbox_policy(
-        explicit_sandbox_policy or metadata.get("sandbox_policy")
-    )
+    raw_sandbox_policy = explicit_sandbox_policy or metadata.get("sandbox_policy")
+    sandbox_policy = _normalized_sandbox_policy(raw_sandbox_policy)
     approval_mode = explicit_approval_mode or _nonempty_string(metadata.get("approval_mode"))
     permission_mode = _normalized_permission_mode(
         provider=provider,
@@ -451,14 +535,55 @@ def current_host_execution_context(*, agent_surface: str | None = None) -> dict[
     )
     full_machine_access = permission_mode == "full-access"
 
+    metadata_network_access: bool | None = None
+    metadata_writable_roots: list[str] = []
+    if metadata and not explicit_sandbox_policy:
+        raw_metadata_policy = metadata.get("sandbox_policy")
+        decoded_policy: dict[str, Any] | None = None
+        if isinstance(raw_metadata_policy, str) and raw_metadata_policy.startswith("{"):
+            try:
+                candidate = json.loads(raw_metadata_policy)
+            except json.JSONDecodeError:
+                candidate = None
+            if isinstance(candidate, dict):
+                decoded_policy = candidate
+        elif isinstance(raw_metadata_policy, dict):
+            decoded_policy = raw_metadata_policy
+        if isinstance(decoded_policy, dict):
+            metadata_network_access = _normalized_bool(decoded_policy.get("network_access"))
+            metadata_writable_roots = _normalized_writable_roots(
+                decoded_policy.get("writable_roots")
+            )
+
+    effective_network_access = (
+        explicit_network_access
+        if explicit_network_access is not None
+        else metadata_network_access
+    )
+    effective_writable_roots = explicit_writable_roots or metadata_writable_roots
+
     return {
         "host_provider": provider,
         "sandbox_policy": sandbox_policy,
         "approval_mode": approval_mode,
         "permission_mode": permission_mode,
         "full_machine_access": full_machine_access,
+        "workspace_write_network_access": effective_network_access,
+        "sandbox_writable_roots": effective_writable_roots,
         "context_source": context_source,
     }
+
+
+def current_host_execution_context(*, agent_surface: str | None = None) -> dict[str, Any]:
+    """Return the best available host execution-context snapshot for the current thread.
+
+    This helper focuses on the small set of host fields that materially affect DocMason
+    bootstrap and machine-baseline behavior, especially for native Codex cold starts.
+    """
+    helper_payload = _helper_host_execution_context(agent_surface=agent_surface)
+    if helper_payload:
+        return helper_payload
+    return _inline_host_execution_context(agent_surface=agent_surface)
 
 
 def host_identity_is_bindable(host_identity: dict[str, Any] | None) -> bool:
@@ -820,6 +945,8 @@ def base_turn_record(
         "hybrid_refresh_summary": None,
         "session_ids": [],
         "trace_ids": [],
+        "selected_session_ids": [],
+        "selected_trace_ids": [],
         "captured_interaction_ids": [],
         "answer_file_path": str(answer_path.relative_to(paths.root)),
         "answer_state": None,
@@ -1107,6 +1234,7 @@ def update_conversation_turn(
     conversation_id: str,
     turn_id: str,
     updates: dict[str, Any],
+    refresh_workspace_snapshot: bool = True,
 ) -> dict[str, Any]:
     """Merge updates into an existing conversation turn and persist the result."""
     path = conversation_path(paths, conversation_id)
@@ -1176,7 +1304,8 @@ def update_conversation_turn(
         if updated_turn.get("status") in {"completed", "answered", "action-required"}:
             updated_turn["completed_at"] = now
         conversation["updated_at"] = now
-        conversation["workspace_snapshot"] = workspace_snapshot(paths)
+        if refresh_workspace_snapshot:
+            conversation["workspace_snapshot"] = workspace_snapshot(paths)
         write_json(path, conversation)
         host_identity_payload = (
             dict(conversation["host_identity"])

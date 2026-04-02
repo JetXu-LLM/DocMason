@@ -923,6 +923,28 @@ class DistributionAndPrivacyTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_repo_safety_check_skips_non_git_bundle_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            bundle_root = Path(tempdir_name)
+            (bundle_root / "README.md").write_text("bundle\n", encoding="utf-8")
+            (bundle_root / "original_doc").mkdir(parents=True, exist_ok=True)
+            (bundle_root / "original_doc" / "demo.txt").write_text("demo\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    PYTHON,
+                    str(ROOT / "scripts" / "check-repo-safety.py"),
+                    "--repo-root",
+                    str(bundle_root),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("not a Git checkout", result.stdout)
+
     def test_gitignore_covers_untracked_sensitive_local_artifacts(self) -> None:
         candidates = [
             "scripts/private/sync-public-sample-corpus.py",

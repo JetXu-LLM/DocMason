@@ -10,11 +10,11 @@ __all__ = ["__version__"]
 
 
 def _package_version() -> str:
-    """Return the installed package version or the committed source version."""
+    """Return the committed source version when available, else the installed version."""
     try:
-        return metadata.version("docmason")
-    except metadata.PackageNotFoundError:
         return read_project_version()
+    except (OSError, ValueError):
+        return metadata.version("docmason")
 
 
 __version__ = _package_version()

@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -38,6 +39,7 @@ from docmason.control_plane import (
 from docmason.conversation import current_host_execution_context
 from docmason.coordination import LeaseConflictError, lease_dir, workspace_lease
 from docmason.project import (
+    BOOTSTRAP_STATE_SCHEMA_VERSION,
     WorkspacePaths,
     cached_bootstrap_readiness,
     read_json,
@@ -293,7 +295,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         write_json(
             workspace.bootstrap_state_path,
             {
-                "schema_version": 4,
+                "schema_version": BOOTSTRAP_STATE_SCHEMA_VERSION,
                 "status": "ready",
                 "environment_ready": True,
                 "workspace_runtime_ready": True,
@@ -442,6 +444,71 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(context["permission_mode"], "full-access")
         self.assertTrue(context["full_machine_access"])
 
+    def test_current_host_execution_context_reads_rollout_turn_context_network_snapshot(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        with tempfile.TemporaryDirectory() as home_name:
+            home = Path(home_name)
+            codex_root = home / ".codex"
+            sessions_root = codex_root / "sessions" / "2026" / "04" / "02"
+            sessions_root.mkdir(parents=True, exist_ok=True)
+            rollout_path = sessions_root / "rollout-thread-network.jsonl"
+            rollout_path.write_text(
+                json.dumps(
+                    {
+                        "type": "turn_context",
+                        "payload": {
+                            "approval_policy": "on-request",
+                            "sandbox_policy": {
+                                "type": "workspace-write",
+                                "network_access": False,
+                                "writable_roots": [str(workspace.root)],
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            database_path = codex_root / "state_5.sqlite"
+            with sqlite3.connect(database_path) as connection:
+                connection.execute(
+                    "CREATE TABLE threads ("
+                    "id TEXT PRIMARY KEY, rollout_path TEXT, sandbox_policy TEXT, "
+                    "approval_mode TEXT)"
+                )
+                connection.execute(
+                    (
+                        "INSERT INTO threads "
+                        "(id, rollout_path, sandbox_policy, approval_mode) "
+                        "VALUES (?, ?, ?, ?)"
+                    ),
+                    (
+                        "thread-network",
+                        str(rollout_path),
+                        json.dumps({"type": "workspace-write"}),
+                        "on-request",
+                    ),
+                )
+                connection.commit()
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "HOME": str(home),
+                    "CODEX_THREAD_ID": "thread-network",
+                },
+                clear=False,
+            ):
+                context = current_host_execution_context()
+
+        self.assertEqual(context["context_source"], "codex-turn-context")
+        self.assertEqual(context["sandbox_policy"], "workspace-write")
+        self.assertEqual(context["permission_mode"], "default-permissions")
+        self.assertFalse(context["workspace_write_network_access"])
+        self.assertEqual(context["sandbox_writable_roots"], [str(workspace.root)])
+
     def test_prepare_uses_uv_when_available(self) -> None:
         workspace = self.make_workspace()
         seen_commands: list[list[str]] = []
@@ -476,7 +543,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         self.assertTrue(workspace.agent_work_dir.exists())
         state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
-        self.assertEqual(state["schema_version"], 4)
+        self.assertEqual(state["schema_version"], BOOTSTRAP_STATE_SCHEMA_VERSION)
         self.assertTrue(state["environment_ready"])
         self.assertTrue(state["workspace_runtime_ready"])
         self.assertTrue(state["machine_baseline_ready"])
@@ -816,6 +883,160 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertTrue(marker_path.read_text(encoding="utf-8").strip())
         self.assertIn("controlled bootstrap asset path", completed.stderr)
 
+    def test_bootstrap_launcher_returns_host_access_upgrade_before_shared_cache_probe(self) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+
+        fake_bin_dir = workspace.root / ".fake-bin"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        fake_uname = fake_bin_dir / "uname"
+        fake_uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        fake_uname.chmod(0o755)
+
+        shared_cache = workspace.root / ".shared-bootstrap-cache"
+        env = {
+            **os.environ,
+            "DOCMASON_AGENT_SURFACE": "codex",
+            "DOCMASON_PERMISSION_MODE": "default-permissions",
+            "DOCMASON_CODEX_NETWORK_ACCESS": "false",
+            "DOCMASON_CODEX_WRITABLE_ROOTS": json.dumps([str(workspace.root)]),
+            "DOCMASON_SHARED_BOOTSTRAP_CACHE": str(shared_cache),
+            "PATH": str(fake_bin_dir) + os.pathsep + "/usr/bin:/bin",
+        }
+        completed = subprocess.run(
+            [str(script_path), "--yes", "--json"],
+            cwd=workspace.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], ACTION_REQUIRED)
+        self.assertEqual(payload["control_plane"]["confirmation_kind"], "host-access-upgrade")
+        self.assertTrue(payload["host_access_required"])
+        self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
+        self.assertIn("Default permissions", payload["host_access_guidance"])
+        self.assertIn("Full access", payload["next_steps"][0])
+        self.assertFalse(shared_cache.exists())
+        self.assertNotIn("manual-workspace-recovery", completed.stderr)
+
+    def test_bootstrap_launcher_uses_repo_local_cache_in_controlled_codex_mode(self) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        (workspace.root / "runtime").mkdir(parents=True, exist_ok=True)
+        (workspace.root / "src" / "docmason" / "__main__.py").write_text(
+            "from __future__ import annotations\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "\n"
+            "marker = Path(os.environ['DOCMASON_BOOTSTRAP_MARKER'])\n"
+            "marker.write_text(sys.executable + '\\n', encoding='utf-8')\n"
+            "print(json.dumps({'status': 'ready'}))\n",
+            encoding="utf-8",
+        )
+        fake_uv_installer = workspace.root / "uv-installer.sh"
+        fake_uv_installer.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "cat > \"$UV_UNMANAGED_INSTALL/uv\" <<'EOF'\n"
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "target=''\n"
+            "for arg in \"$@\"; do\n"
+            "  target=\"$arg\"\n"
+            "done\n"
+            "mkdir -p \"$target/bin\"\n"
+            "cat > \"$target/bin/python\" <<'PYEOF'\n"
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n"
+            "PYEOF\n"
+            "chmod +x \"$target/bin/python\"\n"
+            "exit 0\n"
+            "EOF\n"
+            "chmod +x \"$UV_UNMANAGED_INSTALL/uv\"\n",
+            encoding="utf-8",
+        )
+        fake_uv_installer.chmod(0o755)
+
+        fake_bin_dir = workspace.root / ".fake-bin-controlled"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        for name, body in {
+            "uname": "#!/bin/sh\nprintf 'Darwin\\n'\n",
+            "brew": "#!/bin/sh\nexit 0\n",
+            "soffice": "#!/bin/sh\nexit 0\n",
+            "curl": (
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "output=''\n"
+                "url=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    -o)\n"
+                "      output=\"$2\"\n"
+                "      shift 2\n"
+                "      ;;\n"
+                "    -*)\n"
+                "      shift\n"
+                "      ;;\n"
+                "    *)\n"
+                "      url=\"$1\"\n"
+                "      shift\n"
+                "      ;;\n"
+                "  esac\n"
+                "done\n"
+                "[ \"$url\" = \"https://astral.sh/uv/install.sh\" ]\n"
+                f"cp {shlex.quote(str(fake_uv_installer))} \"$output\"\n"
+            ),
+        }.items():
+            script = fake_bin_dir / name
+            script.write_text(body, encoding="utf-8")
+            script.chmod(0o755)
+
+        marker_path = workspace.root / "runtime" / "bootstrap-python.txt"
+        shared_cache = workspace.root / ".shared-bootstrap-cache"
+        repo_local_cache = workspace.root / ".docmason" / "toolchain" / "bootstrap" / "cache"
+        env = {
+            **os.environ,
+            "DOCMASON_AGENT_SURFACE": "codex",
+            "DOCMASON_PERMISSION_MODE": "default-permissions",
+            "DOCMASON_CODEX_NETWORK_ACCESS": "true",
+            "DOCMASON_CODEX_WRITABLE_ROOTS": json.dumps([str(workspace.root)]),
+            "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
+            "DOCMASON_BOOTSTRAP_UV_INSTALLER_URL": "https://astral.sh/uv/install.sh",
+            "DOCMASON_SHARED_BOOTSTRAP_CACHE": str(shared_cache),
+            "PATH": str(fake_bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+        }
+        completed = subprocess.run(
+            [str(script_path), "--yes", "--json"],
+            cwd=workspace.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertTrue(marker_path.exists())
+        self.assertTrue(repo_local_cache.exists())
+        self.assertFalse(shared_cache.exists())
+
     def test_inspect_toolchain_distinguishes_shared_host_bootstrap_from_legacy_external(
         self,
     ) -> None:
@@ -840,7 +1061,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
         def staged_brew_binary() -> str | None:
             brew_call_count["value"] += 1
-            return None if brew_call_count["value"] < 4 else "/opt/homebrew/bin/brew"
+            return None if brew_call_count["value"] < 5 else "/opt/homebrew/bin/brew"
 
         with (
             mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
@@ -1742,6 +1963,33 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             checks["control-plane"]["action"],
             "Switch Codex to `Full access`, then continue the same task.",
         )
+
+    def test_status_and_workspace_state_surface_raw_host_access_gap(self) -> None:
+        workspace = self.make_workspace()
+        doctor_report = doctor_workspace(
+            workspace,
+            editable_install_probe=self.missing_probe,
+        )
+        environment = dict(doctor_report.payload["environment"])
+        environment["ready"] = False
+        environment["host_access_required"] = True
+        environment["host_access_guidance"] = (
+            "Switch Codex to `Full access`, then continue the same task."
+        )
+        environment["host_access_reasons"] = [
+            "Repo-local runtime bootstrap needs network downloads."
+        ]
+        environment["machine_baseline_status"] = "host-access-upgrade-required"
+        environment["workspace_write_network_access"] = False
+
+        with mock.patch("docmason.commands.environment_snapshot", return_value=environment):
+            status_report = status_workspace(workspace, editable_install_probe=self.missing_probe)
+            self.assertIn("switch-host-to-full-access", status_report.payload["pending_actions"])
+            self.assertNotIn("prepare", status_report.payload["pending_actions"])
+
+            snapshot = workspace_state_snapshot(workspace)
+            self.assertIn("switch-host-to-full-access", snapshot["next_legal_actions"])
+            self.assertNotIn("prepare", snapshot["next_legal_actions"])
 
     def test_shared_job_acquisition_distinguishes_owner_and_waiter(self) -> None:
         workspace = self.make_workspace()

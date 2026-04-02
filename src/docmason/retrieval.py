@@ -29,6 +29,7 @@ from .conversation import (
     LOG_CONTEXT_FIELD_NAMES,
     normalize_front_door_state,
     semantic_log_context_from_record,
+    update_conversation_turn,
 )
 from .front_controller import load_support_manifest
 from .hybrid import current_hybrid_work
@@ -4467,6 +4468,22 @@ def trace_answer_file(
             phase="retrace",
             payload={"mode": "reused-unchanged-answer", "skipped": True},
         )
+        _persist_selected_turn_artifacts(
+            paths,
+            turn_record=turn_record,
+            session_id=(
+                str(latest_trace_payload.get("session_id"))
+                if isinstance(latest_trace_payload.get("session_id"), str)
+                and latest_trace_payload.get("session_id")
+                else None
+            ),
+            trace_id=(
+                str(latest_trace_payload.get("trace_id"))
+                if isinstance(latest_trace_payload.get("trace_id"), str)
+                and latest_trace_payload.get("trace_id")
+                else None
+            ),
+        )
         return {**latest_trace_payload, "reused_trace": True}
     if question_class == "composition":
         if existing_trace_ids and latest_answer_digest and latest_answer_digest != answer_digest:
@@ -4549,7 +4566,55 @@ def trace_answer_file(
                 phase=phase_name,
                 payload={"top": top, "target": target},
             )
+    _persist_selected_turn_artifacts(
+        paths,
+        turn_record=turn_record,
+        session_id=(
+            str(result.get("session_id"))
+            if isinstance(result.get("session_id"), str) and result.get("session_id")
+            else None
+        ),
+        trace_id=(
+            str(result.get("trace_id"))
+            if isinstance(result.get("trace_id"), str) and result.get("trace_id")
+            else None
+        ),
+    )
     return result
+
+
+def _persist_selected_turn_artifacts(
+    paths: WorkspacePaths,
+    *,
+    turn_record: dict[str, Any],
+    session_id: str | None,
+    trace_id: str | None,
+) -> None:
+    conversation_id = turn_record.get("conversation_id")
+    turn_id = turn_record.get("turn_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return
+    if not isinstance(turn_id, str) or not turn_id:
+        return
+    if not isinstance(trace_id, str) or not trace_id:
+        return
+    if (
+        normalize_front_door_state(turn_record.get("front_door_state"))
+        != FRONT_DOOR_STATE_CANONICAL_ASK
+    ):
+        return
+    if isinstance(turn_record.get("committed_run_id"), str) and turn_record.get("committed_run_id"):
+        return
+    update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates={
+            "selected_session_ids": [session_id] if session_id is not None else [],
+            "selected_trace_ids": [trace_id],
+        },
+        refresh_workspace_snapshot=False,
+    )
 
 
 def trace_session(

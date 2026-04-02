@@ -9,7 +9,7 @@ import stat
 import sys
 from pathlib import Path
 
-from docmason.project import WorkspacePaths, write_json
+from docmason.project import BOOTSTRAP_STATE_SCHEMA_VERSION, WorkspacePaths, write_json
 
 
 def seed_repo_local_managed_python(
@@ -119,7 +119,7 @@ def seed_self_contained_bootstrap_state(
     write_json(
         workspace.bootstrap_state_path,
         {
-            "schema_version": 4,
+            "schema_version": BOOTSTRAP_STATE_SCHEMA_VERSION,
             "status": "ready",
             "environment_ready": True,
             "workspace_runtime_ready": True,
@@ -193,7 +193,7 @@ def seed_mixed_external_venv_bootstrap_state(
     write_json(
         workspace.bootstrap_state_path,
         {
-            "schema_version": 4,
+            "schema_version": BOOTSTRAP_STATE_SCHEMA_VERSION,
             "status": "action-required",
             "environment_ready": False,
             "workspace_runtime_ready": False,
@@ -260,7 +260,7 @@ def seed_degraded_broken_venv_bootstrap_state(
     write_json(
         workspace.bootstrap_state_path,
         {
-            "schema_version": 4,
+            "schema_version": BOOTSTRAP_STATE_SCHEMA_VERSION,
             "status": "action-required",
             "environment_ready": False,
             "workspace_runtime_ready": False,

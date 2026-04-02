@@ -885,6 +885,7 @@ def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
 
 
 def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
+    from .commands import environment_snapshot
     from .interaction import interaction_ingest_snapshot
     from .project import cached_bootstrap_readiness, knowledge_base_snapshot
     from .run_control import repair_stale_active_runs
@@ -892,9 +893,10 @@ def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
 
     repair_actions = repair_stale_shared_jobs(paths)
     repair_actions.extend(repair_stale_active_runs(paths))
+    environment = environment_snapshot(paths)
     environment_state = cached_bootstrap_readiness(paths, require_sync_capability=False)
     sync_environment_state = cached_bootstrap_readiness(paths, require_sync_capability=True)
-    ready = bool(environment_state.get("ready"))
+    ready = bool(environment.get("ready"))
     sync_ready = bool(sync_environment_state.get("ready"))
     kb_snapshot = knowledge_base_snapshot(paths)
     publish_manifest = read_json(paths.current_publish_manifest_path)
@@ -939,7 +941,10 @@ def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
         elif job.get("job_family") == "sync":
             next_legal_actions.append("sync --yes")
     if not ready and not host_access_upgrade_pending:
-        next_legal_actions.append("prepare")
+        if environment.get("host_access_required"):
+            next_legal_actions.append("switch-host-to-full-access")
+        else:
+            next_legal_actions.append("prepare")
     if ready and (not kb_snapshot.get("present") or kb_snapshot.get("stale")):
         next_legal_actions.append("sync")
     payload = {
@@ -950,6 +955,9 @@ def workspace_state_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
             "ready": bool(ready),
             "sync_capable": bool(sync_ready),
             "bootstrap_reason": environment_state.get("reason"),
+            "host_access_required": bool(environment.get("host_access_required")),
+            "host_access_guidance": environment.get("host_access_guidance"),
+            "host_access_reasons": list(environment.get("host_access_reasons", [])),
             "capability_gaps": (
                 []
                 if sync_ready

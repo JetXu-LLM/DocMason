@@ -5,7 +5,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import docmason
 from docmason.release_version import (
     read_project_version,
     release_tag_for_version,
@@ -43,3 +45,21 @@ class ReleaseVersionContractTests(unittest.TestCase):
     def test_validate_release_tag_rejects_drift(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not match committed project version"):
             validate_release_tag("v0.1.0-rc2", expected_version="0.1.0")
+
+    def test_package_version_prefers_committed_source_version(self) -> None:
+        with (
+            mock.patch.object(docmason, "read_project_version", return_value="0.1.0"),
+            mock.patch.object(
+                docmason.metadata,
+                "version",
+                side_effect=AssertionError("installed metadata should not win over source truth"),
+            ),
+        ):
+            self.assertEqual(docmason._package_version(), "0.1.0")
+
+    def test_package_version_falls_back_to_installed_metadata(self) -> None:
+        with (
+            mock.patch.object(docmason, "read_project_version", side_effect=FileNotFoundError),
+            mock.patch.object(docmason.metadata, "version", return_value="0.1.0"),
+        ):
+            self.assertEqual(docmason._package_version(), "0.1.0")

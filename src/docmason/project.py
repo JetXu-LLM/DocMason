@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 MINIMUM_PYTHON = (3, 11)
-BOOTSTRAP_STATE_SCHEMA_VERSION = 4
+BOOTSTRAP_STATE_SCHEMA_VERSION = 5
 MANUAL_WORKSPACE_RECOVERY_DOC = "docs/setup/manual-workspace-recovery.md"
 
 
@@ -1347,6 +1347,11 @@ def bootstrap_state_summary(
         "bootstrap_source": state.get("bootstrap_source") if state else None,
         "host_access_required": bool(state.get("host_access_required")) if state else False,
         "host_access_guidance": state.get("host_access_guidance") if state else None,
+        "host_access_reasons": (
+            list(state.get("host_access_reasons", []))
+            if state and isinstance(state.get("host_access_reasons"), list)
+            else []
+        ),
         "toolchain": dict(toolchain_value) if isinstance(toolchain_value, dict) else {},
         "manual_recovery_doc": readiness.get("manual_recovery_doc")
         or manual_workspace_recovery_doc(),

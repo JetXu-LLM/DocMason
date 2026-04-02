@@ -11,6 +11,7 @@ This is a fallback reference, not the ordinary first-run story.
 
 On the native macOS path, DocMason should set up a repo-local managed Python, a repo-local `.venv`, and any needed machine-level dependencies with minimal manual work.
 If the normal automation path succeeds, stop here and use it.
+On native Codex, the ordinary path should first settle the governed launcher and any explicit `Default permissions` to `Full access` boundary before this page is used.
 
 ## Recovery Goal
 
@@ -101,6 +102,7 @@ If the current source corpus includes `.pptx`, `.ppt`, `.docx`, `.doc`, `.xlsx`,
 - native Codex/macOS ordinary path:
   - prefer going back to the governed launcher and `docmason prepare --yes`
   - if the thread is still in Codex `Default permissions`, switch it to `Full access` first
+  - do not treat repeated per-command `Yes` prompts as equivalent to switching the thread to `Full access`
 
 - macOS with Homebrew:
 
@@ -183,3 +185,4 @@ Stop and escalate when:
 - host permissions are insufficient for the required system changes
 - `doctor --json` still reports a degraded or mixed environment after repair
 - the workspace cannot reach a self-contained repo-local runtime
+- the ordinary native path kept trying manual cache probing or repeated command-level approval prompts instead of surfacing one explicit higher-access boundary

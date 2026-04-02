@@ -24,6 +24,8 @@ from .conversation import (
 )
 from .project import WorkspacePaths, locate_workspace
 from .release_entry import maybe_run_release_entry_check
+from .retrieval import trace_answer_file
+from .runtime_log_index import discover_turn_artifact_candidates
 
 _WAITING_TURN_STATES = frozenset({"awaiting-confirmation", "waiting-shared-job"})
 
@@ -109,19 +111,80 @@ def _persist_host_turn_context(
 
 
 def _answer_text(paths: WorkspacePaths, answer_file_path: str | None) -> str | None:
-    relative = _nonempty_string(answer_file_path)
-    if relative is None:
-        return None
-    path = Path(relative)
-    if not path.is_absolute():
-        path = paths.root / path
-    if not path.exists():
+    path = _resolved_answer_path(paths, answer_file_path)
+    if path is None or not path.exists():
         return None
     try:
         text = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         return None
     return text or None
+
+
+def _resolved_answer_path(paths: WorkspacePaths, answer_file_path: str | None) -> Path | None:
+    relative = _nonempty_string(answer_file_path)
+    if relative is None:
+        return None
+    path = Path(relative)
+    if not path.is_absolute():
+        path = paths.root / path
+    return path
+
+
+def _autotrace_finalize_ids(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    turn: dict[str, Any],
+    request: dict[str, Any],
+) -> tuple[list[str] | None, list[str] | None]:
+    requested_support_basis = _nonempty_string(request.get("support_basis")) or _nonempty_string(
+        turn.get("support_basis")
+    )
+    if requested_support_basis in {
+        "external-source-verified",
+        "governed-boundary",
+        "model-knowledge",
+    }:
+        return None, None
+    answer_file_path = _nonempty_string(request.get("answer_file_path")) or _nonempty_string(
+        turn.get("answer_file_path")
+    )
+    answer_path = _resolved_answer_path(paths, answer_file_path)
+    if answer_file_path is None or answer_path is None or not answer_path.exists():
+        return None, None
+    inner_workflow_id = _nonempty_string(turn.get("inner_workflow_id")) or "grounded-answer"
+    _candidate_session_ids, candidate_trace_ids = discover_turn_artifact_candidates(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        run_id=_nonempty_string(turn.get("active_run_id")),
+        inner_workflow_id=inner_workflow_id,
+        answer_file_path=answer_file_path,
+    )
+    if _string_list(turn.get("trace_ids")) or candidate_trace_ids:
+        return None, None
+    trace_result = trace_answer_file(
+        paths,
+        answer_file=answer_path,
+        top=3,
+        log_context=_turn_log_context(
+            {
+                "conversation_id": conversation_id,
+                "turn_id": turn_id,
+                **turn,
+                "entry_workflow_id": _nonempty_string(turn.get("entry_workflow_id")) or "ask",
+            }
+        ),
+        log_origin=_nonempty_string(turn.get("log_origin")),
+        declared_answer_state=_nonempty_string(turn.get("answer_state")),
+    )
+    session_id = _nonempty_string(trace_result.get("session_id"))
+    trace_id = _nonempty_string(trace_result.get("trace_id"))
+    if trace_id is None:
+        return None, None
+    return [session_id] if session_id is not None else None, [trace_id]
 
 
 def _next_step(status: str) -> str:
@@ -273,7 +336,10 @@ def _host_turn_payload(
         "bundle_paths": _string_list(turn.get("bundle_paths")),
         "bundle_notice": _bundle_notice(turn, user_reply_allowed=user_reply_allowed),
         "inner_workflow_id": _nonempty_string(turn.get("inner_workflow_id")),
+        "question_class": _nonempty_string(turn.get("question_class")),
         "question_domain": _nonempty_string(turn.get("question_domain")),
+        "analysis_origin": _nonempty_string(turn.get("analysis_origin")),
+        "route_reason": _nonempty_string(turn.get("route_reason")),
         "support_strategy": _nonempty_string(turn.get("support_strategy")),
         "reference_resolution": _mapping(turn.get("reference_resolution")) or None,
         "reference_resolution_summary": _nonempty_string(
@@ -443,54 +509,126 @@ def finalize_canonical_ask(
             "primary_issue_code": "illegal-finalize-override",
             "issue_codes": ["illegal-finalize-override"],
         }
-    try:
-        completed = complete_ask_turn(
+    explicit_session_ids = _string_list(request.get("session_ids")) if "session_ids" in request else None
+    explicit_trace_ids = _string_list(request.get("trace_ids")) if "trace_ids" in request else None
+    inner_workflow_id = str(turn.get("inner_workflow_id") or "grounded-answer")
+    requested_answer_file_path = _nonempty_string(request.get("answer_file_path"))
+    requested_response_excerpt = _nonempty_string(request.get("response_excerpt"))
+    requested_support_basis = _nonempty_string(request.get("support_basis"))
+    requested_support_manifest_path = _nonempty_string(request.get("support_manifest_path"))
+    requested_support_manifest_sources = (
+        request.get("support_manifest_sources")
+        if isinstance(request.get("support_manifest_sources"), list)
+        else None
+    )
+    requested_support_manifest_key_assertions = (
+        request.get("support_manifest_key_assertions")
+        if isinstance(request.get("support_manifest_key_assertions"), list)
+        else None
+    )
+    requested_support_manifest_notes = _nonempty_string(request.get("support_manifest_notes"))
+
+    def _complete_turn(
+        *,
+        session_ids_override: list[str] | None,
+        trace_ids_override: list[str] | None,
+    ) -> dict[str, Any]:
+        return complete_ask_turn(
             paths,
             conversation_id=conversation_id,
             turn_id=turn_id,
-            inner_workflow_id=str(turn.get("inner_workflow_id") or "grounded-answer"),
-            session_ids=(
-                _string_list(request.get("session_ids")) if "session_ids" in request else None
-            ),
-            trace_ids=(
-                _string_list(request.get("trace_ids")) if "trace_ids" in request else None
-            ),
-            answer_file_path=_nonempty_string(request.get("answer_file_path")),
-            response_excerpt=_nonempty_string(request.get("response_excerpt")),
-            support_basis=_nonempty_string(request.get("support_basis")),
-            support_manifest_path=_nonempty_string(request.get("support_manifest_path")),
-            support_manifest_sources=(
-                request.get("support_manifest_sources")
-                if isinstance(request.get("support_manifest_sources"), list)
-                else None
-            ),
-            support_manifest_key_assertions=(
-                request.get("support_manifest_key_assertions")
-                if isinstance(request.get("support_manifest_key_assertions"), list)
-                else None
-            ),
-            support_manifest_notes=_nonempty_string(request.get("support_manifest_notes")),
+            inner_workflow_id=inner_workflow_id,
+            session_ids=session_ids_override,
+            trace_ids=trace_ids_override,
+            answer_file_path=requested_answer_file_path,
+            response_excerpt=requested_response_excerpt,
+            support_basis=requested_support_basis,
+            support_manifest_path=requested_support_manifest_path,
+            support_manifest_sources=requested_support_manifest_sources,
+            support_manifest_key_assertions=requested_support_manifest_key_assertions,
+            support_manifest_notes=requested_support_manifest_notes,
+        )
+
+    def _failed_finalize_state(error: Exception) -> tuple[dict[str, Any], str | None, list[str]]:
+        failed_turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
+        issue_codes = _string_list(failed_turn.get("issue_codes"))
+        primary_issue_code = _nonempty_string(failed_turn.get("primary_issue_code"))
+        if primary_issue_code is None and str(error).strip():
+            primary_issue_code = "finalize-blocked"
+        if not issue_codes and primary_issue_code is not None:
+            issue_codes = [primary_issue_code]
+        return failed_turn, primary_issue_code, issue_codes
+
+    try:
+        completed = _complete_turn(
+            session_ids_override=explicit_session_ids,
+            trace_ids_override=explicit_trace_ids,
         )
     except Exception as exc:
+        failed_turn, primary_issue_code, issue_codes = _failed_finalize_state(exc)
+        blocked_detail = str(exc)
+        if (
+            "missing-ask-owned-trace" in issue_codes
+            and explicit_session_ids is None
+            and explicit_trace_ids is None
+        ):
+            try:
+                recovered_session_ids, recovered_trace_ids = _autotrace_finalize_ids(
+                    paths,
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    turn={"conversation_id": conversation_id, "turn_id": turn_id, **failed_turn},
+                    request=request,
+                )
+            except Exception as recovery_exc:
+                blocked_detail = "autotrace-recovery-failed: " + (
+                    str(recovery_exc).strip() or type(recovery_exc).__name__
+                )
+                recovered_session_ids = None
+                recovered_trace_ids = None
+            if recovered_session_ids is not None or recovered_trace_ids is not None:
+                try:
+                    completed = _complete_turn(
+                        session_ids_override=recovered_session_ids,
+                        trace_ids_override=recovered_trace_ids,
+                    )
+                except Exception as retry_exc:
+                    exc = retry_exc
+                    blocked_detail = str(exc)
+                    failed_turn, primary_issue_code, issue_codes = _failed_finalize_state(exc)
+                else:
+                    completed_turn = load_turn_record(
+                        paths,
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                    )
+                    return _host_turn_payload(
+                        paths,
+                        turn={
+                            "conversation_id": conversation_id,
+                            "turn_id": turn_id,
+                            **completed_turn,
+                            "committed_run_id": _nonempty_string(
+                                completed_turn.get("committed_run_id")
+                                or completed.get("committed_run_id")
+                            ),
+                        },
+                        include_release_entry=True,
+                    )
         quarantined_path = quarantine_noncanonical_answer_file(
             paths,
             conversation_id=conversation_id,
             turn_id=turn_id,
+            retain_canonical=True,
         )
-        failed_turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
-        issue_codes = _string_list(failed_turn.get("issue_codes"))
-        primary_issue_code = _nonempty_string(failed_turn.get("primary_issue_code"))
-        if primary_issue_code is None and str(exc).strip():
-            primary_issue_code = "finalize-blocked"
-        if not issue_codes and primary_issue_code is not None:
-            issue_codes = [primary_issue_code]
         return {
             "status": "blocked",
             "user_reply_allowed": False,
             "conversation_id": conversation_id,
             "turn_id": turn_id,
             "run_id": _nonempty_string(failed_turn.get("active_run_id")),
-            "detail": str(exc),
+            "answer_file_path": _nonempty_string(failed_turn.get("answer_file_path")),
+            "detail": blocked_detail,
             "primary_issue_code": primary_issue_code,
             "issue_codes": issue_codes,
             "noncanonical_answer_file_path": quarantined_path,

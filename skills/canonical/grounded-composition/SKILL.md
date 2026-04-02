@@ -83,6 +83,7 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - add draft artifacts when needed
 9. Run final provenance tracing over the answer file when the result makes source-grounded claims.
    - do not keep retracing the same unchanged answer text; if the answer-file digest did not change and no new trace or session is needed, stop or reuse the existing final trace instead of silently looping
+   - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; hidden finalize can safely reuse the latest same-turn selected ledger for an unchanged answer file, but explicit selected IDs remain the preferred handoff, and if finalize later blocks on artifact settlement only, continue from that same file version instead of regenerating identical text
 10. Return the main result plus any relevant bundle paths, support boundary, overall support basis, and next steps to the main agent.
 
 ## Escalation Rules
