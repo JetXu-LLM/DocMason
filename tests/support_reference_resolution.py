@@ -1355,7 +1355,10 @@ class ReferenceResolutionTests(unittest.TestCase):
 
     def test_cli_dispatches_hidden_ask_subcommand(self) -> None:
         with (
-            mock.patch("docmason.cli.run_hidden_ask_cli", return_value=0) as hidden_ask,
+            mock.patch(
+                "docmason.host_integration.run_hidden_ask_cli",
+                return_value=0,
+            ) as hidden_ask,
             mock.patch("sys.stdin", io.StringIO("")),
         ):
             result = docmason_main(["_ask"])

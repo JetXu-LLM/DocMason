@@ -29,8 +29,8 @@ If the agent cannot inspect local files or run commands, stop and explain that t
    - for pending high-intrusion prepare, direct the next action to `docmason prepare --yes`
    - for pending material sync, direct the next action to `docmason sync --yes`
 6. If `office-renderer` is blocked:
-   - on macOS with Homebrew, recommend `brew install --cask libreoffice-still`
-   - on macOS without Homebrew, recommend the official installer from `https://www.libreoffice.org/download/download/`
+   - on macOS with Homebrew already present, recommend `brew install --cask libreoffice-still` or `docmason prepare --yes`
+   - on macOS without Homebrew, recommend `docmason prepare --yes` or the official installer from `https://www.libreoffice.org/download/download/`
    - on Linux, recommend the distro package manager or official packages, then re-run `doctor`
 7. If the normal launcher or `prepare` path still cannot complete honestly after the governed automatic path has already had enough access, point the deeper fallback to `docs/setup/manual-workspace-recovery.md`.
 8. Return the diagnosis to the main agent without mutating workspace state.
@@ -51,7 +51,7 @@ If the agent cannot inspect local files or run commands, stop and explain that t
 - Treat unsupported platforms, unsupported Python versions, and missing editable-install availability as blockers.
 - Treat only a `self-contained` prepared toolchain as ready for ordinary workspace asks.
 - Treat missing `uv`, stale adapters, and an empty source corpus as degraded conditions rather than hard blockers.
-- On native Codex/macOS, treat missing Homebrew plus LibreOffice machine baseline as a blocker even before the current corpus demands Office rendering.
+- On native Codex/macOS, treat missing LibreOffice as a blocker only when the workspace currently depends on Office rendering. Missing Homebrew alone is informational.
 - On native Codex/macOS, treat `Default permissions` versus `Full access` as an explicit first-class boundary; a per-command `Yes` popup is not equivalent to switching the thread to `Full access`.
 - Outside that native machine-baseline policy, treat missing LibreOffice as a blocker only when the current corpus contains PPTX, DOCX, or XLSX files.
 - For Claude Code or another compatibility host, keep any higher-access fallback wording brief and host-generic instead of copying the Codex-specific wording.

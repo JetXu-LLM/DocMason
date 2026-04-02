@@ -312,10 +312,73 @@ workspace_runtime_ready() {
   [[ -x "$ROOT/.venv/bin/python" && -f "$ROOT/runtime/bootstrap_state.json" ]]
 }
 
+validated_soffice_binary() {
+  local candidate="$1"
+  local output_path=""
+  local probe_pid=""
+  local ticks=0
+
+  [[ -x "$candidate" ]] || return 1
+  output_path="$(mktemp "${TMPDIR:-/tmp}/docmason-soffice-version.XXXXXX")" || return 1
+
+  "$candidate" --version >"$output_path" 2>&1 &
+  probe_pid="$!"
+  while kill -0 "$probe_pid" >/dev/null 2>&1; do
+    if (( ticks >= 150 )); then
+      pkill -P "$probe_pid" >/dev/null 2>&1 || true
+      kill "$probe_pid" >/dev/null 2>&1 || true
+      sleep 0.1
+      pkill -P "$probe_pid" >/dev/null 2>&1 || true
+      kill -9 "$probe_pid" >/dev/null 2>&1 || true
+      wait "$probe_pid" >/dev/null 2>&1 || true
+      rm -f "$output_path"
+      return 1
+    fi
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  if ! wait "$probe_pid" >/dev/null 2>&1; then
+    rm -f "$output_path"
+    return 1
+  fi
+  if grep -qi "libreoffice" "$output_path"; then
+    rm -f "$output_path"
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  rm -f "$output_path"
+  return 1
+}
+
+scan_office_renderer_requirement() {
+  OFFICE_RENDERER_REQUIRED=0
+  [[ -d "$ROOT/original_doc" ]] || return 0
+
+  while IFS= read -r -d '' path; do
+    local base_name=""
+    local suffix=""
+    base_name="${path##*/}"
+    case "$base_name" in
+      .*|~\$*)
+        continue
+        ;;
+    esac
+    suffix="${base_name##*.}"
+    suffix="$(printf '%s' "$suffix" | tr '[:upper:]' '[:lower:]')"
+    case "$suffix" in
+      ppt|pptx|doc|docx|xls|xlsx)
+        OFFICE_RENDERER_REQUIRED=1
+        return 0
+        ;;
+    esac
+  done < <(find "$ROOT/original_doc" -type d -name '.*' -prune -o -type f -print0 2>/dev/null)
+}
+
 probe_machine_baseline() {
   local platform_name=""
   local soffice_binary=""
   local missing=()
+  local candidate=""
 
   MACHINE_BASELINE_APPLICABLE=0
   MACHINE_BASELINE_READY=1
@@ -323,6 +386,7 @@ probe_machine_baseline() {
   MACHINE_BASELINE_DETAIL="Native macOS machine-baseline policy is not active for this host surface."
   BREW_BINARY=""
   LIBREOFFICE_BINARY=""
+  OFFICE_RENDERER_REQUIRED=0
   MACHINE_BASELINE_MISSING_COMPONENTS=()
 
   platform_name="$(uname -s)"
@@ -331,27 +395,35 @@ probe_machine_baseline() {
   fi
 
   MACHINE_BASELINE_APPLICABLE=1
+  scan_office_renderer_requirement
   if command -v brew >/dev/null 2>&1; then
     BREW_BINARY="$(command -v brew)"
   fi
-  if command -v soffice >/dev/null 2>&1; then
-    soffice_binary="$(command -v soffice)"
-  elif [[ -x "/Applications/LibreOffice.app/Contents/MacOS/soffice" ]]; then
-    soffice_binary="/Applications/LibreOffice.app/Contents/MacOS/soffice"
-  fi
+  for candidate in \
+    "$(command -v soffice 2>/dev/null || true)" \
+    "$(command -v libreoffice 2>/dev/null || true)" \
+    "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+  do
+    [[ -n "$candidate" ]] || continue
+    soffice_binary="$(validated_soffice_binary "$candidate" || true)"
+    [[ -n "$soffice_binary" ]] && break
+  done
   LIBREOFFICE_BINARY="$soffice_binary"
 
-  if [[ -z "$BREW_BINARY" ]]; then
-    missing+=("Homebrew")
-  fi
-  if [[ -z "$LIBREOFFICE_BINARY" ]]; then
+  if [[ "$OFFICE_RENDERER_REQUIRED" == "1" && -z "$LIBREOFFICE_BINARY" ]]; then
     missing+=("LibreOffice")
   fi
 
   if (( ${#missing[@]} == 0 )); then
     MACHINE_BASELINE_READY=1
     MACHINE_BASELINE_STATUS="ready"
-    MACHINE_BASELINE_DETAIL="Native Codex machine baseline is ready."
+    if [[ "$OFFICE_RENDERER_REQUIRED" == "1" && -n "$LIBREOFFICE_BINARY" && -z "$BREW_BINARY" ]]; then
+      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is ready for the current corpus. LibreOffice is installed, and Homebrew is optional."
+    elif [[ "$OFFICE_RENDERER_REQUIRED" == "1" ]]; then
+      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is ready."
+    else
+      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is ready. LibreOffice is optional until Office sources are present."
+    fi
     return 0
   fi
 
@@ -359,13 +431,13 @@ probe_machine_baseline() {
   MACHINE_BASELINE_MISSING_COMPONENTS=("${missing[@]}")
   if [[ "$FULL_MACHINE_ACCESS" == "true" ]]; then
     MACHINE_BASELINE_STATUS="install-required"
-    MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]}."
+    MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]} for the current Office corpus."
   else
     MACHINE_BASELINE_STATUS="host-access-upgrade-required"
     if [[ "$PERMISSION_MODE" == "default-permissions" ]]; then
-      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]}, and the current thread is still in \`Default permissions\`."
+      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]} for the current Office corpus, and the current thread is still in \`Default permissions\`."
     else
-      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]}, and the current turn does not expose \`Full access\` yet."
+      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]} for the current Office corpus, and the current turn does not expose \`Full access\` yet."
     fi
   fi
 }

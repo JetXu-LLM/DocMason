@@ -24,6 +24,7 @@ from docmason.commands import (
     READY,
     CommandExecution,
     CommandReport,
+    _resolve_official_libreoffice_macos_download,
     doctor_workspace,
     prepare_workspace,
     status_workspace,
@@ -409,6 +410,28 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                     exit_code = main(arguments[command])
                 self.assertEqual(exit_code, reports[command].exit_code)
                 self.assertTrue(buffer.getvalue().strip())
+
+    def test_cli_import_does_not_eagerly_pull_hidden_ask_dependencies(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-c",
+                (
+                    "import sys; "
+                    f"sys.path.insert(0, {str(ROOT / 'src')!r}); "
+                    "import docmason.cli; "
+                    "print('ok')"
+                ),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ok")
 
     def test_prepare_requests_repo_local_uv_bootstrap_when_uv_is_missing(self) -> None:
         workspace = self.make_workspace()
@@ -927,11 +950,190 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(payload["status"], ACTION_REQUIRED)
         self.assertEqual(payload["control_plane"]["confirmation_kind"], "host-access-upgrade")
         self.assertTrue(payload["host_access_required"])
-        self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
+        self.assertEqual(payload["machine_baseline_status"], "ready")
         self.assertIn("Default permissions", payload["host_access_guidance"])
         self.assertIn("Full access", payload["next_steps"][0])
         self.assertFalse(shared_cache.exists())
         self.assertNotIn("manual-workspace-recovery", completed.stderr)
+
+    def test_bootstrap_launcher_does_not_pause_for_missing_homebrew_when_office_is_not_required(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        (workspace.root / "runtime").mkdir(parents=True, exist_ok=True)
+        marker_path = workspace.root / "runtime" / "launcher-ran.txt"
+        workspace.toolchain_bootstrap_python.parent.mkdir(parents=True, exist_ok=True)
+        workspace.toolchain_bootstrap_python.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        workspace.toolchain_bootstrap_python.chmod(0o755)
+        (workspace.root / "src" / "docmason" / "__main__.py").write_text(
+            "from __future__ import annotations\n"
+            "import json\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "\n"
+            "Path(os.environ['DOCMASON_BOOTSTRAP_MARKER']).write_text('ran\\n', encoding='utf-8')\n"
+            "print(json.dumps({'status': 'ready'}))\n",
+            encoding="utf-8",
+        )
+
+        fake_bin_dir = workspace.root / ".fake-bin-no-brew"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        fake_uname = fake_bin_dir / "uname"
+        fake_uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        fake_uname.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "DOCMASON_AGENT_SURFACE": "codex",
+            "DOCMASON_PERMISSION_MODE": "default-permissions",
+            "DOCMASON_CODEX_NETWORK_ACCESS": "true",
+            "DOCMASON_CODEX_WRITABLE_ROOTS": json.dumps([str(workspace.root)]),
+            "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
+            "PATH": str(fake_bin_dir) + os.pathsep + "/usr/bin:/bin",
+        }
+        completed = subprocess.run(
+            [str(script_path), "--yes", "--json"],
+            cwd=workspace.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertTrue(marker_path.exists())
+
+    def test_bootstrap_launcher_pauses_when_office_renderer_is_required_and_missing(self) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_soffice_path = (
+            workspace.root / "missing-LibreOffice.app" / "Contents" / "MacOS" / "soffice"
+        )
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh")
+            .read_text(encoding="utf-8")
+            .replace(
+                "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                str(fake_soffice_path),
+            ),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        (workspace.root / "runtime").mkdir(parents=True, exist_ok=True)
+        marker_path = workspace.root / "runtime" / "launcher-should-not-run.txt"
+        workspace.toolchain_bootstrap_python.parent.mkdir(parents=True, exist_ok=True)
+        workspace.toolchain_bootstrap_python.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        workspace.toolchain_bootstrap_python.chmod(0o755)
+        (workspace.source_dir / "deck.pptx").write_text("pptx placeholder\n", encoding="utf-8")
+        (workspace.root / "src" / "docmason" / "__main__.py").write_text(
+            "from __future__ import annotations\n"
+            "import json\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "\n"
+            "Path(os.environ['DOCMASON_BOOTSTRAP_MARKER']).write_text('ran\\n', encoding='utf-8')\n"
+            "print(json.dumps({'status': 'ready'}))\n",
+            encoding="utf-8",
+        )
+
+        fake_bin_dir = workspace.root / ".fake-bin-office-gap"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        fake_uname = fake_bin_dir / "uname"
+        fake_uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        fake_uname.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "DOCMASON_AGENT_SURFACE": "codex",
+            "DOCMASON_PERMISSION_MODE": "default-permissions",
+            "DOCMASON_CODEX_NETWORK_ACCESS": "true",
+            "DOCMASON_CODEX_WRITABLE_ROOTS": json.dumps([str(workspace.root)]),
+            "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
+            "PATH": str(fake_bin_dir) + os.pathsep + "/usr/bin:/bin",
+        }
+        completed = subprocess.run(
+            [str(script_path), "--yes", "--json"],
+            cwd=workspace.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], ACTION_REQUIRED)
+        self.assertEqual(payload["control_plane"]["confirmation_kind"], "host-access-upgrade")
+        self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
+        self.assertFalse(marker_path.exists())
+
+    def test_bootstrap_launcher_treats_invalid_soffice_candidate_as_missing(self) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_soffice_path = (
+            workspace.root / "missing-LibreOffice.app" / "Contents" / "MacOS" / "soffice"
+        )
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh")
+            .read_text(encoding="utf-8")
+            .replace(
+                "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                str(fake_soffice_path),
+            ),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        (workspace.source_dir / "deck.docx").write_text("docx placeholder\n", encoding="utf-8")
+
+        fake_bin_dir = workspace.root / ".fake-bin-invalid-soffice"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        (fake_bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        (fake_bin_dir / "uname").chmod(0o755)
+        (fake_bin_dir / "soffice").write_text(
+            "#!/bin/sh\n"
+            "printf 'Preview 1.0\\n'\n",
+            encoding="utf-8",
+        )
+        (fake_bin_dir / "soffice").chmod(0o755)
+
+        env = {
+            **os.environ,
+            "DOCMASON_AGENT_SURFACE": "codex",
+            "DOCMASON_PERMISSION_MODE": "default-permissions",
+            "DOCMASON_CODEX_NETWORK_ACCESS": "true",
+            "DOCMASON_CODEX_WRITABLE_ROOTS": json.dumps([str(workspace.root)]),
+            "PATH": str(fake_bin_dir) + os.pathsep + "/usr/bin:/bin",
+        }
+        completed = subprocess.run(
+            [str(script_path), "--yes", "--json"],
+            cwd=workspace.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], ACTION_REQUIRED)
+        self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
 
     def test_bootstrap_launcher_uses_repo_local_cache_in_controlled_codex_mode(self) -> None:
         workspace = self.make_workspace()
@@ -1430,6 +1632,105 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             seen_commands,
         )
 
+    def test_prepare_is_ready_without_homebrew_when_office_renderer_is_already_available(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        seen_commands: list[list[str]] = []
+
+        def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
+            command_list = list(command)
+            seen_commands.append(command_list)
+            return self.fake_prepare_runner(workspace)(command_list, cwd)
+
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch(
+                "docmason.commands.office_renderer_snapshot",
+                return_value={
+                    "required": True,
+                    "ready": True,
+                    "binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                    "detail": "LibreOffice rendering is available.",
+                },
+            ),
+            mock.patch("docmason.commands.find_brew_binary", return_value=None),
+            mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "full-access",
+                },
+                clear=False,
+            ),
+        ):
+            report = prepare_workspace(
+                workspace,
+                assume_yes=True,
+                command_runner=runner,
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["status"], READY)
+        self.assertTrue(report.payload["machine_baseline_ready"])
+        self.assertEqual(report.payload["machine_baseline_status"], "ready")
+        self.assertFalse(
+            any(command and command[0].endswith("brew") for command in seen_commands)
+        )
+
+    def test_prepare_is_ready_without_libreoffice_when_office_renderer_is_not_required(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        seen_commands: list[list[str]] = []
+
+        def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
+            command_list = list(command)
+            seen_commands.append(command_list)
+            return self.fake_prepare_runner(workspace)(command_list, cwd)
+
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch(
+                "docmason.commands.office_renderer_snapshot",
+                return_value={
+                    "required": False,
+                    "ready": False,
+                    "binary": None,
+                    "detail": (
+                        "LibreOffice is optional until PowerPoint, Word, or Excel sources are "
+                        "present."
+                    ),
+                },
+            ),
+            mock.patch("docmason.commands.find_brew_binary", return_value=None),
+            mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "full-access",
+                },
+                clear=False,
+            ),
+        ):
+            report = prepare_workspace(
+                workspace,
+                assume_yes=True,
+                command_runner=runner,
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["status"], READY)
+        self.assertTrue(report.payload["machine_baseline_ready"])
+        self.assertEqual(report.payload["machine_baseline_status"], "ready")
+        self.assertFalse(any(command and command[0].endswith("brew") for command in seen_commands))
+
     def test_prepare_generates_repo_local_skill_shims(self) -> None:
         workspace = self.make_workspace()
 
@@ -1496,19 +1797,16 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertTrue(claude_shim.is_symlink())
         self.assertEqual(codex_shim.resolve(), optional_skill.parent.resolve())
 
-    def test_prepare_auto_installs_homebrew_before_managed_libreoffice_when_feasible(self) -> None:
+    def test_prepare_auto_installs_libreoffice_from_official_macos_path_without_homebrew(
+        self,
+    ) -> None:
         workspace = self.make_workspace()
         seen_commands: list[list[str]] = []
-        brew_call_count = {"value": 0}
 
         def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
             command_list = list(command)
             seen_commands.append(command_list)
             return self.fake_prepare_runner(workspace)(command_list, cwd)
-
-        def staged_brew_binary() -> str | None:
-            brew_call_count["value"] += 1
-            return None if brew_call_count["value"] < 4 else "/opt/homebrew/bin/brew"
 
         with (
             mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
@@ -1528,35 +1826,20 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 ],
             ),
             mock.patch(
-                "docmason.commands.homebrew_auto_install_plan",
-                return_value={
-                    "feasible": True,
-                    "detail": "The official unattended Homebrew install path is available.",
-                    "expected_brew": "/opt/homebrew/bin/brew",
-                    "install_command": [
-                        "/usr/bin/env",
-                        "NONINTERACTIVE=1",
-                        "/bin/bash",
-                        "-c",
-                        '"$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
-                    ],
-                    "install_display": "official install",
-                },
+                "docmason.commands.find_brew_binary",
+                return_value=None,
             ),
             mock.patch(
-                "docmason.commands.refresh_brew_binary_after_install",
-                return_value="/opt/homebrew/bin/brew",
-            ),
+                "docmason.commands._install_libreoffice_from_official_macos_package",
+                return_value=(
+                    True,
+                    "Installed LibreOffice from the official macOS package at "
+                    "/Applications/LibreOffice.app.",
+                ),
+            ) as official_install,
             mock.patch(
                 "docmason.commands.preferred_libreoffice_install_command",
-                return_value=(
-                    ["/opt/homebrew/bin/brew", "install", "--cask", "libreoffice-still"],
-                    "`brew install --cask libreoffice-still`",
-                ),
-            ),
-            mock.patch(
-                "docmason.commands.find_brew_binary",
-                side_effect=staged_brew_binary,
+                return_value=(None, None),
             ),
             mock.patch("docmason.commands.sys.platform", "darwin"),
             mock.patch.dict(
@@ -1579,19 +1862,78 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
         self.assertEqual(report.payload["machine_baseline_status"], "ready")
-        self.assertIn(
-            [
-                "/usr/bin/env",
-                "NONINTERACTIVE=1",
-                "/bin/bash",
-                "-c",
-                '"$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
-            ],
-            seen_commands,
+        official_install.assert_called_once()
+        self.assertFalse(any(command and command[0].endswith("brew") for command in seen_commands))
+
+    def test_resolve_official_libreoffice_macos_download_parses_current_arch_contract(self) -> None:
+        selector_html = (
+            '<option value="/download/download-libreoffice/?type=mac-aarch64'
+            '&version=26.2.2&lang=en-US">macOS (Apple Silicon)</option>'
         )
+        arch_page_html = (
+            '<a class="dl_download_link" href="https://www.libreoffice.org/donate/dl/'
+            'mac-aarch64/26.2.2/en-US/LibreOffice_26.2.2_MacOS_aarch64.dmg">'
+            '<span class="dl_yellow_download_button"><strong>DOWNLOAD</strong></span></a>'
+        )
+        redirect_html = (
+            '<meta http-equiv="Refresh" content="0; '
+            "url=https://download.documentfoundation.org/libreoffice/stable/26.2.2/mac/"
+            'aarch64/LibreOffice_26.2.2_MacOS_aarch64.dmg"/>'
+        )
+
+        with mock.patch(
+            "docmason.commands._read_text_url",
+            side_effect=[selector_html, arch_page_html, redirect_html],
+        ):
+            resolved = _resolve_official_libreoffice_macos_download(machine="arm64")
+
+        self.assertEqual(resolved["download_type"], "mac-aarch64")
+        self.assertEqual(resolved["version"], "26.2.2")
+        self.assertEqual(
+            resolved["dmg_url"],
+            (
+                "https://download.documentfoundation.org/libreoffice/stable/26.2.2/mac/"
+                "aarch64/LibreOffice_26.2.2_MacOS_aarch64.dmg"
+            ),
+        )
+
+    def test_prepare_json_mode_keeps_payload_on_stdout_and_progress_on_stderr(self) -> None:
+        workspace = self.make_workspace()
+
+        def cli_prepare(*, assume_yes: bool, progress_stream=None) -> CommandReport:
+            return prepare_workspace(
+                workspace,
+                assume_yes=assume_yes,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+                progress_stream=progress_stream,
+            )
+
+        with (
+            mock.patch("docmason.cli.prepare_workspace", side_effect=cli_prepare),
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+        ):
+            stdout_buffer = io.StringIO()
+            stderr_buffer = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout_buffer),
+                contextlib.redirect_stderr(stderr_buffer),
+            ):
+                exit_code = main(["prepare", "--json", "--yes"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout_buffer.getvalue())
+        self.assertEqual(payload["status"], READY)
+        stderr_text = stderr_buffer.getvalue()
         self.assertIn(
-            ["/opt/homebrew/bin/brew", "install", "--cask", "libreoffice-still"],
-            seen_commands,
+            "Prepare progress: provisioning repo-local managed Python 3.13...",
+            stderr_text,
+        )
+        self.assertIn("Prepare progress: rebuilding the repo-local `.venv`...", stderr_text)
+        self.assertIn(
+            "Prepare progress: installing DocMason into the repo-local `.venv`...",
+            stderr_text,
         )
 
     def test_doctor_reports_blockers_before_prepare(self) -> None:

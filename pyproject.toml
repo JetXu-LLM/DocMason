@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docmason"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Python-first, file-only, agent-native workspace for building multimodal knowledge bases from complex office documents."
 readme = "README.md"
 license = { file = "LICENSE" }

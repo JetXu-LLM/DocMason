@@ -11,14 +11,17 @@ import shutil
 import site
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO, cast
 
 from .control_plane import (
     approve_shared_job,
@@ -75,6 +78,7 @@ from .workspace_probe import (
     office_renderer_snapshot,
     pdf_renderer_snapshot,
     preview_source_changes,
+    validate_soffice_binary,
 )
 
 READY = "ready"
@@ -84,6 +88,9 @@ UNSUPPORTED_TARGET = "planned but not implemented yet"
 _LEASE_RESOURCE_PATTERN = re.compile(r"for `([^`]+)`")
 PREPARE_ENTRYPOINT_RETRY_DELAY_SECONDS = 0.35
 PREPARE_ENTRYPOINT_RETRY_TIMEOUT_SECONDS = 8.0
+_LIBREOFFICE_DOWNLOAD_PAGE = "https://www.libreoffice.org/download/download/"
+_LIBREOFFICE_SELECTOR_PAGE = "https://www.libreoffice.org/download/download-libreoffice/"
+_LIBREOFFICE_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -571,6 +578,265 @@ def preferred_libreoffice_install_command() -> tuple[list[str] | None, str | Non
     return None, None
 
 
+def _emit_prepare_progress(progress_stream: TextIO | None, message: str) -> None:
+    """Emit one concise prepare progress banner when the caller requested it."""
+    if progress_stream is None:
+        return
+    progress_stream.write(f"Prepare progress: {message}\n")
+    progress_stream.flush()
+
+
+def _read_text_url(url: str, *, timeout_seconds: float = _LIBREOFFICE_HTTP_TIMEOUT_SECONDS) -> str:
+    """Fetch one text response from an HTTPS endpoint using the standard library only."""
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "DocMason/0.1 bootstrap"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        payload = cast(bytes, response.read())
+        return payload.decode("utf-8", errors="replace")
+
+
+def _download_url_to_path(
+    url: str,
+    destination: Path,
+    *,
+    timeout_seconds: float = _LIBREOFFICE_HTTP_TIMEOUT_SECONDS,
+) -> None:
+    """Download one URL into a local path using the standard library only."""
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "DocMason/0.1 bootstrap"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with destination.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+
+
+def _macos_libreoffice_download_type(machine: str | None = None) -> str:
+    """Map the current macOS architecture to the official LibreOffice download selector."""
+    normalized_machine = (machine or platform.machine()).strip().lower()
+    if normalized_machine == "arm64":
+        return "mac-aarch64"
+    if normalized_machine == "x86_64":
+        return "mac-x86_64"
+    raise ValueError(
+        "Official LibreOffice auto-install is only configured for macOS `arm64` and "
+        f"`x86_64`, not `{normalized_machine or 'unknown'}`."
+    )
+
+
+def _resolve_official_libreoffice_macos_download(
+    *,
+    machine: str | None = None,
+) -> dict[str, str]:
+    """Resolve the current stable official LibreOffice DMG URL for the active macOS arch."""
+    download_type = _macos_libreoffice_download_type(machine)
+    selector_html = _read_text_url(_LIBREOFFICE_SELECTOR_PAGE)
+    version_match = re.search(
+        rf"/download/download-libreoffice/\?type={re.escape(download_type)}&version="
+        r"(?P<version>[0-9][^&\"']*)&lang=en-US",
+        selector_html,
+    )
+    if version_match is None:
+        raise RuntimeError(
+            "Could not determine the current stable LibreOffice version from the official "
+            "download selector page."
+        )
+    version = str(version_match.group("version"))
+    arch_page_url = (
+        f"{_LIBREOFFICE_SELECTOR_PAGE}?type={download_type}&version={version}&lang=en-US"
+    )
+    arch_page_html = _read_text_url(arch_page_url)
+    redirect_match = re.search(
+        r'<a class="dl_download_link" href="(?P<redirect>https://www\.libreoffice\.org/'
+        r'donate/dl/[^"]+\.dmg)"',
+        arch_page_html,
+    )
+    if redirect_match is None:
+        raise RuntimeError(
+            "Could not determine the official LibreOffice redirect page for the current "
+            "macOS architecture."
+        )
+    redirect_page_url = str(redirect_match.group("redirect"))
+    redirect_html = _read_text_url(redirect_page_url)
+    dmg_match = re.search(
+        r'content="0;\s*url=(?P<dmg_url>https://download\.documentfoundation\.org/[^"]+\.dmg)"',
+        redirect_html,
+        flags=re.IGNORECASE,
+    )
+    if dmg_match is None:
+        raise RuntimeError(
+            "Could not determine the final LibreOffice DMG URL from the official redirect page."
+        )
+    dmg_url = str(dmg_match.group("dmg_url"))
+    file_name = Path(urllib.parse.urlparse(dmg_url).path).name
+    if not file_name.endswith(".dmg"):
+        raise RuntimeError("The official LibreOffice download target did not resolve to a DMG.")
+    return {
+        "version": version,
+        "download_type": download_type,
+        "selector_page_url": _LIBREOFFICE_SELECTOR_PAGE,
+        "arch_page_url": arch_page_url,
+        "redirect_page_url": redirect_page_url,
+        "dmg_url": dmg_url,
+        "file_name": file_name,
+        "manual_download_page": _LIBREOFFICE_DOWNLOAD_PAGE,
+    }
+
+
+def _detach_macos_disk_image(
+    mount_point: Path,
+    *,
+    command_runner: CommandRunner,
+    cwd: Path,
+) -> str | None:
+    """Detach one mounted DMG, escalating to `-force` only when the normal detach fails."""
+    execution = command_runner(
+        ["/usr/bin/hdiutil", "detach", str(mount_point)],
+        cwd,
+    )
+    if execution.exit_code == 0:
+        return None
+    forced = command_runner(
+        ["/usr/bin/hdiutil", "detach", "-force", str(mount_point)],
+        cwd,
+    )
+    if forced.exit_code == 0:
+        return None
+    return forced.stderr or forced.stdout or execution.stderr or execution.stdout or "no output"
+
+
+def _install_libreoffice_from_official_macos_package(
+    workspace: WorkspacePaths,
+    *,
+    command_runner: CommandRunner,
+    machine: str | None = None,
+) -> tuple[bool, str]:
+    """Install LibreOffice from the official macOS DMG when Homebrew is unavailable."""
+    if sys.platform != "darwin":
+        return False, "Official LibreOffice auto-install is only supported on macOS."
+
+    try:
+        download = _resolve_official_libreoffice_macos_download(machine=machine)
+    except Exception as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        return (
+            False,
+            "Official LibreOffice auto-install failed before download resolution. Details: "
+            f"{detail}",
+        )
+
+    workspace.agent_work_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="libreoffice-install-",
+        dir=workspace.agent_work_dir,
+    ) as tempdir_name:
+        tempdir = Path(tempdir_name)
+        dmg_path = tempdir / download["file_name"]
+        mount_point = tempdir / "mount"
+        mount_point.mkdir(parents=True, exist_ok=True)
+        attached = False
+        try:
+            _download_url_to_path(download["dmg_url"], dmg_path)
+        except Exception as exc:
+            detail = str(exc).strip() or type(exc).__name__
+            return (
+                False,
+                "Official LibreOffice auto-install failed while downloading the DMG. Details: "
+                f"{detail}",
+            )
+
+        imageinfo = command_runner(
+            ["/usr/bin/hdiutil", "imageinfo", str(dmg_path)],
+            workspace.root,
+        )
+        if imageinfo.exit_code != 0:
+            return (
+                False,
+                "Official LibreOffice auto-install failed while validating the downloaded DMG. "
+                f"Details: {imageinfo.stderr or imageinfo.stdout or 'no output'}",
+            )
+
+        attach = command_runner(
+            [
+                "/usr/bin/hdiutil",
+                "attach",
+                "-nobrowse",
+                "-readonly",
+                "-mountpoint",
+                str(mount_point),
+                str(dmg_path),
+            ],
+            workspace.root,
+        )
+        if attach.exit_code != 0:
+            return (
+                False,
+                "Official LibreOffice auto-install failed while mounting the downloaded DMG. "
+                f"Details: {attach.stderr or attach.stdout or 'no output'}",
+            )
+        attached = True
+        app_bundle = next(
+            (
+                path
+                for path in mount_point.rglob("LibreOffice.app")
+                if path.name == "LibreOffice.app"
+            ),
+            None,
+        )
+        if app_bundle is None:
+            return (
+                False,
+                "Official LibreOffice auto-install mounted the DMG, but `LibreOffice.app` "
+                "was not found inside it.",
+            )
+
+        copy = command_runner(
+            ["/usr/bin/ditto", str(app_bundle), "/Applications/LibreOffice.app"],
+            workspace.root,
+        )
+        if copy.exit_code != 0:
+            return (
+                False,
+                "Official LibreOffice auto-install failed while copying LibreOffice.app into "
+                f"/Applications. Details: {copy.stderr or copy.stdout or 'no output'}",
+            )
+
+        validation = validate_soffice_binary("/Applications/LibreOffice.app/Contents/MacOS/soffice")
+        if not validation["ready"]:
+            return (
+                False,
+                "Official LibreOffice auto-install copied LibreOffice.app, but the installed "
+                f"`soffice` validation failed. Details: {validation['detail']}",
+            )
+
+        if attached:
+            detach_error = _detach_macos_disk_image(
+                mount_point,
+                command_runner=command_runner,
+                cwd=workspace.root,
+            )
+            if detach_error is not None:
+                return (
+                    False,
+                    "Official LibreOffice auto-install succeeded through validation, but the "
+                    f"downloaded DMG could not be detached cleanly. Details: {detach_error}",
+                )
+            attached = False
+
+    version_suffix = (
+        f" ({validation['version']})"
+        if isinstance(validation.get("version"), str) and validation["version"]
+        else ""
+    )
+    return (
+        True,
+        "Installed LibreOffice from the official macOS package at "
+        f"/Applications/LibreOffice.app{version_suffix}.",
+    )
+
+
 def ensure_python_pip(
     python_executable: str,
     *,
@@ -596,94 +862,6 @@ def ensure_python_pip(
         False,
         summarize_command_failure([python_executable, "-m", "pip", "--version"], pip_verify),
     )
-
-
-def homebrew_auto_install_plan(
-    *,
-    command_runner: CommandRunner,
-    cwd: Path,
-) -> dict[str, Any]:
-    """Return whether the official unattended Homebrew install path is viable."""
-    if sys.platform != "darwin":
-        return {"feasible": False, "detail": "Homebrew automation is only supported on macOS."}
-    if find_brew_binary() is not None:
-        return {"feasible": False, "detail": "Homebrew is already installed."}
-
-    machine = platform.machine().lower()
-    if machine not in {"arm64", "x86_64"}:
-        return {
-            "feasible": False,
-            "detail": f"Homebrew automation is not configured for machine type `{machine}`.",
-        }
-
-    bash_path = Path("/bin/bash")
-    curl_path = Path("/usr/bin/curl")
-    xcode_select_path = Path("/usr/bin/xcode-select")
-    if not bash_path.exists() or not os.access(bash_path, os.X_OK):
-        return {
-            "feasible": False,
-            "detail": "The official Homebrew installer requires `/bin/bash`.",
-        }
-    if not curl_path.exists() or not os.access(curl_path, os.X_OK):
-        return {
-            "feasible": False,
-            "detail": "The official Homebrew installer requires `/usr/bin/curl`.",
-        }
-    if (
-        not xcode_select_path.exists()
-        or command_runner(
-            [str(xcode_select_path), "-p"],
-            cwd,
-        ).exit_code
-        != 0
-    ):
-        return {
-            "feasible": False,
-            "detail": (
-                "The official Homebrew installer requires Xcode Command Line Tools to be "
-                "available first."
-            ),
-        }
-
-    prefix = Path("/opt/homebrew" if machine == "arm64" else "/usr/local")
-    writable_probe = prefix if prefix.exists() else prefix.parent
-    if not os.access(writable_probe, os.W_OK):
-        return {
-            "feasible": False,
-            "detail": (
-                "The default Homebrew prefix is not writable non-interactively on this host, so "
-                "silent Homebrew installation is not viable."
-            ),
-        }
-
-    install_command = [
-        "/usr/bin/env",
-        "NONINTERACTIVE=1",
-        str(bash_path),
-        "-c",
-        '"$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
-    ]
-    return {
-        "feasible": True,
-        "detail": "The official unattended Homebrew install path is available.",
-        "expected_brew": str(prefix / "bin" / "brew"),
-        "install_command": install_command,
-        "install_display": (
-            '`NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL '
-            'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`'
-        ),
-    }
-
-
-def refresh_brew_binary_after_install(plan: dict[str, Any]) -> str | None:
-    """Resolve Homebrew again after a successful unattended install attempt."""
-    brew_binary = find_brew_binary()
-    if brew_binary is not None:
-        return brew_binary
-    expected_brew = plan.get("expected_brew")
-    if isinstance(expected_brew, str) and expected_brew and Path(expected_brew).exists():
-        return expected_brew
-    return None
 
 
 def remove_generated_path(path: Path) -> None:
@@ -1188,20 +1366,20 @@ def office_renderer_next_step() -> str:
     if sys.platform == "darwin":
         if find_brew_binary():
             return (
-                "Install LibreOffice with `brew install --cask libreoffice-still`, or download "
-                "the official macOS installer from https://www.libreoffice.org/download/download/, "
+                "Run `docmason prepare --yes` to let the workspace install LibreOffice with "
+                "Homebrew, or install it yourself with `brew install --cask libreoffice-still`. "
+                f"You can also use the official macOS installer from {_LIBREOFFICE_DOWNLOAD_PAGE}, "
                 "then rerun `docmason doctor`."
             )
         return (
-            "Run `docmason prepare --yes` to let the workspace attempt the managed Homebrew plus "
-            "LibreOffice install path when the host supports silent automation, or download and "
-            "install LibreOffice from https://www.libreoffice.org/download/download/. On macOS, "
-            "drag the app into `/Applications`; DocMason will detect the standard `soffice` path "
-            "there. Then rerun `docmason doctor`."
+            "Run `docmason prepare --yes` to let the workspace install LibreOffice through the "
+            f"official macOS installer path, or download it from {_LIBREOFFICE_DOWNLOAD_PAGE}. "
+            "On macOS, drag the app into `/Applications`; DocMason will detect the standard "
+            "`soffice` path there. Then rerun `docmason doctor`."
         )
     return (
         "Install LibreOffice with your Linux distribution's package manager or from "
-        "https://www.libreoffice.org/download/download/, ensure `soffice` is on PATH, "
+        f"{_LIBREOFFICE_DOWNLOAD_PAGE}, ensure `soffice` is on PATH, "
         "then rerun `docmason doctor`."
     )
 
@@ -1235,11 +1413,18 @@ def _native_machine_baseline_install_guidance(
     *,
     rerun_command: str = "docmason prepare --yes",
 ) -> str:
+    if find_brew_binary():
+        manual_follow_up = (
+            "install LibreOffice yourself with `brew install --cask libreoffice-still` or from "
+            f"{_LIBREOFFICE_DOWNLOAD_PAGE}"
+        )
+    else:
+        manual_follow_up = f"install LibreOffice from {_LIBREOFFICE_DOWNLOAD_PAGE}"
     return (
         "Run "
         f"`{rerun_command}` to let DocMason install or repair the native machine baseline. "
-        "If that managed path still cannot finish, complete the Homebrew or LibreOffice install "
-        "manually, then rerun the same command."
+        "If that managed path still cannot finish, "
+        f"{manual_follow_up} manually, then rerun the same command."
     )
 
 
@@ -1383,6 +1568,7 @@ def _machine_baseline_snapshot(
     office = office_snapshot or office_renderer_snapshot(workspace)
     brew_binary = find_brew_binary()
     brew_ready = bool(brew_binary)
+    libreoffice_required = bool(office.get("required"))
     libreoffice_ready = bool(office.get("ready"))
     provider = str(host_execution.get("host_provider") or "unknown-agent")
     applicable = sys.platform == "darwin" and provider == "codex"
@@ -1394,6 +1580,7 @@ def _machine_baseline_snapshot(
             "detail": "Native macOS machine-baseline policy is not active for this host surface.",
             "brew_ready": brew_ready,
             "brew_binary": brew_binary,
+            "libreoffice_required": libreoffice_required,
             "libreoffice_ready": libreoffice_ready,
             "libreoffice_binary": office.get("binary"),
             "host_access_required": False,
@@ -1403,18 +1590,28 @@ def _machine_baseline_snapshot(
         }
 
     missing_components: list[str] = []
-    if not brew_ready:
-        missing_components.append("Homebrew")
-    if not libreoffice_ready:
+    if libreoffice_required and not libreoffice_ready:
         missing_components.append("LibreOffice")
     if not missing_components:
+        detail = "Native Codex machine baseline is ready."
+        if libreoffice_required and libreoffice_ready and not brew_ready:
+            detail = (
+                "Native Codex machine baseline is ready for the current corpus. LibreOffice is "
+                "installed, and Homebrew is optional."
+            )
+        elif not libreoffice_required:
+            detail = (
+                "Native Codex machine baseline is ready. LibreOffice is optional until Office "
+                "sources are present."
+            )
         return {
             "applicable": True,
             "ready": True,
             "status": "ready",
-            "detail": "Native Codex machine baseline is ready.",
+            "detail": detail,
             "brew_ready": brew_ready,
             "brew_binary": brew_binary,
+            "libreoffice_required": libreoffice_required,
             "libreoffice_ready": libreoffice_ready,
             "libreoffice_binary": office.get("binary"),
             "host_access_required": False,
@@ -1431,25 +1628,29 @@ def _machine_baseline_snapshot(
         status = "host-access-upgrade-required"
         if permission_mode == "default-permissions":
             detail = (
-                f"Native Codex machine baseline is missing {missing_detail}, and the current "
-                "thread is still in `Default permissions`."
+                f"Native Codex machine baseline is missing {missing_detail} for the current "
+                "Office corpus, and the current thread is still in `Default permissions`."
             )
         else:
             detail = (
-                f"Native Codex machine baseline is missing {missing_detail}, and the current "
-                "turn does not expose `Full access` yet."
+                f"Native Codex machine baseline is missing {missing_detail} for the current "
+                "Office corpus, and the current turn does not expose `Full access` yet."
             )
         host_access_required = True
         host_access_reasons = [
             (
                 "Native Codex machine baseline is missing "
-                f"{missing_detail} and needs machine-level installation."
+                f"{missing_detail} for the current Office corpus and needs machine-level "
+                "installation."
             )
         ]
     else:
         guidance = _native_machine_baseline_install_guidance()
         status = "install-required"
-        detail = f"Native Codex machine baseline is missing {missing_detail}."
+        detail = (
+            "Native Codex machine baseline is missing "
+            f"{missing_detail} for the current Office corpus."
+        )
         host_access_required = False
         host_access_reasons = []
 
@@ -1460,6 +1661,7 @@ def _machine_baseline_snapshot(
         "detail": detail,
         "brew_ready": brew_ready,
         "brew_binary": brew_binary,
+        "libreoffice_required": libreoffice_required,
         "libreoffice_ready": libreoffice_ready,
         "libreoffice_binary": office.get("binary"),
         "host_access_required": host_access_required,
@@ -1789,6 +1991,7 @@ def prepare_workspace(
     interactive: bool | None = None,
     owner: dict[str, Any] | None = None,
     run_id: str | None = None,
+    progress_stream: TextIO | None = None,
 ) -> CommandReport:
     """Bootstrap repo-local state and install DocMason into the workspace environment."""
     workspace = paths or locate_workspace()
@@ -2054,6 +2257,7 @@ def prepare_workspace(
                 ),
             ]
             return make_report(ACTION_REQUIRED, payload, lines)
+    _emit_prepare_progress(progress_stream, "provisioning repo-local managed Python 3.13...")
     managed_python, managed_error = _provision_managed_python(
         workspace,
         uv_binary=uv_binary,
@@ -2088,6 +2292,7 @@ def prepare_workspace(
         "Provisioned repo-local managed Python 3.13 under `.docmason/toolchain/python`."
     )
 
+    _emit_prepare_progress(progress_stream, "rebuilding the repo-local `.venv`...")
     venv_error = _rebuild_repo_local_venv(
         workspace,
         uv_binary=uv_binary,
@@ -2115,6 +2320,7 @@ def prepare_workspace(
         return make_report(ACTION_REQUIRED, payload, lines)
     actions_performed.append("Rebuilt `.venv` against the repo-local managed Python 3.13 baseline.")
 
+    _emit_prepare_progress(progress_stream, "installing DocMason into the repo-local `.venv`...")
     install_error = _install_workspace_into_repo_local_venv(
         workspace,
         uv_binary=uv_binary,
@@ -2402,47 +2608,43 @@ def prepare_workspace(
         bool(machine_baseline.get("applicable"))
         and not bool(machine_baseline.get("ready"))
         and assume_yes
+        and bool(office_snapshot.get("required"))
+        and not bool(office_snapshot.get("ready"))
     ):
-        brew_plan = homebrew_auto_install_plan(command_runner=command_runner, cwd=workspace.root)
-        if not bool(machine_baseline.get("brew_ready")) and brew_plan["feasible"]:
-            brew_install = command_runner(brew_plan["install_command"], workspace.root)
-            if brew_install.exit_code == 0:
-                refreshed_brew = refresh_brew_binary_after_install(brew_plan)
-                if refreshed_brew is not None:
-                    brew_bin_dir = str(Path(refreshed_brew).parent)
-                    os.environ["PATH"] = f"{brew_bin_dir}:{os.environ.get('PATH', '')}"
-                    actions_performed.append(
-                        "Installed Homebrew with the official unattended installer."
-                    )
-                else:
-                    actions_skipped.append(
-                        "Homebrew install completed, but the brew executable was not found "
-                        "afterward."
-                    )
-            else:
-                actions_skipped.append(
-                    "Homebrew installation failed during prepare. Details: "
-                    f"{brew_install.stderr or brew_install.stdout or 'no output'}"
-                    )
-                next_steps.append(
-                    "Install Homebrew manually or install LibreOffice from the official "
-                    "macOS installer, then rerun `docmason prepare --yes`."
-                )
-        elif not bool(machine_baseline.get("brew_ready")) and not brew_plan["feasible"]:
-            actions_skipped.append(
-                "Skipped Homebrew installation because the host does not satisfy the official "
-                f"unattended install preconditions. Details: {brew_plan['detail']}"
-                )
         install_command, install_display = preferred_libreoffice_install_command()
         if install_command is not None and install_display is not None:
+            _emit_prepare_progress(progress_stream, "installing LibreOffice via Homebrew...")
             execution = command_runner(install_command, workspace.root)
             if execution.exit_code == 0:
                 actions_performed.append(f"Installed LibreOffice with {install_display}.")
                 office_snapshot = office_renderer_snapshot(workspace)
             else:
                 actions_skipped.append(
-                    "LibreOffice installation failed during prepare. Details: "
+                    "LibreOffice installation via Homebrew failed during prepare. Details: "
                     f"{execution.stderr or execution.stdout or 'no output'}"
+                )
+                next_steps.append(
+                    "Install LibreOffice from "
+                    f"{_LIBREOFFICE_DOWNLOAD_PAGE} or repair the Homebrew install, then rerun "
+                    "`docmason prepare --yes`."
+                )
+        else:
+            _emit_prepare_progress(
+                progress_stream,
+                "installing LibreOffice via the official macOS package...",
+            )
+            installed, detail = _install_libreoffice_from_official_macos_package(
+                workspace,
+                command_runner=command_runner,
+            )
+            if installed:
+                actions_performed.append(detail)
+                office_snapshot = office_renderer_snapshot(workspace)
+            else:
+                actions_skipped.append(detail)
+                next_steps.append(
+                    "Official LibreOffice auto-install failed. Install LibreOffice from "
+                    f"{_LIBREOFFICE_DOWNLOAD_PAGE} and rerun `docmason prepare --yes`."
                 )
         machine_baseline = _machine_baseline_snapshot(
             workspace,

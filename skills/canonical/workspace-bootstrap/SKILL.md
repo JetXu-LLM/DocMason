@@ -43,10 +43,10 @@ If the agent cannot perform these capabilities, stop and explain that the enviro
 6. If `prepare` reports a degraded result, follow the reported next steps and rerun only the necessary deterministic command.
 7. Use `docs/setup/manual-workspace-recovery.md` only when the launcher or `prepare` still cannot finish honestly after the governed automatic path has already had enough access.
 8. If the corpus already contains PPTX, DOCX, or XLSX files and LibreOffice is missing:
-   - on macOS with Homebrew, run `brew install --cask libreoffice-still`
-   - on macOS without Homebrew, install LibreOffice from `https://www.libreoffice.org/download/download/`
+   - LibreOffice is required only for an Office-rendering corpus; it is not a universal machine baseline dependency
+   - on macOS with Homebrew already present, DocMason may use `brew install --cask libreoffice-still`
+   - on macOS without Homebrew, DocMason should use the official LibreOffice installer path instead of trying to install Homebrew first
    - on Linux, install LibreOffice with the distro package manager or the official packages, then ensure `soffice` is on `PATH`
-   - on native Codex/macOS cold starts, treat Homebrew and LibreOffice as standard machine baseline work rather than as a late surprise dependency
 9. Run `docmason status --json` when you need to confirm the resulting workspace stage.
 10. Recommend `docmason sync --json` when source files are present and the user needs a usable knowledge base next.
 11. If the current agent ecosystem is a compatibility target such as Claude Code rather than the native Codex path, decide here whether generated adapter guidance is needed.
@@ -77,7 +77,8 @@ If the agent cannot perform these capabilities, stop and explain that the enviro
 - On the native Codex path, bootstrap should refresh repo-local skill shims under `.agents/skills/` rather than writing into `~/.codex/skills`.
 - `prepare` may use shared/system Python only as a bootstrap or repair helper; ordinary steady-state commands should not depend on it.
 - When `uv` is missing, `prepare` should provision the repo-local bootstrap helper venv under `.docmason/toolchain/bootstrap/venv` and install `uv` there.
-- On the native macOS path, ordinary cold starts should prefer the controlled UV bootstrap asset path first, use repo-local cache in Codex `Default permissions`, and auto-attempt supported machine-baseline installs such as Homebrew and LibreOffice only when host access allows it.
+- On the native macOS path, ordinary cold starts should prefer the controlled UV bootstrap asset path first, use repo-local cache in Codex `Default permissions`, and auto-attempt only the real missing dependency installs when host access allows it.
+- Homebrew is optional. If it is already on `PATH`, DocMason may use it as a convenience backend, but DocMason should not spend time installing or preparing Homebrew itself.
 - After preparation, prefer `./.venv/bin/python -m docmason ...` or the CLI installed inside `.venv` for ordinary workspace operations.
 - For Office rendering, DocMason detects the standard macOS `soffice` path inside `/Applications/LibreOffice.app/Contents/MacOS/soffice`, so shell-profile changes are usually unnecessary.
 - Not every Codex-first first-answer path requires `sync-adapters` before work can proceed.

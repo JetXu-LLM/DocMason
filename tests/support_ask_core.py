@@ -639,7 +639,10 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             1,
             {
                 "status": ACTION_REQUIRED,
-                "detail": "Native Codex machine baseline is missing Homebrew, LibreOffice.",
+                "detail": (
+                    "Native Codex machine baseline is missing LibreOffice for the current "
+                    "Office corpus."
+                ),
                 "control_plane": {
                     "state": "awaiting-confirmation",
                     "confirmation_kind": "host-access-upgrade",

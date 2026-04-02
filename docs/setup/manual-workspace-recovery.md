@@ -98,11 +98,13 @@ If the repository was renamed or moved:
 ### Office Files
 
 If the current source corpus includes `.pptx`, `.ppt`, `.docx`, `.doc`, `.xlsx`, or `.xls`, install LibreOffice before syncing.
+If the corpus does not currently need Office rendering, you do not need LibreOffice just to make the workspace ready.
 
 - native Codex/macOS ordinary path:
   - prefer going back to the governed launcher and `docmason prepare --yes`
   - if the thread is still in Codex `Default permissions`, switch it to `Full access` first
   - do not treat repeated per-command `Yes` prompts as equivalent to switching the thread to `Full access`
+  - Homebrew is optional; if it is absent, let DocMason use the official LibreOffice installer path instead of trying to install Homebrew first
 
 - macOS with Homebrew:
 

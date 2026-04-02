@@ -19,7 +19,6 @@ from .commands import (
     update_core_workspace,
     validate_knowledge_base,
 )
-from .host_integration import run_hidden_ask_cli
 from .project import SUPPORTED_DOCUMENT_TYPES
 
 _PUBLIC_COMMAND_METAVAR = (
@@ -216,12 +215,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return run_hook_cli(effective[1] if len(effective) > 1 else "")
     if effective and effective[0] == "_ask":
+        from .host_integration import run_hidden_ask_cli
+
         return run_hidden_ask_cli(sys.stdin.read())
     parser = build_parser()
     args = parser.parse_args(effective)
 
     if args.command == "prepare":
-        return emit_report(prepare_workspace(assume_yes=args.yes), as_json=args.json)
+        return emit_report(
+            prepare_workspace(
+                assume_yes=args.yes,
+                progress_stream=sys.stderr if args.json else None,
+            ),
+            as_json=args.json,
+        )
     if args.command == "doctor":
         return emit_report(doctor_workspace(), as_json=args.json)
     if args.command == "status":
