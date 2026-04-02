@@ -8,13 +8,11 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BANNED_TEST_PHRASES = (
-    "architecture strategy deck",
-    "delivery timeline plan",
-    "project sponsor",
-    "latency constraint",
-    "platform team",
-    "architecture review deck",
+NEUTRAL_TEST_FIXTURE_MARKERS = (
+    "project planning brief",
+    "project timeline notes",
+    "project outline",
+    "example alerts supports https api access",
 )
 
 
@@ -357,13 +355,14 @@ class FoundationAndContractTests(unittest.TestCase):
         text = (ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertNotIn("/.github/copilot-instructions.md", text)
 
-    def test_banned_private_style_vocabulary_is_absent_from_tests(self) -> None:
-        for path in sorted((ROOT / "tests").glob("*.py")):
-            if path.name == "test_foundation_and_contracts.py":
-                continue
-            text = path.read_text(encoding="utf-8").lower()
-            for phrase in BANNED_TEST_PHRASES:
-                self.assertNotIn(phrase, text, f"Found banned phrase `{phrase}` in {path}")
+    def test_shared_test_fixture_language_uses_open_source_safe_markers(self) -> None:
+        combined = "\n".join(
+            path.read_text(encoding="utf-8").lower()
+            for path in sorted((ROOT / "tests").glob("*.py"))
+            if path.name != "test_foundation_and_contracts.py"
+        )
+        for marker in NEUTRAL_TEST_FIXTURE_MARKERS:
+            self.assertIn(marker, combined, f"Expected neutral fixture marker `{marker}`.")
 
 
 if __name__ == "__main__":

@@ -120,6 +120,7 @@ class ReleaseEntryClientTests(unittest.TestCase):
             self.assertEqual(payload["schema_version"], 1)
             self.assertEqual(payload["trigger"], "ask-auto")
             self.assertIn("installation_hash", payload)
+            self.assertNotIn("source_version", payload)
             return _FakeResponse(
                 {
                     "schema_version": 1,
@@ -286,6 +287,34 @@ class ReleaseEntryClientTests(unittest.TestCase):
         self.assertIsNone(third["notice"])
         third_state = json.loads(workspace.release_client_state_path.read_text(encoding="utf-8"))
         self.assertEqual(third_state["last_notified_version"], "v0.2.0")
+
+    def test_release_entry_request_does_not_upload_current_version(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_bundle(workspace, source_version="v9.9.9")
+
+        def capturing_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+            del timeout
+            payload = json.loads(request.data.decode("utf-8"))
+            self.assertNotIn("source_version", payload)
+            return _FakeResponse(
+                {
+                    "schema_version": 1,
+                    "current_release": {
+                        "distribution_channel": payload["distribution_channel"],
+                        "latest_version": "v10.0.0",
+                        "published_at": "2026-03-30T12:00:00Z",
+                        "release_url": "https://github.com/example/DocMason/releases/tag/v10.0.0",
+                        "asset_url": "https://github.com/example/DocMason/releases/download/v10.0.0/DocMason-clean.zip",
+                        "asset_name": "DocMason-clean.zip",
+                    },
+                }
+            )
+
+        maybe_run_release_entry_check(
+            workspace,
+            now=datetime(2026, 3, 30, 3, 0, tzinfo=UTC),
+            urlopen=capturing_urlopen,
+        )
 
     def test_network_error_updates_last_check_status(self) -> None:
         workspace = self.make_workspace()

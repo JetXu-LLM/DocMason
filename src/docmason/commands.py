@@ -11,6 +11,7 @@ import shutil
 import site
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager, suppress
@@ -81,6 +82,8 @@ DEGRADED = "degraded"
 ACTION_REQUIRED = "action-required"
 UNSUPPORTED_TARGET = "planned but not implemented yet"
 _LEASE_RESOURCE_PATTERN = re.compile(r"for `([^`]+)`")
+PREPARE_ENTRYPOINT_RETRY_DELAY_SECONDS = 0.35
+PREPARE_ENTRYPOINT_RETRY_TIMEOUT_SECONDS = 8.0
 
 
 @dataclass(frozen=True)
@@ -785,6 +788,20 @@ def deduplicate(items: list[str]) -> list[str]:
 def _stable_json_digest(payload: Any) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _inspect_prepare_entrypoint(workspace: WorkspacePaths) -> tuple[dict[str, Any], bool]:
+    """Probe entrypoint health for prepare, retrying once on transient startup-silent."""
+    probe = inspect_entrypoint(workspace)
+    if str(probe.get("entrypoint_health") or "") != "startup-silent":
+        return probe, False
+    time.sleep(PREPARE_ENTRYPOINT_RETRY_DELAY_SECONDS)
+    retried_probe = inspect_entrypoint(
+        workspace,
+        timeout_seconds=PREPARE_ENTRYPOINT_RETRY_TIMEOUT_SECONDS,
+    )
+    recovered = str(retried_probe.get("entrypoint_health") or "") == "ready"
+    return retried_probe, recovered
 
 
 def make_report(status: str, payload: dict[str, Any], lines: list[str]) -> CommandReport:
@@ -2128,7 +2145,12 @@ def prepare_workspace(
         "repo-local `.venv` via uv."
     )
 
-    entrypoint_probe = inspect_entrypoint(workspace)
+    entrypoint_probe, recovered_after_retry = _inspect_prepare_entrypoint(workspace)
+    if recovered_after_retry:
+        actions_performed.append(
+            "Retried the repo-local DocMason entrypoint startup probe after a transient "
+            "`startup-silent` result."
+        )
     entrypoint_health = str(entrypoint_probe.get("entrypoint_health") or "module-import-failed")
     if entrypoint_health != "ready":
         startup_reason = str(

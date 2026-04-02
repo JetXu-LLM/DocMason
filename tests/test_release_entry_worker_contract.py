@@ -76,7 +76,6 @@ class ReleaseEntryWorkerContractTests(unittest.TestCase):
         payload = {
             "schema_version": 1,
             "distribution_channel": "clean",
-            "source_version": "v0.1.0",
             "installation_hash": "hash-123",
             "trigger": "ask-auto",
         }
@@ -111,7 +110,6 @@ class ReleaseEntryWorkerContractTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "distribution_channel": "demo-ico-gcs",
-                "source_version": "v0.1.0",
                 "installation_hash": "hash-demo",
                 "trigger": "ask-auto",
             },
@@ -122,7 +120,7 @@ class ReleaseEntryWorkerContractTests(unittest.TestCase):
         self.assertEqual(current_release["latest_version"], "v0.2.0")
         self.assertEqual(current_release["asset_name"], "DocMason-demo-ico-gcs.zip")
         self.assertTrue(current_release["asset_url"].endswith("/DocMason-demo-ico-gcs.zip"))
-        self.assertTrue(current_release["update_available"])
+        self.assertNotIn("update_available", current_release)
 
     def test_manual_update_trigger_uses_the_same_collector_contract(self) -> None:
         connection = self.make_connection()
@@ -132,7 +130,6 @@ class ReleaseEntryWorkerContractTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "distribution_channel": "clean",
-                "source_version": "v0.1.0",
                 "installation_hash": "hash-update-core",
                 "trigger": "update-core",
             },
@@ -142,6 +139,24 @@ class ReleaseEntryWorkerContractTests(unittest.TestCase):
         self.assertEqual(current_release["distribution_channel"], "clean")
         self.assertEqual(current_release["latest_version"], "v0.2.0")
         self.assertTrue(current_release["asset_url"].endswith("/DocMason-clean.zip"))
+
+    def test_update_check_ignores_legacy_source_version_field(self) -> None:
+        connection = self.make_connection()
+        self.publish_release(connection)
+        response = record_release_entry_check(
+            connection,
+            {
+                "schema_version": 1,
+                "distribution_channel": "clean",
+                "source_version": "v0.1.0",
+                "installation_hash": "hash-legacy",
+                "trigger": "ask-auto",
+            },
+            now=datetime(2026, 3, 30, 16, 0, tzinfo=UTC),
+        )
+        current_release = response["current_release"]
+        self.assertEqual(current_release["latest_version"], "v0.2.0")
+        self.assertNotIn("update_available", current_release)
 
 
 if __name__ == "__main__":

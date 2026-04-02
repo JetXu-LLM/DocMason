@@ -13,6 +13,7 @@ from typing import Any, cast
 
 MINIMUM_PYTHON = (3, 11)
 BOOTSTRAP_STATE_SCHEMA_VERSION = 5
+BOOTSTRAP_STATE_FULL_COMPAT_SCHEMA_FLOOR = 4
 MANUAL_WORKSPACE_RECOVERY_DOC = "docs/setup/manual-workspace-recovery.md"
 
 
@@ -1195,7 +1196,7 @@ def cached_bootstrap_readiness(
         }
 
     schema_version = int(state.get("schema_version", 0) or 0)
-    if schema_version < BOOTSTRAP_STATE_SCHEMA_VERSION:
+    if schema_version < BOOTSTRAP_STATE_FULL_COMPAT_SCHEMA_FLOOR:
         return {
             "ready": False,
             "reason": (

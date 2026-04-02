@@ -186,6 +186,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                 self.assertEqual(request.headers.get("User-agent"), RELEASE_ENTRY_USER_AGENT)
                 payload = json.loads(request.data.decode("utf-8"))
                 self.assertEqual(payload["trigger"], "update-core")
+                self.assertNotIn("source_version", payload)
                 return _FakeResponse(
                     (json.dumps(service_payload, sort_keys=True) + "\n").encode("utf-8")
                 )

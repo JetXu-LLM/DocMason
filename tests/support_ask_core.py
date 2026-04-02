@@ -178,10 +178,10 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         source_b = workspace.knowledge_base_staging_dir / "sources" / source_ids[1]
         self.build_seeded_knowledge(
             source_a,
-            title="Campaign Planning Brief",
-            summary="A strategy deck about architecture and operating model.",
-            key_point="The strategy defines an architecture operating model.",
-            claim="The architecture deck connects strategy to implementation.",
+            title="Project Planning Brief",
+            summary="A planning brief about a project outline and work plan.",
+            key_point="The outline defines a practical work plan.",
+            claim="The project outline connects planning to implementation.",
             related_sources=[
                 {
                     "source_id": source_ids[1],
@@ -194,10 +194,10 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         )
         self.build_seeded_knowledge(
             source_b,
-            title="Campaign Evaluation Plan",
-            summary="A delivery timeline and companion planning document.",
-            key_point="The timeline explains rollout milestones.",
-            claim="The timeline complements the architecture strategy.",
+            title="Project Timeline Notes",
+            summary="A timeline note and companion planning document.",
+            key_point="The timeline explains key milestones.",
+            claim="The timeline complements the project outline.",
         )
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
@@ -243,7 +243,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-1"}, clear=False):
             answer_turn = prepare_ask_turn(
                 workspace,
-                question="What does the architecture strategy actually say?",
+                question="What does the project outline actually say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -251,7 +251,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             )
             retrieval_turn = prepare_ask_turn(
                 workspace,
-                question="Which documents mention the architecture strategy?",
+                question="Which documents mention the project outline?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="retrieval",
                     question_domain="workspace-corpus",
@@ -583,7 +583,44 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         ):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the architecture strategy actually say?",
+                question="What does the project outline actually say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        self.assertEqual(turn["status"], "prepared")
+        self.assertFalse(turn["auto_prepare_triggered"])
+        self.assertFalse(turn["auto_sync_triggered"])
+
+    def test_prepare_ask_turn_reuses_healthy_schema4_marker_without_auto_prepare(self) -> None:
+        workspace = self.make_workspace()
+        self.create_pdf(workspace.source_dir / "example.pdf")
+        self.create_pdf(workspace.source_dir / "companion.pdf")
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-21T00:00:00Z",
+        )
+        state = read_json(workspace.bootstrap_state_path)
+        state["schema_version"] = 4
+        write_json(workspace.bootstrap_state_path, state)
+        self.publish_seeded_corpus(workspace)
+
+        with (
+            mock.patch(
+                "docmason.ask.prepare_workspace",
+                side_effect=AssertionError("prepare should not run"),
+            ),
+            mock.patch(
+                "docmason.ask.bootstrap_workspace_with_launcher",
+                side_effect=AssertionError("launcher should not run"),
+            ),
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-schema4-ready"}, clear=False),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the project outline actually say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1092,7 +1129,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-conv"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the architecture strategy actually say?",
+                question="What does the project outline actually say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1100,7 +1137,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             )
             retrieval = retrieve_corpus(
                 workspace,
-                query="architecture strategy",
+                query="project outline",
                 top=2,
                 graph_hops=1,
                 document_types=None,
@@ -1110,7 +1147,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             )
             answer_path = workspace.root / turn["answer_file_path"]
             answer_path.write_text(
-                "The architecture strategy connects the operating model to implementation.",
+                "The project outline connects the work plan to implementation.",
                 encoding="utf-8",
             )
             trace = trace_answer_file(
@@ -1130,7 +1167,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
                 render_inspection_required=trace["render_inspection_required"],
                 answer_file_path=turn["answer_file_path"],
                 response_excerpt=(
-                    "The architecture strategy connects the operating model to implementation."
+                    "The project outline connects the work plan to implementation."
                 ),
                 status="answered",
             )
@@ -1164,7 +1201,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-candidate"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="WIP Form G2 slide 34 visual detail.",
+                question="Reference Deck 2 slide 34 visual detail.",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1174,7 +1211,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             answer_path.write_text(
                 "\n\n".join(
                     [
-                        "The architecture strategy connects the operating model to implementation.",
+                        "The project outline connects the work plan to implementation.",
                         "Zyzzyva quasar nebulae orthonormal frabjous snark.",
                     ]
                 ),
@@ -1225,7 +1262,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-history-anchor"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does Campaign Planning Brief say about the architecture strategy?",
+                question="What does Project Planning Brief say about the project outline?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1234,7 +1271,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The architecture strategy connects the operating model to implementation.\n",
+            "The project outline connects the work plan to implementation.\n",
             encoding="utf-8",
         )
         first_trace = trace_answer_file(
@@ -1249,7 +1286,7 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         write_json(first_trace_path, first_trace_payload)
 
         answer_path.write_text(
-            "The delivery timeline complements the architecture strategy.\n",
+            "The delivery timeline complements the project outline.\n",
             encoding="utf-8",
         )
         second_trace = trace_answer_file(

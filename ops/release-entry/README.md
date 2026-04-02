@@ -1,7 +1,7 @@
 # Release-Entry Worker
 
 This directory contains the minimal Cloudflare Worker deployment surface for DocMason's bounded
-release-entry update checks and bundle-only DAU recording.
+release-entry update checks and bundle-only deduplicated daily-activity accounting.
 
 ## Purpose
 
@@ -22,7 +22,6 @@ environment variables, secrets, machine fingerprints, or IP-derived identifiers.
   - request fields:
     - `schema_version`
     - `distribution_channel`
-    - `source_version`
     - `installation_hash`
     - `trigger`
 - `POST /v1/admin/release-current`
@@ -35,6 +34,7 @@ environment variables, secrets, machine fingerprints, or IP-derived identifiers.
   - one row per bundle channel
 - D1 table `daily_activity`
   - deduplicated by `(event_day, installation_hash, distribution_channel)`
+  - counts daily active installations, not user identity
 
 The canonical schema lives in [schema.sql](schema.sql).
 The Python-side contract mirror used by tests lives in

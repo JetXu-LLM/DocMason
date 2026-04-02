@@ -228,10 +228,10 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         source_b = workspace.knowledge_base_staging_dir / "sources" / source_ids[1]
         self.build_seeded_knowledge(
             source_a,
-            title="Campaign Planning Brief",
-            summary="A strategy deck about architecture and operating model.",
-            key_point="The strategy defines an architecture operating model.",
-            claim="The architecture deck connects strategy to implementation.",
+            title="Project Planning Brief",
+            summary="A planning brief about a project outline and work plan.",
+            key_point="The outline defines a practical work plan.",
+            claim="The project outline connects planning to implementation.",
             related_sources=[
                 {
                     "source_id": source_ids[1],
@@ -244,10 +244,10 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         )
         self.build_seeded_knowledge(
             source_b,
-            title="Campaign Evaluation Plan",
-            summary="A delivery timeline and companion planning document.",
-            key_point="The timeline explains rollout milestones.",
-            claim="The timeline complements the architecture strategy.",
+            title="Project Timeline Notes",
+            summary="A timeline note and companion planning document.",
+            key_point="The timeline explains key milestones.",
+            claim="The timeline complements the project outline.",
         )
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
@@ -264,27 +264,27 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         knowledge = {
             "source_id": source_manifest["source_id"],
             "source_fingerprint": source_manifest["source_fingerprint"],
-            "title": "Interaction Memory for sponsor constraint updates",
+            "title": "Interaction Memory for follow-up constraint updates",
             "source_language": "mixed-or-non-en",
             "summary_en": (
-                "The interaction memory captures a response-time requirement, "
-                "concept-style guidance, and screenshot-backed expectations "
-                "from a real business follow-up."
+                "The interaction memory captures a deadline requirement, "
+                "reference-style guidance, and screenshot-backed expectations "
+                "from a later user follow-up."
             ),
             "summary_source": (
-                "The interaction memory captures a response-time requirement, "
-                "concept-style guidance, and screenshot-backed expectations "
-                "from a real business follow-up."
+                "The interaction memory captures a deadline requirement, "
+                "reference-style guidance, and screenshot-backed expectations "
+                "from a later user follow-up."
             ),
             "document_type": "interaction",
             "key_points": [
                 {
                     "text_en": (
-                        "A later user turn added a response-time requirement and a concept-style "
+                        "A later user turn added a deadline requirement and a reference-style "
                         "requirement."
                     ),
                     "text_source": (
-                        "A later user turn added a response-time requirement and a concept-style "
+                        "A later user turn added a deadline requirement and a reference-style "
                         "requirement."
                     ),
                     "citations": [{"unit_id": first_unit_id, "support": "Follow-up user turn"}],
@@ -327,7 +327,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         (memory_dir / "summary.md").write_text(
             "\n".join(
                 [
-                    "# Interaction Memory for sponsor constraint updates",
+                    "# Interaction Memory for follow-up constraint updates",
                     "",
                     f"Source ID: {memory_id}",
                     "",
@@ -391,7 +391,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "vscode",
                     "codex",
                     str(workspace.root),
-                    "Real business thread",
+                    "Work thread",
                     "danger-full-access",
                     "never",
                     0,
@@ -426,8 +426,8 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                         {
                             "type": "input_text",
                             "text": (
-                                "How should I draft the campaign planning brief "
-                                "for the programme lead?"
+                                "How should I draft the project planning brief "
+                                "for the project lead?"
                             ),
                         }
                     ],
@@ -470,7 +470,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                         {
                             "type": "output_text",
                             "text": (
-                                "Start from the operating model, then connect it to "
+                                "Start from the work plan, then connect it to "
                                 "implementation evidence."
                             ),
                         }
@@ -497,10 +497,10 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                         {
                             "type": "input_text",
                             "text": (
-                                "How should I frame the next architecture review response? "
-                                "The programme lead added a response-time "
+                                "How should I frame the next document review response? "
+                                "The project lead added a deadline "
                                 "requirement, and this screenshot shows the "
-                                "concept style we must follow."
+                                "reference style we must follow."
                             ),
                         },
                         {"type": "input_image", "image_url": self.fake_png_data_url()},
@@ -517,7 +517,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                         {
                             "type": "output_text",
                             "text": (
-                                "The follow-up should emphasize the response-time requirement "
+                                "The follow-up should emphasize the deadline requirement "
                                 "and visual concept expectations."
                             ),
                         }
@@ -587,7 +587,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     None,
                     None,
                     "0.0.0-test",
-                    "Does Aliyun SMS support HTTPS API?",
+                    "Does Example Alerts support HTTPS API?",
                     None,
                     None,
                     None,
@@ -610,7 +610,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "content": [
                         {
                             "type": "input_text",
-                            "text": "Does Aliyun SMS support HTTPS API?",
+                            "text": "Does Example Alerts support HTTPS API?",
                         }
                     ],
                 },
@@ -638,7 +638,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "content": [
                         {
                             "type": "output_text",
-                            "text": "Yes. Aliyun SMS supports HTTPS API access.",
+                            "text": "Yes. Example Alerts supports HTTPS API access.",
                         }
                     ],
                 },
@@ -682,7 +682,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         ):
             first = prepare_ask_turn(
                 workspace,
-                question="How should I draft the campaign planning brief for the programme lead?",
+                question="How should I draft the project planning brief for the project lead?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="composition",
                     question_domain="composition",
@@ -691,9 +691,9 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             second = prepare_ask_turn(
                 workspace,
                 question=(
-                    "How should I frame the next architecture review response? "
-                    "The programme lead added a response-time requirement, and this screenshot "
-                    "shows the concept style we must follow."
+                    "How should I frame the next document review response? "
+                    "The project lead added a deadline requirement, and this screenshot "
+                    "shows the reference style we must follow."
                 ),
                 semantic_analysis=self.semantic_analysis(
                     question_class="composition",
@@ -776,7 +776,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
 
         overlay_retrieval = retrieve_corpus(
             workspace,
-            query="response-time requirement screenshot concept style",
+            query="deadline requirement screenshot reference style",
             top=3,
             graph_hops=1,
             document_types=None,
@@ -803,7 +803,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             transcript = load_codex_transcript(thread_id)
             self.assertEqual(
                 transcript["turns"][0]["assistant_final_text"],
-                "Yes. Aliyun SMS supports HTTPS API access.",
+                "Yes. Example Alerts supports HTTPS API access.",
             )
             reconciled = reconcile_codex_thread(workspace, thread_id=thread_id)
 
@@ -813,14 +813,14 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         )
         self.assertEqual(
             native_ledger["turns"][0]["assistant_excerpt"],
-            "Yes. Aliyun SMS supports HTTPS API access.",
+            "Yes. Example Alerts supports HTTPS API access.",
         )
         entries = sorted(workspace.interaction_entries_dir.glob("*.json"))
         self.assertEqual(len(entries), 1)
         entry = read_json(entries[0])
         self.assertEqual(
             entry["assistant_excerpt"],
-            "Yes. Aliyun SMS supports HTTPS API access.",
+            "Yes. Example Alerts supports HTTPS API access.",
         )
         self.assertEqual(entry["question_class"], "answer")
         self.assertEqual(entry["question_domain"], "general-stable")
@@ -852,7 +852,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             self.assertEqual(reconciled["status"], "reconciled")
             prepared = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="general-stable",
@@ -896,7 +896,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         ):
             turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="general-stable",
@@ -945,7 +945,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         ):
             canonical = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="general-stable",
@@ -1010,7 +1010,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         ):
             turn = prepare_ask_turn(
                 workspace,
-                question="How should I handle the response-time requirement from the screenshot?",
+                question="How should I handle the deadline requirement from the screenshot?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1055,8 +1055,8 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             turn = prepare_ask_turn(
                 workspace,
                 question=(
-                    "Using only the document 'Campaign Planning Brief', "
-                    "how should I handle the response-time requirement from the screenshot?"
+                    "Using only the document 'Project Planning Brief', "
+                    "how should I handle the deadline requirement from the screenshot?"
                 ),
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
@@ -1106,8 +1106,8 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             retrieval = retrieve_corpus(
                 workspace,
                 query=(
-                    "Using only the document 'Campaign Planning Brief', "
-                    "how should I handle the response-time requirement from the screenshot?"
+                    "Using only the document 'Project Planning Brief', "
+                    "how should I handle the deadline requirement from the screenshot?"
                 ),
                 top=3,
                 graph_hops=1,
@@ -1155,8 +1155,8 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             turn = prepare_ask_turn(
                 workspace,
                 question=(
-                    "Using only the document 'Campaign Planning Brief', "
-                    "how should I handle the response-time requirement?"
+                    "Using only the document 'Project Planning Brief', "
+                    "how should I handle the deadline requirement?"
                 ),
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
@@ -1218,7 +1218,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
 
         retrieval = retrieve_corpus(
             workspace,
-            query="response-time requirement screenshot concept style",
+            query="deadline requirement screenshot reference style",
             top=3,
             graph_hops=1,
             document_types=None,
@@ -1238,7 +1238,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
 
         corpus_first = retrieve_corpus(
             workspace,
-            query="architecture strategy operating model",
+            query="project outline work plan",
             top=3,
             graph_hops=1,
             document_types=None,
@@ -1262,8 +1262,8 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             turn_id="turn-001",
             native_turn_id="native-turn-001",
             recorded_at="2026-03-17T00:00:00Z",
-            user_text="The programme lead added a 24-hour response-time requirement.",
-            assistant_excerpt="Keep the concept style and mention the response-time constraint.",
+            user_text="The project lead added a 24-hour deadline requirement.",
+            assistant_excerpt="Keep the reference style and mention the deadline constraint.",
             attachment_refs=[],
             continuation_type="constraint-update",
             related_source_ids=source_ids[:1],
@@ -1394,7 +1394,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
 
         loaded_contexts = retrieve_corpus(
             workspace,
-            query="response-time requirement concept style",
+            query="deadline requirement reference style",
             top=3,
             graph_hops=1,
             document_types=None,

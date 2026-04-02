@@ -242,7 +242,7 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         )
         connector.name = "Flow Connector"
         label = slide.shapes.add_textbox(2100000, 700000, 1400000, 400000)
-        label.text_frame.text = "Approval Flow"
+        label.text_frame.text = "Review Flow"
         presentation.save(path)
 
     def create_docx(self, path: Path) -> None:
@@ -1304,7 +1304,7 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
                 {
                     "unit_id": "slide-001",
                     "ordinal": 1,
-                    "title": "Approval Flow",
+                    "title": "Review Flow",
                     "rendered_asset": "renders/page-001.png",
                     "render_ordinal": 1,
                 }

@@ -169,14 +169,14 @@ class ReferenceResolutionTests(unittest.TestCase):
             )
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / ordered_source_ids[0],
-            title="Campaign Planning Brief",
-            summary="A strategy deck about architecture and operating model.",
-            key_point="The strategy defines an architecture operating model.",
-            claim="The architecture deck connects strategy to implementation.",
+            title="Project Planning Brief",
+            summary="A planning brief about a project outline and work plan.",
+            key_point="The outline defines a practical work plan.",
+            claim="The project outline connects planning to implementation.",
         )
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / ordered_source_ids[1],
-            title="Architecture Strategy Companion",
+            title="Project Outline Companion",
             summary="A companion planning artifact with similar domain language.",
             key_point="The companion document adds rollout notes.",
             claim="The companion document should not steal an exact source reference.",
@@ -198,7 +198,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         deck_source_id = source_ids["original_doc/a.pdf"]
 
         report = retrieve_knowledge(
-            query="Campaign Planning Brief page 1 operating model",
+            query="Project Planning Brief page 1 work plan",
             top=5,
             graph_hops=2,
             include_renders=True,
@@ -223,7 +223,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         deck_source_id = source_ids["original_doc/a.pdf"]
 
         report = retrieve_knowledge(
-            query="Campaign Planning Brief page 2 visual detail",
+            query="Project Planning Brief page 2 visual detail",
             top=3,
             graph_hops=1,
             include_renders=True,
@@ -245,7 +245,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.publish_seeded_pdf_corpus(workspace)
 
         report = retrieve_knowledge(
-            query="Architecture Strategy page 1",
+            query="Project Outline page 1",
             top=3,
             graph_hops=1,
             include_renders=False,
@@ -269,8 +269,8 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         report = retrieve_knowledge(
             query=(
-                "Using only the document 'Missing Campaign Brief', summarize the architecture "
-                "strategy in 3 bullet points. Do not use any other source."
+                "Using only the document 'Missing Project Brief', summarize the project "
+                "outline in 3 bullet points. Do not use any other source."
             ),
             top=5,
             graph_hops=2,
@@ -296,10 +296,10 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "source_id": "source-001",
                 "source_family": "corpus",
                 "current_path": (
-                    "original_doc/Data service layer/"
-                    "China Data Service Layer Architecture design.pptx"
+                    "original_doc/Project notes/"
+                    "Regional Process Overview.pptx"
                 ),
-                "title": "China Data Service Layer Architecture design",
+                "title": "Regional Process Overview",
                 "prior_paths": [],
                 "path_history": [],
             }
@@ -307,8 +307,8 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         result = resolve_reference_query(
             (
-                "Using only original_doc/Data service layer/China Data Service Layer "
-                "Architecture design.pptx, give 5 bullets on architecture scope."
+                "Using only original_doc/Project notes/Regional Process Overview.pptx, "
+                "give 5 bullets on process scope."
             ),
             source_records=source_records,
             unit_records=[],
@@ -317,7 +317,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.assertEqual(result["status"], "exact")
         self.assertEqual(
             result["requested_source_text"],
-            "original_doc/Data service layer/China Data Service Layer Architecture design.pptx",
+            "original_doc/Project notes/Regional Process Overview.pptx",
         )
         self.assertEqual(result["resolved_source_id"], "source-001")
 
@@ -326,8 +326,8 @@ class ReferenceResolutionTests(unittest.TestCase):
             {
                 "source_id": "source-001",
                 "source_family": "corpus",
-                "current_path": "original_doc/Data service layer/design.pptx",
-                "title": "China Data Service Layer Architecture design",
+                "current_path": "original_doc/Project notes/overview.pptx",
+                "title": "Regional Process Overview",
                 "prior_paths": [],
                 "path_history": [],
             }
@@ -340,15 +340,15 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "unit_type": "slide",
                 "logical_ordinal": 1,
                 "render_ordinal": 1,
-                "title": "Architecture Scope",
-                "locator_aliases": ["Architecture Scope"],
+                "title": "Process Scope",
+                "locator_aliases": ["Process Scope"],
             }
         ]
 
         result = resolve_reference_query(
             (
-                'Using only the document "China Data Service Layer Architecture design", '
-                "give 5 bullets on architecture scope."
+                'Using only the document "Regional Process Overview", '
+                "give 5 bullets on process scope."
             ),
             source_records=source_records,
             unit_records=unit_records,
@@ -366,16 +366,16 @@ class ReferenceResolutionTests(unittest.TestCase):
             {
                 "source_id": "source-one-page",
                 "source_family": "corpus",
-                "current_path": "original_doc/CUS/CUS Achievent 2025 one page.pdf",
-                "title": "CUS Achievent 2025 one page",
+                "current_path": "original_doc/notes/Project Snapshot 2025 one page.pdf",
+                "title": "Project Snapshot 2025 one page",
                 "prior_paths": [],
                 "path_history": [],
             },
             {
                 "source_id": "source-one",
                 "source_family": "corpus",
-                "current_path": "original_doc/CUS/CUS Achievent 2025 1.pdf",
-                "title": "CUS Achievent 2025 one",
+                "current_path": "original_doc/notes/Project Snapshot 2025 1.pdf",
+                "title": "Project Snapshot 2025 one",
                 "prior_paths": [],
                 "path_history": [],
             },
@@ -383,8 +383,8 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         result = resolve_reference_query(
             (
-                'Using only the document "CUS Achievent 2025 one page", extract 4 bullet '
-                'points. Do not use "CUS Achievent 2025 1" or any other source.'
+                'Using only the document "Project Snapshot 2025 one page", extract 4 bullet '
+                'points. Do not use "Project Snapshot 2025 1" or any other source.'
             ),
             source_records=source_records,
             unit_records=[],
@@ -406,8 +406,8 @@ class ReferenceResolutionTests(unittest.TestCase):
         turn = prepare_ask_turn(
             workspace,
             question=(
-                "Using only the document 'Campaign Planning Brief', summarize the architecture "
-                "strategy. Do not use any other source."
+                "Using only the document 'Project Planning Brief', summarize the project "
+                "outline. Do not use any other source."
             ),
             semantic_analysis={
                 "question_class": "answer",
@@ -431,7 +431,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         deck_source_id = source_ids["original_doc/a.pdf"]
 
         report = retrieve_knowledge(
-            query="Campaign Planning Brief page 9",
+            query="Project Planning Brief page 9",
             top=5,
             graph_hops=2,
             include_renders=False,
@@ -453,7 +453,7 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "source_id": "source-001",
                 "source_family": "corpus",
                 "current_path": "original_doc/a.pdf",
-                "title": "Campaign Planning Brief",
+                "title": "Project Planning Brief",
                 "prior_paths": [],
                 "path_history": [],
             },
@@ -461,7 +461,7 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "source_id": "source-002",
                 "source_family": "corpus",
                 "current_path": "original_doc/b.pdf",
-                "title": "Architecture Strategy Companion",
+                "title": "Project Outline Companion",
                 "prior_paths": [],
                 "path_history": [],
             },
@@ -469,8 +469,8 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         result = resolve_reference_query(
             (
-                "compare Campaign Planning Brief and Architecture Strategy Companion on "
-                "architecture strategy"
+                "compare Project Planning Brief and Project Outline Companion on "
+                "project outline"
             ),
             source_records=source_records,
             unit_records=[],
@@ -481,7 +481,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.assertEqual(result["declared_compare_expected_count"], 2)
         self.assertEqual(
             [item["requested_source_text"] for item in result["declared_compare_sources"]],
-            ["Campaign Planning Brief", "Architecture Strategy Companion"],
+            ["Project Planning Brief", "Project Outline Companion"],
         )
         self.assertEqual(
             [item["source_match_status"] for item in result["declared_compare_sources"]],
@@ -499,7 +499,7 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "source_id": "source-001",
                 "source_family": "corpus",
                 "current_path": "original_doc/a.pdf",
-                "title": "Campaign Planning Brief",
+                "title": "Project Planning Brief",
                 "prior_paths": [],
                 "path_history": [],
             },
@@ -507,14 +507,14 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "source_id": "source-002",
                 "source_family": "corpus",
                 "current_path": "original_doc/b.pdf",
-                "title": "Architecture Strategy Companion",
+                "title": "Project Outline Companion",
                 "prior_paths": [],
                 "path_history": [],
             },
         ]
 
         result = resolve_reference_query(
-            'Compare "Campaign Planning Brief" versus "Zebra Ledger" on architecture strategy.',
+            'Compare "Project Planning Brief" versus "Zebra Ledger" on project outline.',
             source_records=source_records,
             unit_records=[],
         )
@@ -526,7 +526,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.assertEqual(result["declared_compare_source_ids"], ["source-001"])
         self.assertEqual(
             [item["requested_source_text"] for item in result["declared_compare_sources"]],
-            ["Campaign Planning Brief", "Zebra Ledger"],
+            ["Project Planning Brief", "Zebra Ledger"],
         )
         self.assertEqual(
             [item["source_match_status"] for item in result["declared_compare_sources"]],
@@ -546,7 +546,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         )
         self.assertTrue(
             str(result["declared_compare_sources"][0]["target_source_ref"]).startswith(
-                "Campaign Planning Brief"
+                "Project Planning Brief"
             )
         )
         self.assertIsNone(result["declared_compare_sources"][1]["target_source_ref"])
@@ -559,7 +559,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.publish_seeded_pdf_corpus(workspace)
 
         report = retrieve_knowledge(
-            query="compare Campaign Planning Brief and Architecture Strategy Companion",
+            query="compare Project Planning Brief and Project Outline Companion",
             top=5,
             graph_hops=1,
             include_renders=False,
@@ -583,7 +583,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         self.publish_seeded_pdf_corpus(workspace)
 
         report = retrieve_knowledge(
-            query="compare Campaign Planning Brief pdf and Architecture Strategy Companion docx",
+            query="compare Project Planning Brief pdf and Project Outline Companion docx",
             top=5,
             graph_hops=1,
             include_renders=False,
@@ -782,12 +782,12 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "title": "Slide 3",
                 "render_references": ["renders/page-002.png"],
                 "text": "",
-                "structure_summary": '{"visible_text": ["Detail Architecture"], "ordinal": 3}',
+                "structure_summary": '{"visible_text": ["Detail Workflow"], "ordinal": 3}',
             }
         ]
 
         resolution = resolve_reference_query(
-            "Test Design Deck page 2 detail architecture",
+            "Test Design Deck page 2 detail workflow",
             source_records=source_records,
             unit_records=unit_records,
         )
@@ -801,17 +801,17 @@ class ReferenceResolutionTests(unittest.TestCase):
         source_records = [
             {
                 "source_id": "deck-a",
-                "current_path": "original_doc/design/Search Platform Architecture Review.pptx",
+                "current_path": "original_doc/design/Search Feature Design Notes.pptx",
                 "document_type": "pptx",
                 "source_family": "corpus",
-                "title": "Search Platform Architecture Review",
+                "title": "Search Feature Design Notes",
             },
             {
                 "source_id": "deck-b",
-                "current_path": "original_doc/design/Analytics Platform Architecture Review.pptx",
+                "current_path": "original_doc/design/Analytics Feature Design Notes.pptx",
                 "document_type": "pptx",
                 "source_family": "corpus",
-                "title": "Analytics Platform Architecture Review",
+                "title": "Analytics Feature Design Notes",
             },
         ]
         unit_records = [
@@ -824,8 +824,8 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "unit_type": "slide",
                 "ordinal": 4,
                 "title": "Slide 4",
-                "text": "Concept Architecture",
-                "structure_summary": '{"visible_text": ["Concept Architecture"]}',
+                "text": "Concept Workflow",
+                "structure_summary": '{"visible_text": ["Concept Workflow"]}',
             },
             {
                 "source_id": "deck-b",
@@ -836,13 +836,13 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "unit_type": "slide",
                 "ordinal": 5,
                 "title": "Slide 5",
-                "text": "Detail Architecture",
-                "structure_summary": '{"visible_text": ["Detail Architecture"]}',
+                "text": "Detail Workflow",
+                "structure_summary": '{"visible_text": ["Detail Workflow"]}',
             },
         ]
 
         resolution = resolve_reference_query(
-            "detail architecture page in the Design ppt",
+            "detail workflow page in the Design ppt",
             source_records=source_records,
             unit_records=unit_records,
         )
@@ -1008,10 +1008,10 @@ class ReferenceResolutionTests(unittest.TestCase):
         source_records = [
             {
                 "source_id": "rfi-doc",
-                "current_path": "original_doc/platform/Architecture-Request-1.1.docx",
+                "current_path": "original_doc/platform/Revision-Request-1.1.docx",
                 "document_type": "docx",
                 "source_family": "corpus",
-                "title": "Architecture Request 1.1",
+                "title": "Revision Request 1.1",
             }
         ]
         unit_records = [
@@ -1024,16 +1024,16 @@ class ReferenceResolutionTests(unittest.TestCase):
                 "unit_type": "section",
                 "ordinal": 1,
                 "title": "Section 1",
-                "text": "Background\nThe high-level enterprise architecture",
+                "text": "Background\nThe high-level project overview",
                 "structure_summary": (
                     '{"blocks": [{"kind": "paragraph", "text": "Background"}, '
-                    '{"kind": "paragraph", "text": "The high-level enterprise architecture"}]}'
+                    '{"kind": "paragraph", "text": "The high-level project overview"}]}'
                 ),
             }
         ]
 
         resolution = resolve_reference_query(
-            "Architecture Request 1.1 background section",
+            "Revision Request 1.1 background section",
             source_records=source_records,
             unit_records=unit_records,
         )
@@ -1045,9 +1045,9 @@ class ReferenceResolutionTests(unittest.TestCase):
 
     def test_approximate_resolved_unit_is_reranked_first_within_source(self) -> None:
         rules_engine_path = (
-            "original_doc/Architecture documents/Modernize Business Rules Workflow.pdf"
+            "original_doc/Process documents/Update Review Workflow.pdf"
         )
-        rules_engine_searchable = "Modernize Business Rules Workflow current state pain points"
+        rules_engine_searchable = "Update Review Workflow current state pain points"
         retrieval_data = {
             "manifest": {"source_signature": "reference-resolution-test"},
             "source_records": [
@@ -1056,7 +1056,7 @@ class ReferenceResolutionTests(unittest.TestCase):
                     "current_path": rules_engine_path,
                     "document_type": "pdf",
                     "source_family": "corpus",
-                    "title": "Modernize Business Rules Workflow",
+                    "title": "Update Review Workflow",
                     "summary_en": "Business rules workflow design document.",
                     "summary_source": "Business rules workflow design document.",
                     "searchable_text": rules_engine_searchable,
@@ -1076,7 +1076,7 @@ class ReferenceResolutionTests(unittest.TestCase):
                     "unit_type": "page",
                     "ordinal": 1,
                     "title": "Page 1",
-                    "text": "Modernize Business Rules Workflow introduction and overview",
+                    "text": "Update Review Workflow introduction and overview",
                     "structure_summary": '{"ordinal": 1, "text_excerpt": "Overview"}',
                 },
                 {
@@ -1088,7 +1088,7 @@ class ReferenceResolutionTests(unittest.TestCase):
                     "unit_type": "page",
                     "ordinal": 11,
                     "title": "Page 11",
-                    "text": "Current State Pain Points for the business rules workflow",
+                    "text": "Current State Pain Points for the review workflow",
                     "structure_summary": (
                         '{"ordinal": 11, "text_excerpt": "Current State Pain Points"}'
                     ),
@@ -1099,7 +1099,7 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         result = run_retrieval_query(
             retrieval_data,
-            query="current state pain points page in business rules workflow document",
+            query="current state pain points page in review workflow document",
             top=1,
             graph_hops=0,
             document_types=None,
@@ -1116,24 +1116,24 @@ class ReferenceResolutionTests(unittest.TestCase):
 
     def test_approximate_source_plus_exact_unit_hard_filters_resolved_source(self) -> None:
         interaction_title = (
-            "Interaction Memory for Architecture Review page-by-page authoring constraints"
+            "Interaction Memory for Draft Project Review slide-by-slide authoring constraints"
         )
         interaction_summary = "A related interaction memory with stronger broad lexical overlap."
         interaction_searchable = (
-            "WIP Milestone Platform Review slide 35 page by page authoring constraints"
+            "Draft Project Review slide 35 slide-by-slide authoring constraints"
         )
         retrieval_data = {
             "manifest": {"source_signature": "reference-resolution-test"},
             "source_records": [
                 {
                     "source_id": "deck-1",
-                    "current_path": "original_doc/WIP_Milestone_Platform_Review.pptx",
+                    "current_path": "original_doc/Draft_Project_Review.pptx",
                     "document_type": "pptx",
                     "source_family": "corpus",
-                    "title": "Platform Operations Milestone Review",
-                    "summary_en": "Milestone review deck for platform operations.",
-                    "summary_source": "Milestone review deck for platform operations.",
-                    "searchable_text": "WIP Milestone Platform Review slide 35 target deck",
+                    "title": "Project Operations Review",
+                    "summary_en": "Draft review deck for project coordination.",
+                    "summary_source": "Draft review deck for project coordination.",
+                    "searchable_text": "Draft Project Review slide 35 target deck",
                     "available_channels": ["text", "render", "structure"],
                     "channel_descriptors": {},
                     "citation_density": 0,
@@ -1161,7 +1161,7 @@ class ReferenceResolutionTests(unittest.TestCase):
             "unit_records": [
                 {
                     "source_id": "deck-1",
-                    "current_path": "original_doc/WIP_Milestone_Platform_Review.pptx",
+                    "current_path": "original_doc/Draft_Project_Review.pptx",
                     "document_type": "pptx",
                     "source_family": "corpus",
                     "unit_id": "slide-035",
@@ -1170,8 +1170,8 @@ class ReferenceResolutionTests(unittest.TestCase):
                     "logical_ordinal": 35,
                     "render_ordinal": 32,
                     "title": "Slide 35",
-                    "text": "WIP Milestone Platform Review target slide detail",
-                    "structure_summary": '{"ordinal": 35, "text_excerpt": "Milestone detail"}',
+                    "text": "Draft Project Review target slide detail",
+                    "structure_summary": '{"ordinal": 35, "text_excerpt": "Review detail"}',
                 },
                 {
                     "source_id": "memory-1",
@@ -1182,9 +1182,9 @@ class ReferenceResolutionTests(unittest.TestCase):
                     "unit_type": "interaction-turn",
                     "ordinal": 11,
                     "title": "Conversation turn 11",
-                    "text": "WIP Milestone Platform Review page by page authoring constraints",
+                    "text": "Draft Project Review slide-by-slide authoring constraints",
                     "structure_summary": (
-                        '{"ordinal": 11, "text_excerpt": "page by page authoring constraints"}'
+                        '{"ordinal": 11, "text_excerpt": "slide-by-slide authoring constraints"}'
                     ),
                 },
             ],
@@ -1203,7 +1203,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         )
         result = run_retrieval_query(
             retrieval_data,
-            query="WIP Milestone Platform Review slide 35",
+            query="Draft Project Review slide 35",
             top=5,
             graph_hops=0,
             document_types=None,
@@ -1232,7 +1232,7 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         turn = prepare_ask_turn(
             workspace,
-            question="Campaign Planning Brief page 2 visual detail",
+            question="Project Planning Brief page 2 visual detail",
             semantic_analysis={
                 "question_class": "answer",
                 "question_domain": "workspace-corpus",
@@ -1292,7 +1292,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         turn = prepare_ask_turn(
             workspace,
             question=(
-                "Using only the document 'Campaign Planning Brief', summarize the architecture "
+                "Using only the document 'Project Planning Brief', summarize the architecture "
                 "strategy. Do not use any other source."
             ),
             semantic_analysis={
@@ -1303,7 +1303,7 @@ class ReferenceResolutionTests(unittest.TestCase):
         )
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The architecture strategy connects the operating model to implementation.\n",
+            "The project outline connects the work plan to implementation.\n",
             encoding="utf-8",
         )
         trace_report = trace_knowledge(
@@ -1343,7 +1343,7 @@ class ReferenceResolutionTests(unittest.TestCase):
                 trace_ids=[trace_report.payload["trace_id"]],
                 answer_file_path=turn["answer_file_path"],
                 response_excerpt=(
-                    "The architecture strategy connects the operating model to implementation."
+                    "The project outline connects the work plan to implementation."
                 ),
                 status="answered",
             )

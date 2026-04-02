@@ -103,12 +103,11 @@ async function handleAdminPublish(request, env) {
 async function handleCheck(request, env) {
   const payload = await readJson(request);
   const distributionChannel = nonemptyString(payload?.distribution_channel);
-  const sourceVersion = nonemptyString(payload?.source_version);
   const installationHash = nonemptyString(payload?.installation_hash);
   const trigger = nonemptyString(payload?.trigger);
-  if (!distributionChannel || !sourceVersion || !installationHash || !trigger) {
+  if (!distributionChannel || !installationHash || !trigger) {
     return jsonResponse(400, {
-      error: "distribution_channel, source_version, installation_hash, and trigger are required.",
+      error: "distribution_channel, installation_hash, and trigger are required.",
     });
   }
 
@@ -156,7 +155,6 @@ async function handleCheck(request, env) {
       release_url: row.release_url,
       asset_url: row.asset_url,
       asset_name: row.asset_name,
-      update_available: row.latest_version !== sourceVersion,
     },
   });
 }

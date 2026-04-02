@@ -294,17 +294,17 @@ class AskHardeningTests(unittest.TestCase):
 
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / source_ids[0],
-            title="Campaign Planning Brief",
-            summary="A strategy deck about architecture and operating model.",
-            key_point="The strategy defines an architecture operating model.",
-            claim="The architecture deck connects strategy to implementation.",
+            title="Project Planning Brief",
+            summary="A planning brief about a project outline and work plan.",
+            key_point="The outline defines a practical work plan.",
+            claim="The project outline connects planning to implementation.",
         )
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / source_ids[1],
-            title="Campaign Evaluation Plan",
-            summary="A delivery timeline and companion planning document.",
-            key_point="The timeline explains rollout milestones.",
-            claim="The timeline complements the architecture strategy.",
+            title="Project Timeline Notes",
+            summary="A timeline note and companion planning document.",
+            key_point="The timeline explains key milestones.",
+            claim="The timeline complements the project outline.",
         )
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
@@ -397,7 +397,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-external"}, clear=False):
             external_turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -451,14 +451,14 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-review-request"}, clear=False):
             answered = prepare_ask_turn(
                 workspace,
-                question="What does the architecture strategy actually say?",
+                question="What does the project outline actually say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
                 ),
             )
         answer_path = workspace.root / answered["answer_file_path"]
-        answer_path.write_text("The architecture strategy defines the operating model.\n", encoding="utf-8")
+        answer_path.write_text("The project outline defines the work plan.\n", encoding="utf-8")
         trace = trace_answer_file(
             workspace,
             answer_file=answer_path,
@@ -533,7 +533,7 @@ class AskHardeningTests(unittest.TestCase):
 
         retrieval = retrieve_corpus(
             workspace,
-            query="architecture strategy visual style layout rhythm",
+            query="project outline visual style layout rhythm",
             top=2,
             graph_hops=1,
             document_types=None,
@@ -729,14 +729,14 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-hybrid-state"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
                 ),
             )
         (workspace.root / turn["answer_file_path"]).write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         trace = trace_answer_file(
@@ -832,14 +832,14 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-hybrid-pre-refresh"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
                 ),
             )
         (workspace.root / turn["answer_file_path"]).write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         trace = trace_answer_file(
@@ -920,7 +920,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-version-trace"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -929,7 +929,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         trace = trace_answer_file(
@@ -966,7 +966,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-missing-trace-version"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -975,7 +975,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         trace = trace_answer_file(
@@ -998,7 +998,7 @@ class AskHardeningTests(unittest.TestCase):
                 session_ids=[trace["session_id"]],
                 trace_ids=[trace["trace_id"]],
                 answer_file_path=turn["answer_file_path"],
-                response_excerpt="The planning brief connects strategy to implementation.",
+                response_excerpt="The planning brief connects the project outline to implementation.",
                 status="answered",
             )
 
@@ -1082,7 +1082,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-trace-required"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1091,7 +1091,7 @@ class AskHardeningTests(unittest.TestCase):
 
         retrieve_corpus(
             workspace,
-            query="campaign planning brief",
+            query="project planning brief",
             top=2,
             graph_hops=0,
             document_types=None,
@@ -1103,7 +1103,7 @@ class AskHardeningTests(unittest.TestCase):
         )
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
 
@@ -1114,7 +1114,7 @@ class AskHardeningTests(unittest.TestCase):
                 turn_id=turn["turn_id"],
                 inner_workflow_id="grounded-answer",
                 answer_file_path=turn["answer_file_path"],
-                response_excerpt="The planning brief connects strategy to implementation.",
+                response_excerpt="The planning brief connects the project outline to implementation.",
                 status="answered",
             )
 
@@ -1289,7 +1289,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-autolink"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1298,7 +1298,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         trace = trace_answer_file(
@@ -1314,18 +1314,18 @@ class AskHardeningTests(unittest.TestCase):
             turn_id=turn["turn_id"],
             inner_workflow_id="grounded-answer",
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="The planning brief connects strategy to implementation.",
+            response_excerpt="The planning brief connects the project outline to implementation.",
             support_basis="external-source-verified",
             support_manifest_sources=[
                 {
                     "url": "https://example.com/planning-brief",
-                    "title": "Campaign Planning Brief",
+                    "title": "Project Planning Brief",
                     "source_type": "official-doc",
-                    "support_snippet": "The planning brief connects strategy to implementation.",
+                    "support_snippet": "The planning brief connects the project outline to implementation.",
                 }
             ],
             support_manifest_key_assertions=[
-                "The planning brief connects strategy to implementation."
+                "The planning brief connects the project outline to implementation."
             ],
             support_manifest_notes="Wrong-run trace must not be rebound to the canonical turn.",
             status="answered",
@@ -1362,7 +1362,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-ambiguous-link"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -1370,11 +1370,11 @@ class AskHardeningTests(unittest.TestCase):
             )
 
         answer_path = workspace.root / turn["answer_file_path"]
-        answer_path.write_text("Yes. Aliyun SMS supports HTTPS API access.", encoding="utf-8")
+        answer_path.write_text("Yes. Example Alerts supports HTTPS API access.", encoding="utf-8")
         for _ in range(2):
             retrieve_corpus(
                 workspace,
-                query="Aliyun SMS HTTPS API",
+                query="Example Alerts HTTPS API",
                 top=2,
                 graph_hops=0,
                 document_types=None,
@@ -1397,18 +1397,18 @@ class AskHardeningTests(unittest.TestCase):
             turn_id=turn["turn_id"],
             inner_workflow_id="grounded-answer",
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="Aliyun SMS supports HTTPS API access.",
+            response_excerpt="Example Alerts supports HTTPS API access.",
             question_domain=turn["question_domain"],
             support_basis="external-source-verified",
             support_manifest_sources=[
                 {
-                    "url": "https://example.com/aliyun-sms-https",
-                    "title": "Aliyun SMS HTTPS API",
+                    "url": "https://example.com/example-alerts-https",
+                    "title": "Example Alerts HTTPS API",
                     "source_type": "official-doc",
                     "support_snippet": "HTTPS access is documented explicitly.",
                 }
             ],
-            support_manifest_key_assertions=["Aliyun SMS supports HTTPS API access."],
+            support_manifest_key_assertions=["Example Alerts supports HTTPS API access."],
             support_manifest_notes="Explicit external verification for ambiguity test.",
             status="answered",
         )
@@ -1426,7 +1426,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-wrong-run"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1435,7 +1435,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         wrong_log_context = {**turn["log_context"], "run_id": "run-does-not-exist"}
@@ -1452,18 +1452,18 @@ class AskHardeningTests(unittest.TestCase):
             turn_id=turn["turn_id"],
             inner_workflow_id="grounded-answer",
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="The planning brief connects strategy to implementation.",
+            response_excerpt="The planning brief connects the project outline to implementation.",
             support_basis="external-source-verified",
             support_manifest_sources=[
                 {
                     "url": "https://example.com/planning-brief",
-                    "title": "Campaign Planning Brief",
+                    "title": "Project Planning Brief",
                     "source_type": "official-doc",
-                    "support_snippet": "The planning brief connects strategy to implementation.",
+                    "support_snippet": "The planning brief connects the project outline to implementation.",
                 }
             ],
             support_manifest_key_assertions=[
-                "The planning brief connects strategy to implementation."
+                "The planning brief connects the project outline to implementation."
             ],
             support_manifest_notes="Wrong-run trace must be demoted instead of rebound.",
             status="answered",
@@ -1490,7 +1490,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-local-external"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1499,7 +1499,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         trace_answer_file(
@@ -1515,14 +1515,14 @@ class AskHardeningTests(unittest.TestCase):
             turn_id=turn["turn_id"],
             inner_workflow_id="grounded-answer",
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="The planning brief connects strategy to implementation.",
+            response_excerpt="The planning brief connects the project outline to implementation.",
             support_basis="external-source-verified",
             support_manifest_sources=[
                 {
                     "url": "original_doc/a.pdf",
-                    "title": "Campaign Planning Brief",
+                    "title": "Project Planning Brief",
                     "source_type": "local-file",
-                    "support_snippet": "The planning brief connects strategy to implementation.",
+                    "support_snippet": "The planning brief connects the project outline to implementation.",
                 }
             ],
             status="answered",
@@ -1539,7 +1539,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-post-commit"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1548,7 +1548,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         first_trace = trace_answer_file(
@@ -1565,7 +1565,7 @@ class AskHardeningTests(unittest.TestCase):
             session_ids=[first_trace["session_id"]],
             trace_ids=[first_trace["trace_id"]],
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="The planning brief connects strategy to implementation.",
+            response_excerpt="The planning brief connects the project outline to implementation.",
             status="answered",
         )
 
@@ -1600,7 +1600,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-run-version"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -1638,7 +1638,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         trace = trace_answer_file(
@@ -1660,7 +1660,7 @@ class AskHardeningTests(unittest.TestCase):
             session_ids=[trace["session_id"]],
             trace_ids=[trace["trace_id"]],
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="The planning brief connects strategy to implementation.",
+            response_excerpt="The planning brief connects the project outline to implementation.",
             status="answered",
         )
         run_commit = read_json(workspace.runs_dir / run_id / "commit.json")
@@ -1994,7 +1994,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-warm-start-sig"}, clear=False):
             first_turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -2002,7 +2002,7 @@ class AskHardeningTests(unittest.TestCase):
             )
         answer_path = workspace.root / first_turn["answer_file_path"]
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.",
+            "The planning brief connects the project outline to implementation.",
             encoding="utf-8",
         )
         trace = trace_answer_file(
@@ -2019,7 +2019,7 @@ class AskHardeningTests(unittest.TestCase):
             session_ids=[trace["session_id"]],
             trace_ids=[trace["trace_id"]],
             answer_file_path=first_turn["answer_file_path"],
-            response_excerpt="The planning brief connects strategy to implementation.",
+            response_excerpt="The planning brief connects the project outline to implementation.",
             status="answered",
         )
         write_json(
@@ -2033,7 +2033,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-warm-start-sig"}, clear=False):
             second_turn = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -2083,7 +2083,7 @@ class AskHardeningTests(unittest.TestCase):
 
         retrieval = retrieve_corpus(
             workspace,
-            query="architecture strategy tone rhetorical posture",
+            query="project outline tone rhetorical posture",
             top=2,
             graph_hops=1,
             document_types=None,
@@ -2106,7 +2106,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-reuse"}, clear=False):
             first = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2114,7 +2114,7 @@ class AskHardeningTests(unittest.TestCase):
             )
             second = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2151,7 +2151,7 @@ class AskHardeningTests(unittest.TestCase):
         ):
             first = prepare_ask_turn(
                 workspace,
-                question="What do the latest workspace documents say about the architecture strategy?",
+                question="What do the latest workspace documents say about the project outline?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -2160,7 +2160,7 @@ class AskHardeningTests(unittest.TestCase):
             )
             second = prepare_ask_turn(
                 workspace,
-                question="What do the latest workspace documents say about the architecture strategy?",
+                question="What do the latest workspace documents say about the project outline?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -2325,7 +2325,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-governance-invalidate-semantic"}, clear=False):
             first = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2334,7 +2334,7 @@ class AskHardeningTests(unittest.TestCase):
             )
             second = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="general-stable",
@@ -2370,7 +2370,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-governance-invalidate-publish"}, clear=False):
             first = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -2385,7 +2385,7 @@ class AskHardeningTests(unittest.TestCase):
             )
             second = prepare_ask_turn(
                 workspace,
-                question="What does the campaign planning brief say?",
+                question="What does the project planning brief say?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -2478,7 +2478,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-confirm-no"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2541,7 +2541,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-confirm-yes"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2628,7 +2628,7 @@ class AskHardeningTests(unittest.TestCase):
                 "turns": [
                     {
                         "turn_id": "turn-001",
-                        "user_question": "Does Aliyun SMS support HTTPS API?",
+                        "user_question": "Does Example Alerts support HTTPS API?",
                         "entry_workflow_id": "ask",
                         "answer_file_path": f"runtime/answers/{legacy_conversation_id}/turn-001.md",
                         "status": "opened",
@@ -2652,7 +2652,7 @@ class AskHardeningTests(unittest.TestCase):
         ):
             turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2692,7 +2692,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": legacy_thread_id}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2724,7 +2724,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, weak_env, clear=False):
             weak_turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2748,7 +2748,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, strong_env, clear=False):
             strong_turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2776,7 +2776,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-support"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2785,7 +2785,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "Yes. Aliyun SMS supports HTTPS API access through the documented HTTPS endpoint.",
+            "Yes. Example Alerts supports HTTPS API access through the documented HTTPS endpoint.",
             encoding="utf-8",
         )
         first_completion = complete_ask_turn(
@@ -2799,13 +2799,13 @@ class AskHardeningTests(unittest.TestCase):
             support_basis="external-source-verified",
             support_manifest_sources=[
                 {
-                    "url": "https://help.aliyun.com/zh/sms/getting-started/use-sms-api",
-                    "title": "Aliyun SMS API",
+                    "url": "https://example.com/example-alerts-api",
+                    "title": "Example Alerts API",
                     "source_type": "official-doc",
                     "support_snippet": "HTTP 80 and HTTPS 443 are both documented.",
                 }
             ],
-            support_manifest_key_assertions=["Aliyun SMS supports HTTPS API access."],
+            support_manifest_key_assertions=["Example Alerts supports HTTPS API access."],
             support_manifest_notes="Verified from official documentation.",
             status="answered",
         )
@@ -2855,7 +2855,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(record["support_basis"], "external-source-verified")
         self.assertEqual(
             record["external_urls"],
-            ["https://help.aliyun.com/zh/sms/getting-started/use-sms-api"],
+            ["https://example.com/example-alerts-api"],
         )
         self.assertNotIn("answer_text", record)
         summary = refresh_log_review_summary(workspace)
@@ -2869,7 +2869,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-support-2"}, clear=False):
             warm = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API access?",
+                question="Does Example Alerts support HTTPS API access?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -2877,7 +2877,7 @@ class AskHardeningTests(unittest.TestCase):
             )
         self.assertTrue(warm["warm_start_evidence"]["matched_records"])
         self.assertIn(
-            "https://help.aliyun.com/zh/sms/getting-started/use-sms-api",
+            "https://example.com/example-alerts-api",
             warm["warm_start_evidence"]["external_urls"],
         )
         self.assertEqual(
@@ -2895,7 +2895,7 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-trace-reuse"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the architecture strategy connect to?",
+                question="What does the project outline connect to?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -2904,7 +2904,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The architecture strategy connects the operating model to implementation.",
+            "The project outline connects the work plan to implementation.",
             encoding="utf-8",
         )
         first_trace = trace_answer_file(
@@ -3079,7 +3079,7 @@ class AskHardeningTests(unittest.TestCase):
         ):
             turn = prepare_ask_turn(
                 workspace,
-                question="Does Aliyun SMS support HTTPS API?",
+                question="Does Example Alerts support HTTPS API?",
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="external-factual",
@@ -3279,7 +3279,7 @@ class AskHardeningTests(unittest.TestCase):
                 f"workspace = WorkspacePaths(root=Path({str(workspace.root)!r}))",
                 "payload = prepare_ask_turn(",
                 "    workspace,",
-                f"    question={'What does Campaign Planning Brief say about architecture?'!r},",
+                f"    question={'What does Project Planning Brief say about architecture?'!r},",
                 f"    semantic_analysis={self.semantic_analysis(question_class='answer', question_domain='workspace-corpus')!r},",
                 ")",
                 "print(json.dumps(payload))",
@@ -3310,7 +3310,7 @@ class AskHardeningTests(unittest.TestCase):
 
         turn = prepare_ask_turn(
             workspace,
-            question="What does Campaign Planning Brief say about architecture?",
+            question="What does Project Planning Brief say about architecture?",
             semantic_analysis=self.semantic_analysis(
                 question_class="answer",
                 question_domain="workspace-corpus",
@@ -3363,8 +3363,8 @@ class AskHardeningTests(unittest.TestCase):
                 {
                     "action": "open",
                     "question": (
-                        "Using only the document 'Missing Campaign Brief', summarize the "
-                        "architecture strategy in 3 bullet points. Do not use any other source."
+                        "Using only the document 'Missing Project Brief', summarize the "
+                        "project outline in 3 bullet points. Do not use any other source."
                     ),
                     "host_provider": "codex",
                     "host_thread_ref": "thread-hidden-boundary",
@@ -3396,7 +3396,7 @@ class AskHardeningTests(unittest.TestCase):
         payload = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "Compare the campaign planning brief with the evaluation plan.",
+                "question": "Compare the project planning brief with the project timeline notes.",
                 "semantic_analysis": self.semantic_analysis(
                     question_class="composition",
                     question_domain="workspace-corpus",
@@ -3490,8 +3490,8 @@ class AskHardeningTests(unittest.TestCase):
                 {
                     "action": "open",
                     "question": (
-                        'Using only the document "Campaign Planning Brief", summarize the '
-                        "architecture strategy in 3 bullet points."
+                        'Using only the document "Project Planning Brief", summarize the '
+                        "project outline in 3 bullet points."
                     ),
                     "host_provider": "codex",
                     "host_thread_ref": "thread-hidden-fail",
@@ -3504,7 +3504,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertFalse(opened["user_reply_allowed"])
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The architecture strategy defines the operating model.\n",
+            "The project outline defines the work plan.\n",
             encoding="utf-8",
         )
 
@@ -3548,7 +3548,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say?",
+                "question": "What does the project planning brief say?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-autotrace",
                 "host_identity_source": "codex_thread_id",
@@ -3558,7 +3558,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.\n",
+            "The planning brief connects the project outline to implementation.\n",
             encoding="utf-8",
         )
 
@@ -3568,7 +3568,7 @@ class AskHardeningTests(unittest.TestCase):
                 "conversation_id": opened["conversation_id"],
                 "turn_id": opened["turn_id"],
                 "answer_file_path": opened["answer_file_path"],
-                "response_excerpt": "The planning brief connects strategy to implementation.",
+                "response_excerpt": "The planning brief connects the project outline to implementation.",
             },
             paths=workspace,
         )
@@ -3589,7 +3589,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say?",
+                "question": "What does the project planning brief say?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-autotrace-fail",
                 "host_identity_source": "codex_thread_id",
@@ -3599,7 +3599,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.\n",
+            "The planning brief connects the project outline to implementation.\n",
             encoding="utf-8",
         )
 
@@ -3613,7 +3613,7 @@ class AskHardeningTests(unittest.TestCase):
                     "conversation_id": opened["conversation_id"],
                     "turn_id": opened["turn_id"],
                     "answer_file_path": opened["answer_file_path"],
-                    "response_excerpt": "The planning brief connects strategy to implementation.",
+                    "response_excerpt": "The planning brief connects the project outline to implementation.",
                 },
                 paths=workspace,
             )
@@ -3639,8 +3639,8 @@ class AskHardeningTests(unittest.TestCase):
                 {
                     "action": "open",
                     "question": (
-                        "Using only the document 'Missing Campaign Brief', summarize the "
-                        "architecture strategy in 3 bullet points. Do not use any other source."
+                        "Using only the document 'Missing Project Brief', summarize the "
+                        "project outline in 3 bullet points. Do not use any other source."
                     ),
                 },
                 paths=workspace,
@@ -3677,8 +3677,8 @@ class AskHardeningTests(unittest.TestCase):
                 {
                     "action": "open",
                     "question": (
-                        'Using only the document "Campaign Planning Brief", summarize the '
-                        "architecture strategy in 3 bullet points."
+                        'Using only the document "Project Planning Brief", summarize the '
+                        "project outline in 3 bullet points."
                     ),
                     "host_provider": "codex",
                     "host_thread_ref": "thread-hidden-release-open",
@@ -3702,8 +3702,8 @@ class AskHardeningTests(unittest.TestCase):
             {
                 "action": "open",
                 "question": (
-                    'Using only the document "Campaign Planning Brief", summarize the '
-                    "architecture strategy in 3 bullet points."
+                    'Using only the document "Project Planning Brief", summarize the '
+                    "project outline in 3 bullet points."
                 ),
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-release-finalize",
@@ -3715,7 +3715,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(opened["status"], "execute")
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The architecture strategy defines the operating model.\n",
+            "The project outline defines the work plan.\n",
             encoding="utf-8",
         )
 
@@ -3730,7 +3730,7 @@ class AskHardeningTests(unittest.TestCase):
                     "answer_file_path": str(opened["answer_file_path"]),
                     "answer_state": "grounded",
                     "support_basis": "kb-grounded",
-                    "response_excerpt": "The architecture strategy defines the operating model.",
+                    "response_excerpt": "The project outline defines the work plan.",
                     "session_ids": [],
                     "trace_ids": [],
                 },
@@ -3758,7 +3758,7 @@ class AskHardeningTests(unittest.TestCase):
                         "conversation_id": opened["conversation_id"],
                         "turn_id": opened["turn_id"],
                         "answer_file_path": opened["answer_file_path"],
-                        "response_excerpt": "The architecture strategy defines the operating model.",
+                        "response_excerpt": "The project outline defines the work plan.",
                     },
                     paths=workspace,
                 )
@@ -3768,7 +3768,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(
             answer_path.read_text(encoding="utf-8"),
-            "The architecture strategy defines the operating model.\n",
+            "The project outline defines the work plan.\n",
         )
         self.assertIn("DocMason update available", completed["answer_text"])
         self.assertEqual(completed["release_entry_notice"], "DocMason update available: v0.2.0.")
@@ -3786,8 +3786,8 @@ class AskHardeningTests(unittest.TestCase):
             {
                 "action": "open",
                 "question": (
-                    'Using only the document "Campaign Planning Brief", summarize the '
-                    "architecture strategy in 3 bullet points."
+                    'Using only the document "Project Planning Brief", summarize the '
+                    "project outline in 3 bullet points."
                 ),
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-release-fail-silent",
@@ -3797,7 +3797,7 @@ class AskHardeningTests(unittest.TestCase):
         )
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The architecture strategy defines the operating model.\n",
+            "The project outline defines the work plan.\n",
             encoding="utf-8",
         )
 
@@ -3812,7 +3812,7 @@ class AskHardeningTests(unittest.TestCase):
                     "answer_file_path": str(opened["answer_file_path"]),
                     "answer_state": "grounded",
                     "support_basis": "kb-grounded",
-                    "response_excerpt": "The architecture strategy defines the operating model.",
+                    "response_excerpt": "The project outline defines the work plan.",
                     "session_ids": [],
                     "trace_ids": [],
                 },
@@ -3833,7 +3833,7 @@ class AskHardeningTests(unittest.TestCase):
                         "conversation_id": opened["conversation_id"],
                         "turn_id": opened["turn_id"],
                         "answer_file_path": opened["answer_file_path"],
-                        "response_excerpt": "The architecture strategy defines the operating model.",
+                        "response_excerpt": "The project outline defines the work plan.",
                     },
                     paths=workspace,
                 )
@@ -3841,13 +3841,13 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(
             completed["answer_text"],
-            "The architecture strategy defines the operating model.",
+            "The project outline defines the work plan.",
         )
         self.assertIsNone(completed["release_entry_notice"])
         self.assertIsNone(completed["release_entry_status"])
         self.assertEqual(
             answer_path.read_text(encoding="utf-8"),
-            "The architecture strategy defines the operating model.\n",
+            "The project outline defines the work plan.\n",
         )
 
     def test_recommended_hybrid_targets_do_not_fall_back_to_unmatched_units(self) -> None:
@@ -3922,24 +3922,24 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(len(source_ids), 3)
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / source_ids[0],
-            title="Campaign Planning Brief",
-            summary="A strategy deck about architecture and operating model.",
-            key_point="The strategy defines an architecture operating model.",
-            claim="The architecture deck connects strategy to implementation.",
+            title="Project Planning Brief",
+            summary="A planning brief about a project outline and work plan.",
+            key_point="The outline defines a practical work plan.",
+            claim="The project outline connects planning to implementation.",
         )
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / source_ids[1],
-            title="Campaign Evaluation Plan",
-            summary="A delivery timeline and companion planning document.",
-            key_point="The timeline explains rollout milestones.",
-            claim="The timeline complements the architecture strategy.",
+            title="Project Timeline Notes",
+            summary="A timeline note and companion planning document.",
+            key_point="The timeline explains key milestones.",
+            claim="The timeline complements the project outline.",
         )
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / source_ids[2],
             title="Regional Budget Memo",
             summary="A finance memo about regional cost controls.",
             key_point="The memo focuses on budget controls.",
-            claim="The memo does not discuss architecture strategy.",
+            claim="The memo does not discuss project outline.",
         )
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
@@ -3947,8 +3947,8 @@ class AskHardeningTests(unittest.TestCase):
         retrieval = retrieve_corpus(
             workspace,
             query=(
-                'Compare "Campaign Planning Brief" versus '
-                '"Campaign Evaluation Plan" on architecture strategy.'
+                'Compare "Project Planning Brief" versus '
+                '"Project Timeline Notes" on project outline.'
             ),
             top=5,
             graph_hops=0,
@@ -3983,7 +3983,7 @@ class AskHardeningTests(unittest.TestCase):
         ):
             turn = prepare_ask_turn(
                 workspace,
-                question='Compare "Campaign Planning Brief" versus "Zebra Ledger".',
+                question='Compare "Project Planning Brief" versus "Zebra Ledger".',
                 semantic_analysis=self.semantic_analysis(
                     question_class="answer",
                     question_domain="workspace-corpus",
@@ -3993,7 +3993,7 @@ class AskHardeningTests(unittest.TestCase):
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
             (
-                "Campaign Planning Brief contains architecture guidance, but the second "
+                "Project Planning Brief contains project guidance, but the second "
                 "requested comparison source could not be verified in the published corpus."
             ),
             encoding="utf-8",
@@ -4023,7 +4023,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say?",
+                "question": "What does the project planning brief say?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-waiting",
                 "host_identity_source": "codex_thread_id",
@@ -4089,7 +4089,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say?",
+                "question": "What does the project planning brief say?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-progress",
                 "host_identity_source": "codex_thread_id",
@@ -4102,7 +4102,7 @@ class AskHardeningTests(unittest.TestCase):
             conversation_id=str(opened["conversation_id"]),
             turn_id=str(opened["turn_id"]),
             run_id=str(opened["run_id"]),
-            query="What does the campaign planning brief say?",
+            query="What does the project planning brief say?",
             recommended_targets=[
                 {
                     "source_id": source_ids[0],
@@ -4146,7 +4146,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say?",
+                "question": "What does the project planning brief say?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-trace-public",
                 "host_identity_source": "codex_thread_id",
@@ -4155,7 +4155,7 @@ class AskHardeningTests(unittest.TestCase):
         )
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The planning brief connects strategy to implementation.\n",
+            "The planning brief connects the project outline to implementation.\n",
             encoding="utf-8",
         )
         log_context = {
@@ -4186,7 +4186,7 @@ class AskHardeningTests(unittest.TestCase):
                 "conversation_id": opened["conversation_id"],
                 "turn_id": opened["turn_id"],
                 "answer_file_path": opened["answer_file_path"],
-                "response_excerpt": "The planning brief connects strategy to implementation.",
+                "response_excerpt": "The planning brief connects the project outline to implementation.",
             },
             paths=workspace,
         )
@@ -4205,7 +4205,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say about architecture strategy?",
+                "question": "What does the project planning brief say about project outline?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-ambiguous",
                 "host_identity_source": "codex_thread_id",
@@ -4224,14 +4224,14 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The planning brief connects architecture strategy to implementation.\n",
+            "The planning brief connects the project outline to implementation.\n",
             encoding="utf-8",
         )
 
         for _ in range(2):
             retrieve_corpus(
                 workspace,
-                query="campaign planning brief architecture strategy",
+                query="project planning brief project outline",
                 top=2,
                 graph_hops=0,
                 document_types=None,
@@ -4264,7 +4264,7 @@ class AskHardeningTests(unittest.TestCase):
                 "conversation_id": opened["conversation_id"],
                 "turn_id": opened["turn_id"],
                 "answer_file_path": opened["answer_file_path"],
-                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+                "response_excerpt": "The planning brief connects the project outline to implementation.",
             },
             paths=workspace,
         )
@@ -4287,7 +4287,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say about architecture strategy?",
+                "question": "What does the project planning brief say about project outline?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-selected-ledger",
                 "host_identity_source": "codex_thread_id",
@@ -4306,7 +4306,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The planning brief connects architecture strategy to implementation.\n",
+            "The planning brief connects the project outline to implementation.\n",
             encoding="utf-8",
         )
 
@@ -4314,7 +4314,7 @@ class AskHardeningTests(unittest.TestCase):
         for _ in range(2):
             retrieve_corpus(
                 workspace,
-                query="campaign planning brief architecture strategy",
+                query="project planning brief project outline",
                 top=2,
                 graph_hops=0,
                 document_types=None,
@@ -4352,7 +4352,7 @@ class AskHardeningTests(unittest.TestCase):
                 "conversation_id": opened["conversation_id"],
                 "turn_id": opened["turn_id"],
                 "answer_file_path": opened["answer_file_path"],
-                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+                "response_excerpt": "The planning brief connects the project outline to implementation.",
             },
             paths=workspace,
         )
@@ -4372,7 +4372,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say about architecture strategy?",
+                "question": "What does the project planning brief say about project outline?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-stale-selected-ledger",
                 "host_identity_source": "codex_thread_id",
@@ -4391,14 +4391,14 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The planning brief connects architecture strategy to implementation.\n",
+            "The planning brief connects the project outline to implementation.\n",
             encoding="utf-8",
         )
 
         for _ in range(2):
             retrieve_corpus(
                 workspace,
-                query="campaign planning brief architecture strategy",
+                query="project planning brief project outline",
                 top=2,
                 graph_hops=0,
                 document_types=None,
@@ -4446,7 +4446,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say about architecture strategy?",
+                "question": "What does the project planning brief say about project outline?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-explicit-artifacts",
                 "host_identity_source": "codex_thread_id",
@@ -4465,7 +4465,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The planning brief connects architecture strategy to implementation.\n",
+            "The planning brief connects the project outline to implementation.\n",
             encoding="utf-8",
         )
 
@@ -4473,7 +4473,7 @@ class AskHardeningTests(unittest.TestCase):
         for _ in range(2):
             retrieve_corpus(
                 workspace,
-                query="campaign planning brief architecture strategy",
+                query="project planning brief project outline",
                 top=2,
                 graph_hops=0,
                 document_types=None,
@@ -4497,7 +4497,7 @@ class AskHardeningTests(unittest.TestCase):
                 "conversation_id": opened["conversation_id"],
                 "turn_id": opened["turn_id"],
                 "answer_file_path": opened["answer_file_path"],
-                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+                "response_excerpt": "The planning brief connects the project outline to implementation.",
                 "session_ids": [str(selected_trace["session_id"])],
                 "trace_ids": [str(selected_trace["trace_id"])],
             },
@@ -4519,7 +4519,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "What does the campaign planning brief say about architecture strategy?",
+                "question": "What does the project planning brief say about project outline?",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-ambiguous-retry",
                 "host_identity_source": "codex_thread_id",
@@ -4538,7 +4538,7 @@ class AskHardeningTests(unittest.TestCase):
 
         answer_path = workspace.root / str(opened["answer_file_path"])
         answer_path.write_text(
-            "The planning brief connects architecture strategy to implementation.\n",
+            "The planning brief connects the project outline to implementation.\n",
             encoding="utf-8",
         )
 
@@ -4546,7 +4546,7 @@ class AskHardeningTests(unittest.TestCase):
         for _ in range(2):
             retrieve_corpus(
                 workspace,
-                query="campaign planning brief architecture strategy",
+                query="project planning brief project outline",
                 top=2,
                 graph_hops=0,
                 document_types=None,
@@ -4579,7 +4579,7 @@ class AskHardeningTests(unittest.TestCase):
                 "conversation_id": opened["conversation_id"],
                 "turn_id": opened["turn_id"],
                 "answer_file_path": opened["answer_file_path"],
-                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+                "response_excerpt": "The planning brief connects the project outline to implementation.",
             },
             paths=workspace,
         )
@@ -4597,7 +4597,7 @@ class AskHardeningTests(unittest.TestCase):
                 "conversation_id": opened["conversation_id"],
                 "turn_id": opened["turn_id"],
                 "answer_file_path": opened["answer_file_path"],
-                "response_excerpt": "The planning brief connects architecture strategy to implementation.",
+                "response_excerpt": "The planning brief connects the project outline to implementation.",
                 "session_ids": [str(selected_trace["session_id"])],
                 "trace_ids": [str(selected_trace["trace_id"])],
             },
@@ -4623,7 +4623,7 @@ class AskHardeningTests(unittest.TestCase):
         opened = handle_hidden_ask_request(
             {
                 "action": "open",
-                "question": "Compare the campaign planning brief with the evaluation plan.",
+                "question": "Compare the project planning brief with the project timeline notes.",
                 "host_provider": "codex",
                 "host_thread_ref": "thread-hidden-bundle-notice",
                 "host_identity_source": "codex_thread_id",

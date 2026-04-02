@@ -132,20 +132,14 @@ def record_release_entry_check(
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Record one bounded DAU event and return the current release metadata."""
+    """Record one bounded daily-activity event and return the current release metadata."""
     distribution_channel = _nonempty_string(payload.get("distribution_channel"))
-    source_version = _nonempty_string(payload.get("source_version"))
     installation_hash = _nonempty_string(payload.get("installation_hash"))
     trigger = _nonempty_string(payload.get("trigger"))
-    if (
-        distribution_channel is None
-        or source_version is None
-        or installation_hash is None
-        or trigger is None
-    ):
+    if distribution_channel is None or installation_hash is None or trigger is None:
         raise ValueError(
-            "Update-check payload requires distribution_channel, source_version, "
-            "installation_hash, and trigger."
+            "Update-check payload requires distribution_channel, installation_hash, "
+            "and trigger."
         )
 
     recorded_at = _current_time(now=now)
@@ -194,6 +188,5 @@ def record_release_entry_check(
             "release_url": str(row[3]),
             "asset_url": str(row[4]),
             "asset_name": str(row[5]),
-            "update_available": str(row[1]) != source_version,
         },
     }

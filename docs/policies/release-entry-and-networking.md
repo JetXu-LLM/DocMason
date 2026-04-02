@@ -40,7 +40,6 @@ The release-entry client sends only:
 
 - `schema_version`
 - `distribution_channel`
-- `source_version`
 - `installation_hash`
 - `trigger`
 
@@ -48,6 +47,8 @@ Current trigger values are:
 
 - `ask-auto`
 - `update-core`
+
+The client compares the returned `latest_version` against the local bundle version.
 
 The same narrow request may also be used by the release-entry service to record one deduplicated bundle-level daily-activity event.
 That accounting happens outside the product truth surface.
@@ -84,7 +85,7 @@ To disable automatic checks for the current bundle, set:
 }
 ```
 
-`DO_NOT_TRACK=1` disables the automatic post-ask check and the bundle-level daily-activity recording that piggybacks on it.
+`DO_NOT_TRACK=1` disables the automatic post-ask check and the bundle-level daily-activity accounting that piggybacks on it.
 It does not block an explicit `docmason update-core` request, because that is a direct user action.
 
 ## User-Visible Behavior

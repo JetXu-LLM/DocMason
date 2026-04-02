@@ -297,10 +297,10 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         source_b = workspace.knowledge_base_staging_dir / "sources" / source_ids[1]
         self.build_seeded_knowledge(
             source_a,
-            title="Campaign Planning Brief",
-            summary="A strategy deck about architecture and operating model.",
-            key_point="The strategy defines an architecture operating model.",
-            claim="The architecture deck connects strategy to implementation.",
+            title="Project Planning Brief",
+            summary="A planning brief about a project outline and work plan.",
+            key_point="The outline defines a practical work plan.",
+            claim="The project outline connects planning to implementation.",
             related_sources=[
                 {
                     "source_id": source_ids[1],
@@ -313,10 +313,10 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         )
         self.build_seeded_knowledge(
             source_b,
-            title="Campaign Evaluation Plan",
-            summary="A delivery timeline and companion planning document.",
-            key_point="The timeline explains rollout milestones.",
-            claim="The timeline complements the architecture strategy.",
+            title="Project Timeline Notes",
+            summary="A timeline note and companion planning document.",
+            key_point="The timeline explains key milestones.",
+            claim="The timeline complements the project outline.",
         )
 
         published = sync_workspace(workspace)
@@ -559,7 +559,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         source_ids = self.publish_seeded_corpus(workspace)
 
         report = retrieve_knowledge(
-            query="architecture strategy",
+            query="project outline",
             top=2,
             graph_hops=1,
             include_renders=True,
@@ -859,7 +859,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
                 "semantic_labels": [
                     {
                         "label": "diagram-summary",
-                        "text": "Approval flow between intake and review teams.",
+                        "text": "Review flow between request and response steps.",
                         "confidence": "high",
                     }
                 ],
@@ -872,7 +872,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.assertEqual(published.payload["sync_status"], "valid")
 
         report = retrieve_knowledge(
-            query="approval flow intake review teams",
+            query="review flow request response steps",
             top=2,
             graph_hops=0,
             include_renders=True,
@@ -884,7 +884,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
 
         answer_file = workspace.root / "overlay-answer.txt"
         answer_file.write_text(
-            "The approval flow connects intake and review teams.",
+            "The review flow connects request and response steps.",
             encoding="utf-8",
         )
         trace = trace_knowledge(answer_file=str(answer_file), top=2, paths=workspace)
@@ -921,7 +921,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
                 "semantic_labels": [
                     {
                         "label": "diagram-summary",
-                        "text": "Approval flow between intake and review teams.",
+                        "text": "Review flow between request and response steps.",
                         "confidence": "high",
                     }
                 ],
@@ -984,7 +984,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.publish_seeded_corpus(workspace)
 
         report = retrieve_knowledge(
-            query="compare campaign planning brief and campaign evaluation plan",
+            query="compare project planning brief and project timeline notes",
             top=2,
             graph_hops=0,
             include_renders=False,
@@ -1058,7 +1058,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         answer_file.write_text(
             "\n\n".join(
                 [
-                    "The architecture strategy connects the operating model to implementation.",
+                    "The project outline connects the work plan to implementation.",
                     "Zyzzyva quasar nebulae orthonormal frabjous snark.",
                 ]
             ),
@@ -1098,7 +1098,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
             "\n\n".join(
                 [
                     (
-                        "The architecture strategy connects the operating model to implementation "
+                        "The project outline connects the work plan to implementation "
                         f"and paragraph {index:02d} repeats the same supported point."
                     )
                     for index in range(30)
@@ -1124,7 +1124,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         answer_file = workspace.root / "unsupported-answer.txt"
         answer_file.write_text(
             (
-                "The campaign planning brief says DocMason already ships watch mode "
+                "The project planning brief says DocMason already ships watch mode "
                 "and requires a database service."
             ),
             encoding="utf-8",
@@ -1156,7 +1156,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         answer_file.write_text(
             "\n\n".join(
                 [
-                    "The architecture strategy connects the operating model to implementation.",
+                    "The project outline connects the work plan to implementation.",
                     "Zyzzyva quasar nebulae orthonormal frabjous snark.",
                 ]
             ),
@@ -1190,7 +1190,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
             report = retrieve_knowledge(
-                query="architecture strategy",
+                query="project outline",
                 top=2,
                 graph_hops=1,
                 paths=workspace,
@@ -1214,7 +1214,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
             report = retrieve_knowledge(
-                query="architecture strategy",
+                query="project outline",
                 top=2,
                 graph_hops=1,
                 paths=workspace,
@@ -1255,7 +1255,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.seed_active_thread_turn(workspace, front_door_state="canonical-ask")
 
         answer_path = workspace.answers_dir / "thread-operator" / "turn-001.md"
-        answer_path.write_text("The planning brief connects strategy to implementation.\n")
+        answer_path.write_text("The planning brief connects the project outline to implementation.\n")
 
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
             report = trace_knowledge(answer_file=str(answer_path), top=2, paths=workspace)
@@ -1276,7 +1276,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.publish_seeded_corpus(workspace)
         self.seed_active_thread_turn(workspace, front_door_state="canonical-ask")
         answer_path = workspace.answers_dir / "thread-operator" / "turn-001.md"
-        answer_path.write_text("The planning brief connects strategy to implementation.\n")
+        answer_path.write_text("The planning brief connects the project outline to implementation.\n")
 
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator"}, clear=False):
             answer_trace_report = trace_knowledge(
@@ -1312,7 +1312,7 @@ class RetrievalTraceCoreTests(unittest.TestCase):
             ),
         ):
             retrieve_report = retrieve_knowledge(
-                query="architecture strategy",
+                query="project outline",
                 top=2,
                 graph_hops=1,
                 paths=workspace,

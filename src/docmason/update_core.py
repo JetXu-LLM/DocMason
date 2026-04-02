@@ -531,7 +531,6 @@ def perform_update_core(
             release_metadata = request_release_entry_service(
                 str(bundle_context["update_service_url"]),
                 distribution_channel=str(bundle_context["distribution_channel"]),
-                current_version=current_version,
                 installation_hash=str(state["installation_hash"]),
                 trigger=RELEASE_ENTRY_MANUAL_UPDATE_TRIGGER,
                 timeout_seconds=CHECK_TIMEOUT_SECONDS,

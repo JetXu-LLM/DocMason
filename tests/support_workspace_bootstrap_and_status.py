@@ -862,6 +862,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         marker_path = workspace.root / "runtime" / "bootstrap-python.txt"
         env = {
             **os.environ,
+            "DOCMASON_AGENT_SURFACE": "codex",
+            "DOCMASON_PERMISSION_MODE": "full-access",
+            "DOCMASON_SANDBOX_POLICY": "danger-full-access",
+            "DOCMASON_WORKSPACE_WRITE_NETWORK_ACCESS": "true",
             "DOCMASON_BOOTSTRAP_PYTHON": str(bad_stub),
             "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
             "DOCMASON_BOOTSTRAP_UV_INSTALLER_URL": "https://astral.sh/uv/install.sh",
@@ -1118,6 +1122,53 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertFalse(sync_ready["ready"])
         self.assertEqual(sync_ready["reason"], "legacy-bootstrap-state-sync-capability-unknown")
 
+    def test_cached_bootstrap_readiness_accepts_schema4_marker_for_ordinary_and_sync(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
+        state["schema_version"] = 4
+        write_json(workspace.bootstrap_state_path, state)
+
+        ordinary = cached_bootstrap_readiness(workspace)
+        sync_ready = cached_bootstrap_readiness(workspace, require_sync_capability=True)
+
+        self.assertTrue(ordinary["ready"])
+        self.assertEqual(ordinary["reason"], "cached-ready")
+        self.assertTrue(sync_ready["ready"])
+        self.assertEqual(sync_ready["reason"], "cached-ready")
+
+    def test_status_and_doctor_accept_healthy_schema4_marker(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
+        state["schema_version"] = 4
+        write_json(workspace.bootstrap_state_path, state)
+
+        status_report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+        self.assertEqual(status_report.exit_code, 0)
+        self.assertTrue(status_report.payload["environment_ready"])
+        self.assertTrue(status_report.payload["bootstrap_state"]["cached_ready"])
+        self.assertNotIn("prepare", status_report.payload["pending_actions"])
+
+        doctor_report = doctor_workspace(workspace, editable_install_probe=self.ready_probe)
+        checks = {check["name"]: check for check in doctor_report.payload["checks"]}
+        self.assertEqual(checks["bootstrap-state"]["status"], READY)
+
+    def test_workspace_state_snapshot_accepts_healthy_schema4_marker(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
+        state["schema_version"] = 4
+        write_json(workspace.bootstrap_state_path, state)
+
+        snapshot = workspace_state_snapshot(workspace)
+
+        self.assertTrue(snapshot["environment"]["ready"])
+        self.assertTrue(snapshot["environment"]["sync_capable"])
+        self.assertEqual(snapshot["environment"]["bootstrap_reason"], "cached-ready")
+        self.assertNotIn("prepare", snapshot["next_legal_actions"])
+        self.assertNotIn("prepare --yes", snapshot["next_legal_actions"])
+
     def test_prepare_prefers_homebrew_for_uv_on_macos(self) -> None:
         workspace = self.make_workspace()
         seen_commands: list[list[str]] = []
@@ -1210,6 +1261,77 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         self.assertTrue(report.payload["host_access_required"])
         self.assertEqual(report.payload["machine_baseline_status"], "host-access-upgrade-required")
+
+    def test_prepare_retries_transient_startup_silent_before_failing(self) -> None:
+        workspace = self.make_workspace()
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch(
+                "docmason.commands.inspect_entrypoint",
+                side_effect=[
+                    {
+                        "entrypoint_health": "startup-silent",
+                        "detail": "The launcher timed out during startup.",
+                    },
+                    {
+                        "entrypoint_health": "ready",
+                        "detail": None,
+                    },
+                ],
+            ) as inspect_mock,
+            mock.patch("docmason.commands.time.sleep") as sleep_mock,
+        ):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["status"], READY)
+        self.assertEqual(inspect_mock.call_count, 2)
+        sleep_mock.assert_called_once()
+        self.assertIn(
+            "Retried the repo-local DocMason entrypoint startup probe after a transient "
+            "`startup-silent` result.",
+            report.payload["actions_performed"],
+        )
+
+    def test_prepare_still_fails_when_startup_silent_persists_after_retry(self) -> None:
+        workspace = self.make_workspace()
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch(
+                "docmason.commands.inspect_entrypoint",
+                side_effect=[
+                    {
+                        "entrypoint_health": "startup-silent",
+                        "detail": "The launcher timed out during startup.",
+                    },
+                    {
+                        "entrypoint_health": "startup-silent",
+                        "detail": "The launcher timed out during startup.",
+                    },
+                ],
+            ) as inspect_mock,
+            mock.patch("docmason.commands.time.sleep") as sleep_mock,
+        ):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(report.payload["status"], ACTION_REQUIRED)
+        self.assertEqual(
+            report.payload["environment"]["entrypoint_health"],
+            "startup-silent",
+        )
+        self.assertEqual(inspect_mock.call_count, 2)
+        sleep_mock.assert_called_once()
 
     def test_prepare_stays_degraded_for_non_native_office_gap(self) -> None:
         workspace = self.make_workspace()

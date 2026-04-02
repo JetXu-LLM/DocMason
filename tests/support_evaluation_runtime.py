@@ -228,10 +228,10 @@ class EvaluationRuntimeTests(unittest.TestCase):
         source_b = workspace.knowledge_base_staging_dir / "sources" / source_ids[1]
         self.build_seeded_knowledge(
             source_a,
-            title="Campaign Planning Brief",
-            summary="A strategy deck about architecture and operating model.",
-            key_point="The strategy defines an architecture operating model.",
-            claim="The architecture deck connects strategy to implementation.",
+            title="Project Planning Brief",
+            summary="A planning brief about a project outline and work plan.",
+            key_point="The outline defines a practical work plan.",
+            claim="The project outline connects planning to implementation.",
             related_sources=[
                 {
                     "source_id": source_ids[1],
@@ -244,10 +244,10 @@ class EvaluationRuntimeTests(unittest.TestCase):
         )
         self.build_seeded_knowledge(
             source_b,
-            title="Campaign Evaluation Plan",
-            summary="A delivery timeline and companion planning document.",
-            key_point="The timeline explains rollout milestones.",
-            claim="The timeline complements the architecture strategy.",
+            title="Project Timeline Notes",
+            summary="A timeline note and companion planning document.",
+            key_point="The timeline explains key milestones.",
+            claim="The timeline complements the project outline.",
         )
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
@@ -351,7 +351,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     "case_id": "retrieve-architecture",
                     "family": "retrieval",
                     "execution_mode": "retrieve",
-                    "query_or_prompt": "architecture strategy",
+                    "query_or_prompt": "project outline",
                     "expected_primary_sources": [source_ids[0]],
                     "required_sources_or_units": [source_ids[0]],
                     "forbidden_sources_or_units": [],
@@ -368,7 +368,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     "family": "answer",
                     "execution_mode": "trace-answer",
                     "query_or_prompt": (
-                        "The architecture strategy connects the operating model to implementation."
+                        "The project outline connects the work plan to implementation."
                     ),
                     "expected_primary_sources": [source_ids[0]],
                     "required_sources_or_units": [source_ids[0]],
@@ -392,7 +392,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     "family": "answer-negative",
                     "execution_mode": "trace-answer",
                     "query_or_prompt": (
-                        "The campaign planning brief says DocMason already ships "
+                        "The project planning brief says DocMason already ships "
                         "watch mode and requires a database service."
                     ),
                     "expected_primary_sources": [],
@@ -413,7 +413,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     "execution_mode": "trace-answer",
                     "query_or_prompt": "\n\n".join(
                         [
-                            "The architecture strategy connects the operating model "
+                            "The project outline connects the work plan "
                             "to implementation.",
                             "Zyzzyva quasar nebulae orthonormal frabjous snark.",
                         ]
@@ -722,7 +722,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                             "host_thread_ref": "example-thread",
                             "continuations": [{"message": "What does the strategy connect to?"}],
                             "answer_plan": {
-                                "answer_text": "The strategy connects the operating model to implementation.",
+                                "answer_text": "The outline connects the work plan to implementation.",
                                 "trace_top": 2,
                                 "completion_overrides": {"status": "answered"},
                             },
@@ -910,7 +910,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-ready-grounded-answer",
                     family="ask-ready",
-                    question="What does the campaign planning brief say about the architecture operating model?",
+                    question="What does the project planning brief say about the project work plan?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -924,8 +924,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     reference_facts=["The ask replay should ground to the planning brief source."],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -946,7 +946,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-reuse-same-question",
                     family="ask-reuse",
-                    question="What does the campaign planning brief say about the architecture operating model?",
+                    question="What does the project planning brief say about the project work plan?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -961,15 +961,15 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     continuations=[
                         {
                             "message": (
-                                "What does the campaign planning brief say about the architecture "
-                                "operating model?"
+                                "What does the project planning brief say about the project "
+                                "work plan?"
                             )
                         }
                     ],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -1030,7 +1030,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-public-trace-path",
                     family="ask-ready",
-                    question="What does the campaign planning brief say about the architecture operating model?",
+                    question="What does the project planning brief say about the project work plan?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -1044,8 +1044,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     reference_facts=["The replay should be able to close via the public trace command path."],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -1103,7 +1103,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-ready-synthetic-origin",
                     family="ask-ready",
-                    question="What does the campaign planning brief say about the architecture operating model?",
+                    question="What does the project planning brief say about the project work plan?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -1117,8 +1117,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     reference_facts=["The replay should remain synthetic even when it commits."],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -1176,7 +1176,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-run-event-order",
                     family="ask-ready",
-                    question="What does the campaign planning brief say about the architecture operating model?",
+                    question="What does the project planning brief say about the project work plan?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -1187,8 +1187,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     reference_facts=["The deterministic net should reject out-of-order events."],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -1232,7 +1232,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-wait-closure",
                     family="ask-ready",
-                    question="What does the campaign planning brief say about the architecture operating model?",
+                    question="What does the project planning brief say about the project work plan?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -1243,8 +1243,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     reference_facts=["Dirty runtime truth should fail structural closure checks."],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -1661,7 +1661,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-confirmation-approve",
                     family="ask-confirmation",
-                    question="What do the latest documents say about the architecture operating model?",
+                    question="What do the latest documents say about the project work plan?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -1677,8 +1677,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     continuations=[{"message": "yes"}],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -1782,7 +1782,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-auto-prepare-auto-sync",
                     family="ask-auto-repair",
-                    question="What do the latest documents say about the architecture operating model?",
+                    question="What do the latest documents say about the project work plan?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -1797,8 +1797,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     reference_facts=["The replay should auto-prepare and auto-sync before answering."],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -1821,6 +1821,10 @@ class EvaluationRuntimeTests(unittest.TestCase):
         )
 
         with (
+            mock.patch(
+                "docmason.ask.bootstrap_workspace_with_launcher",
+                side_effect=fake_prepare,
+            ),
             mock.patch("docmason.ask.prepare_workspace", side_effect=fake_prepare),
             mock.patch("docmason.ask.run_sync_command", side_effect=fake_sync),
         ):
@@ -1852,7 +1856,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-governance-reuse",
                     family="ask-governance",
-                    question="What do the latest workspace documents say about the architecture strategy?",
+                    question="What do the latest workspace documents say about the project outline?",
                     semantic_analysis=self.semantic_analysis(
                         question_class="answer",
                         question_domain="workspace-corpus",
@@ -1869,7 +1873,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     ],
                     continuations=[
                         {
-                            "message": "What do the latest workspace documents say about the architecture strategy?",
+                            "message": "What do the latest workspace documents say about the project outline?",
                             "semantic_analysis": self.semantic_analysis(
                                 question_class="answer",
                                 question_domain="workspace-corpus",
@@ -1879,8 +1883,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     ],
                     answer_plan={
                         "answer_text": (
-                            "The campaign planning brief says the strategy defines an architecture "
-                            "operating model and connects strategy to implementation."
+                            "The project planning brief says the outline defines a practical "
+                            "work plan and connects planning to implementation."
                         ),
                         "trace_top": 2,
                     },
@@ -2254,7 +2258,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
             baseline_path=baseline_path,
             answer_overrides={
                 "answer-grounded": (
-                    "The campaign planning brief says DocMason already ships watch mode "
+                    "The project planning brief says DocMason already ships watch mode "
                     "and requires a database service."
                 )
             },

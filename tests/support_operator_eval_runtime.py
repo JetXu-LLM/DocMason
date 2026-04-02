@@ -146,17 +146,17 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
         source_ids = [item["source_id"] for item in pending.payload["pending_sources"]]
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / source_ids[0],
-            title="Campaign Planning Brief",
-            summary="A strategy deck about architecture and operating model.",
-            key_point="The strategy defines an architecture operating model.",
-            claim="The architecture deck connects strategy to implementation.",
+            title="Project Planning Brief",
+            summary="A planning brief about a project outline and work plan.",
+            key_point="The outline defines a practical work plan.",
+            claim="The project outline connects planning to implementation.",
         )
         self.build_seeded_knowledge(
             workspace.knowledge_base_staging_dir / "sources" / source_ids[1],
-            title="Campaign Evaluation Plan",
-            summary="A delivery timeline and companion planning document.",
-            key_point="The timeline explains rollout milestones.",
-            claim="The timeline complements the architecture strategy.",
+            title="Project Timeline Notes",
+            summary="A timeline note and companion planning document.",
+            key_point="The timeline explains key milestones.",
+            claim="The timeline complements the project outline.",
         )
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
@@ -232,7 +232,7 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
                         "case_id": "answer-grounded",
                         "family": "grounded-answer",
                         "execution_mode": "trace-answer",
-                        "query_or_prompt": "The architecture strategy connects the operating model to implementation.",
+                        "query_or_prompt": "The project outline connects the work plan to implementation.",
                         "expected_primary_sources": [],
                         "required_sources_or_units": [],
                         "minimum_support_overlap": 0,
@@ -469,12 +469,12 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator-candidate"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the architecture strategy connect to?",
+                question="What does the project outline connect to?",
                 semantic_analysis=self.semantic_analysis(),
             )
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The architecture strategy connects the operating model to implementation.\n\n"
+            "The project outline connects the work plan to implementation.\n\n"
             "It also proves DocMason already ships watch mode.",
             encoding="utf-8",
         )
@@ -504,12 +504,12 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-operator-mixed"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the architecture strategy connect to, and what does it prove?",
+                question="What does the project outline connect to, and what does it prove?",
                 semantic_analysis=self.semantic_analysis(),
             )
         answer_path = workspace.root / turn["answer_file_path"]
         answer_path.write_text(
-            "The architecture strategy connects the operating model to implementation.\n\n"
+            "The project outline connects the work plan to implementation.\n\n"
             "It also proves DocMason already ships watch mode.",
             encoding="utf-8",
         )

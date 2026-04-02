@@ -241,6 +241,7 @@ def inspect_entrypoint(
     paths: WorkspacePaths,
     *,
     probe_runner: ProbeRunner | None = None,
+    timeout_seconds: float = ENTRYPOINT_PROBE_TIMEOUT_SECONDS,
 ) -> dict[str, str | None]:
     """Actively classify repo-local DocMason entrypoint health."""
     docmason_entry_shebang = _read_shebang(paths.venv_docmason)
@@ -270,7 +271,7 @@ def inspect_entrypoint(
     import_probe = runner(
         [str(paths.venv_python), "-c", "import docmason"],
         paths.root,
-        ENTRYPOINT_PROBE_TIMEOUT_SECONDS,
+        timeout_seconds,
     )
     if import_probe.timed_out or import_probe.exit_code != 0:
         return {
@@ -284,7 +285,7 @@ def inspect_entrypoint(
     launcher_probe = runner(
         [str(paths.venv_docmason), "--help"],
         paths.root,
-        ENTRYPOINT_PROBE_TIMEOUT_SECONDS,
+        timeout_seconds,
     )
     if launcher_probe.timed_out:
         return {

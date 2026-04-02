@@ -1,4 +1,4 @@
-"""Bounded release-entry update-check and DAU helpers for bundle workspaces."""
+"""Bounded release-entry update-check and daily-activity helpers for bundle workspaces."""
 
 from __future__ import annotations
 
@@ -310,14 +310,12 @@ def persist_release_client_state(paths: WorkspacePaths, state: dict[str, Any]) -
 def _release_entry_request_payload(
     *,
     distribution_channel: str,
-    current_version: str,
     installation_hash: str,
     trigger: str,
 ) -> bytes:
     payload = {
         "schema_version": RELEASE_ENTRY_REQUEST_SCHEMA_VERSION,
         "distribution_channel": distribution_channel,
-        "source_version": current_version,
         "installation_hash": installation_hash,
         "trigger": trigger,
     }
@@ -354,7 +352,6 @@ def request_release_entry_service(
     service_url: str,
     *,
     distribution_channel: str,
-    current_version: str,
     installation_hash: str,
     trigger: str,
     timeout_seconds: float = DEFAULT_RELEASE_ENTRY_TIMEOUT_SECONDS,
@@ -368,7 +365,6 @@ def request_release_entry_service(
         service_url,
         data=_release_entry_request_payload(
             distribution_channel=distribution_channel,
-            current_version=current_version,
             installation_hash=installation_hash,
             trigger=trigger,
         ),
@@ -459,7 +455,6 @@ def maybe_run_release_entry_check(
         parsed = request_release_entry_service(
             service_url,
             distribution_channel=distribution_channel,
-            current_version=current_version,
             installation_hash=str(state["installation_hash"]),
             trigger=trigger,
             timeout_seconds=timeout_seconds,

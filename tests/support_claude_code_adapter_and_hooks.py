@@ -990,7 +990,7 @@ class MaybeReconcileActiveThreadTests(unittest.TestCase):
         with mock.patch.dict("os.environ", env, clear=False):
             result = maybe_reconcile_active_thread(workspace)
         # reconcile_claude_code_thread returns a status dict (not None) when
-        # the mirror file is missing — the catch in maybe_reconcile_active_claude_code_thread
+        # the mirror file is missing - the catch in maybe_reconcile_active_claude_code_thread
         # only catches FileNotFoundError/KeyError/ValueError exceptions.
         self.assertIsNotNone(result)
         self.assertEqual(result["status"], "not-available")
@@ -1167,7 +1167,7 @@ class DoctorHookCheckTests(unittest.TestCase):
 
     def test_doctor_reports_hooks_absent_gracefully(self) -> None:
         workspace = self.make_workspace()
-        # No .claude/settings.json — hooks not configured
+        # No .claude/settings.json - hooks not configured
 
         def fake_editable_install(paths: WorkspacePaths) -> tuple[bool, str]:
             return True, "editable install available"
