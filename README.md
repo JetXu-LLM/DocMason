@@ -6,13 +6,13 @@
   <p>
     <a href="https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip"><strong>Download DocMason</strong></a>
   </p>
-  <p><sub>Already paying for OpenAI? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included in your plan. Open DocMason inside Codex — and finally put your AI to work on your real private documents, not just chat prompts. Zero-to-working in minutes. <b>Unlock the full power of your subscription.</b></sub></p>
-  <p>
     <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-7959A2?style=flat-square&logo=apple&logoColor=white">
     <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-0F64B5?style=flat-square">
     <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-0F64B5?style=flat-square">
     <img alt="Release" src="https://img.shields.io/github/v/release/JetXu-LLM/DocMason?style=flat-square&color=04D994">
   </p>
+  <p><sub>Already paying for OpenAI? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included in your plan. Open DocMason inside Codex — and finally put your AI to work on your real private documents, not just chat prompts. Zero-to-working in minutes. <b>Unlock the full power of your subscription.</b></sub></p>
+  <p>
 </div>
 
 Most workspace AI tools flatten your complex office documents into a single unstructured blob. They can summarize a file or retrieve a quote, but once the question gets hard, it becomes difficult to verify how the answer maps back to the source.
