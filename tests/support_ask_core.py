@@ -12,7 +12,11 @@ from unittest import mock
 
 from docmason.ask import complete_ask_turn, prepare_ask_turn
 from docmason.commands import ACTION_REQUIRED, CommandReport
-from docmason.control_plane import ensure_shared_job, workspace_state_snapshot
+from docmason.control_plane import (
+    complete_shared_job,
+    ensure_shared_job,
+    workspace_state_snapshot,
+)
 from docmason.conversation import open_conversation_turn, update_conversation_turn
 from docmason.coordination import workspace_lease
 from docmason.project import WorkspacePaths, read_json, source_inventory_signature, write_json
@@ -1035,6 +1039,69 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             workspace.shared_jobs_dir / job["manifest"]["job_id"] / "result.json"
         )
         self.assertEqual(settled["status"], "blocked")
+
+    def test_workspace_state_snapshot_settles_equivalent_completed_sync_job(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        stale_job = ensure_shared_job(
+            workspace,
+            job_key="sync:stale-confirmation",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "strong_source_fingerprint_signature": "fingerprint-shared",
+            },
+            input_signature="sync:stale-confirmation",
+            owner={"kind": "run", "id": "run-stale"},
+            run_id="run-stale",
+            requires_confirmation=True,
+            confirmation_kind="material-sync",
+            confirmation_prompt="Approve stale confirmation job.",
+            confirmation_reason="test fixture stale confirmation",
+        )
+        equivalent_job = ensure_shared_job(
+            workspace,
+            job_key="sync:equivalent-completed",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "strong_source_fingerprint_signature": "fingerprint-shared",
+            },
+            input_signature="sync:equivalent-completed",
+            owner={"kind": "command", "id": "sync-command:equivalent", "pid": os.getpid()},
+        )
+        complete_shared_job(
+            workspace,
+            str(equivalent_job["manifest"]["job_id"]),
+            result={
+                "status": "valid",
+                "detail": "Published truth was already current, so final publication was skipped.",
+                "published": False,
+            },
+        )
+
+        snapshot = workspace_state_snapshot(workspace)
+
+        self.assertFalse(snapshot["active_answer_critical_jobs"])
+        self.assertTrue(snapshot["repair_actions"])
+        self.assertEqual(
+            snapshot["repair_actions"][0]["kind"],
+            "settled-equivalent-sync-completion",
+        )
+        settled = read_json(
+            workspace.shared_jobs_dir / stale_job["manifest"]["job_id"] / "result.json"
+        )
+        self.assertEqual(settled["status"], "completed")
+        self.assertEqual(
+            settled["result"]["detail"],
+            "Stale confirmation-only sync job settled after equivalent sync completion.",
+        )
 
     def test_workspace_state_snapshot_abandons_stale_active_run_without_commit_or_live_jobs(
         self,

@@ -2342,6 +2342,109 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(lane_b["remaining_unit_count"], 0)
         self.assertIn("Lane B follow-up: state=blocked", "\n".join(report.lines))
 
+    def test_status_blocks_lane_b_summary_for_inactive_command_owner(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        source_file = workspace.source_dir / "example.pdf"
+        source_file.write_text("pdf placeholder\n", encoding="utf-8")
+        current_artifact = workspace.knowledge_base_current_dir / "artifact.md"
+        current_artifact.parent.mkdir(parents=True, exist_ok=True)
+        current_artifact.write_text("compiled knowledge\n", encoding="utf-8")
+        write_json(
+            workspace.sync_state_path,
+            {
+                "published_source_signature": source_inventory_signature(workspace),
+                "last_publish_at": "2026-03-15T01:00:00Z",
+                "last_sync_at": "2026-03-15T01:00:00Z",
+                "lane_b_follow_up_summary": {
+                    "state": "running",
+                    "selected_source_count": 1,
+                    "selected_unit_count": 3,
+                    "covered_unit_count": 1,
+                    "blocked_unit_count": 0,
+                    "remaining_unit_count": 2,
+                },
+            },
+        )
+        job = ensure_shared_job(
+            workspace,
+            job_key="lane-b:inactive-command-owner",
+            job_family="lane-b",
+            criticality="background",
+            scope={"target": "staging"},
+            input_signature="lane-b:inactive-command-owner",
+            owner={"kind": "command", "id": "lane-b:test", "pid": 999999},
+        )
+        state = read_json(workspace.sync_state_path)
+        state["lane_b_follow_up_summary"]["job_id"] = str(job["manifest"]["job_id"])
+        write_json(workspace.sync_state_path, state)
+
+        report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+
+        lane_b = report.payload["knowledge_base"]["lane_b_follow_up"]
+        self.assertEqual(lane_b["state"], "blocked")
+        self.assertIn("Lane B follow-up: state=blocked", "\n".join(report.lines))
+        self.assertEqual(
+            load_shared_job(workspace, str(job["manifest"]["job_id"]))["status"],
+            "blocked",
+        )
+
+    def test_status_blocks_lane_b_summary_for_inactive_owner_run(self) -> None:
+        workspace = self.make_workspace()
+        self.seed_self_contained_bootstrap_state(workspace)
+        source_file = workspace.source_dir / "example.pdf"
+        source_file.write_text("pdf placeholder\n", encoding="utf-8")
+        current_artifact = workspace.knowledge_base_current_dir / "artifact.md"
+        current_artifact.parent.mkdir(parents=True, exist_ok=True)
+        current_artifact.write_text("compiled knowledge\n", encoding="utf-8")
+        write_json(
+            workspace.sync_state_path,
+            {
+                "published_source_signature": source_inventory_signature(workspace),
+                "last_publish_at": "2026-03-15T01:00:00Z",
+                "last_sync_at": "2026-03-15T01:00:00Z",
+                "lane_b_follow_up_summary": {
+                    "state": "running",
+                    "selected_source_count": 1,
+                    "selected_unit_count": 3,
+                    "covered_unit_count": 1,
+                    "blocked_unit_count": 0,
+                    "remaining_unit_count": 2,
+                },
+            },
+        )
+        run_dir = workspace.runs_dir / "run-finished"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        write_json(
+            run_dir / "state.json",
+            {
+                "run_id": "run-finished",
+                "status": "completed",
+            },
+        )
+        job = ensure_shared_job(
+            workspace,
+            job_key="lane-b:inactive-owner-run",
+            job_family="lane-b",
+            criticality="background",
+            scope={"target": "staging"},
+            input_signature="lane-b:inactive-owner-run",
+            owner={"kind": "run", "id": "run-finished"},
+        )
+        state = read_json(workspace.sync_state_path)
+        state["lane_b_follow_up_summary"]["job_id"] = str(job["manifest"]["job_id"])
+        write_json(workspace.sync_state_path, state)
+
+        report = status_workspace(workspace, editable_install_probe=self.ready_probe)
+
+        lane_b = report.payload["knowledge_base"]["lane_b_follow_up"]
+        self.assertEqual(lane_b["state"], "blocked")
+        self.assertIn("Lane B follow-up: state=blocked", "\n".join(report.lines))
+        self.assertEqual(
+            load_shared_job(workspace, str(job["manifest"]["job_id"]))["status"],
+            "running",
+        )
+
     def test_sync_reports_material_confirmation_payload(self) -> None:
         workspace = self.make_workspace()
         self.seed_self_contained_bootstrap_state(workspace)

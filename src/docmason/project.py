@@ -1007,6 +1007,20 @@ def _resolved_lane_b_follow_up_summary(
     paths: WorkspacePaths,
     state: dict[str, Any],
 ) -> dict[str, Any]:
+    def _apply_result_counts(summary_payload: dict[str, Any], result: dict[str, Any]) -> None:
+        summary_payload["covered_unit_count"] = int(
+            result.get("covered_unit_count", summary_payload.get("covered_unit_count", 0)) or 0
+        )
+        summary_payload["blocked_unit_count"] = int(
+            result.get("blocked_unit_count", summary_payload.get("blocked_unit_count", 0)) or 0
+        )
+        summary_payload["remaining_unit_count"] = int(
+            result.get("remaining_unit_count", summary_payload.get("remaining_unit_count", 0)) or 0
+        )
+        summary_payload["selected_unit_count"] = int(
+            result.get("selected_unit_count", summary_payload.get("selected_unit_count", 0)) or 0
+        )
+
     raw_summary = state.get("lane_b_follow_up_summary")
     if not isinstance(raw_summary, dict) or not raw_summary:
         return {}
@@ -1018,6 +1032,7 @@ def _resolved_lane_b_follow_up_summary(
     from .control_plane import (
         load_shared_job,
         load_shared_job_result,
+        shared_job_inactive_owner_reason,
         shared_job_is_active,
         shared_job_is_settled,
     )
@@ -1027,6 +1042,9 @@ def _resolved_lane_b_follow_up_summary(
         summary["state"] = "missing-shared-job"
         return summary
     if shared_job_is_active(manifest):
+        if shared_job_inactive_owner_reason(paths, manifest) is not None:
+            summary["state"] = "blocked"
+            return summary
         summary["state"] = "running"
         return summary
 
@@ -1039,18 +1057,7 @@ def _resolved_lane_b_follow_up_summary(
             else {}
         )
         if result:
-            summary["covered_unit_count"] = int(
-                result.get("covered_unit_count", summary.get("covered_unit_count", 0)) or 0
-            )
-            summary["blocked_unit_count"] = int(
-                result.get("blocked_unit_count", summary.get("blocked_unit_count", 0)) or 0
-            )
-            summary["remaining_unit_count"] = int(
-                result.get("remaining_unit_count", summary.get("remaining_unit_count", 0)) or 0
-            )
-            summary["selected_unit_count"] = int(
-                result.get("selected_unit_count", summary.get("selected_unit_count", 0)) or 0
-            )
+            _apply_result_counts(summary, result)
         if status == "completed":
             summary["state"] = "covered"
         elif status:

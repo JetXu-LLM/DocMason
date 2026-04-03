@@ -39,6 +39,9 @@ NEGATIVE_CONFIRMATIONS = frozenset(
     {"n", "no", "stop", "cancel", "decline"}
 )
 SHARED_JOB_STALE_AFTER = timedelta(minutes=10)
+EQUIVALENT_SYNC_COMPLETION_DETAIL = (
+    "Stale confirmation-only sync job settled after equivalent sync completion."
+)
 
 
 def _utc_now() -> str:
@@ -127,6 +130,148 @@ def shared_job_is_settled(manifest: dict[str, Any]) -> bool:
 
 def shared_job_is_active(manifest: dict[str, Any]) -> bool:
     return str(manifest.get("status") or "") in SHARED_JOB_ACTIVE_STATUSES
+
+
+def _owner_process_is_active(owner_pid: int) -> bool | None:
+    if not isinstance(owner_pid, int) or owner_pid <= 0:
+        return None
+    try:
+        os.kill(owner_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def shared_job_inactive_owner_reason(
+    paths: WorkspacePaths,
+    manifest: dict[str, Any],
+) -> str | None:
+    """Return the inactive-owner reason for one active shared job, if any."""
+    if not shared_job_is_active(manifest):
+        return None
+    owner = manifest.get("owner", {})
+    owner_payload = owner if isinstance(owner, dict) else {}
+    owner_pid = owner_payload.get("pid")
+    if isinstance(owner_pid, int) and owner_pid > 0:
+        owner_active = _owner_process_is_active(owner_pid)
+        if owner_active is False:
+            return "inactive-owner-process"
+    if owner_payload.get("kind") != "run":
+        return None
+    owner_run_id = owner_payload.get("id")
+    if not isinstance(owner_run_id, str) or not owner_run_id:
+        return None
+    from .run_control import load_run_state
+
+    run_state = load_run_state(paths, owner_run_id)
+    if not run_state:
+        return "missing-owner-run"
+    if run_state.get("status") != "active":
+        return "inactive-owner-run"
+    return None
+
+
+def _equivalent_sync_scope(manifest: dict[str, Any]) -> tuple[str, str] | None:
+    if str(manifest.get("job_family") or "") != "sync":
+        return None
+    scope = manifest.get("scope")
+    scope_payload = scope if isinstance(scope, dict) else {}
+    target = str(scope_payload.get("target") or "")
+    strong_signature = str(scope_payload.get("strong_source_fingerprint_signature") or "")
+    if not target or not strong_signature:
+        return None
+    return target, strong_signature
+
+
+def _latest_equivalent_completed_sync_job(
+    paths: WorkspacePaths,
+    manifest: dict[str, Any],
+    *,
+    exclude_job_id: str | None = None,
+) -> dict[str, Any] | None:
+    target_scope = _equivalent_sync_scope(manifest)
+    if target_scope is None:
+        return None
+    index = load_shared_jobs_index(paths)
+    settled_job_ids = list(
+        dict.fromkeys(
+            job_id
+            for job_id in index.get("latest_settled_by_key", {}).values()
+            if isinstance(job_id, str) and job_id
+        )
+    )
+    latest_manifest: dict[str, Any] | None = None
+    latest_updated_at: datetime | None = None
+    for settled_job_id in settled_job_ids:
+        if exclude_job_id is not None and settled_job_id == exclude_job_id:
+            continue
+        settled_manifest = load_shared_job(paths, settled_job_id)
+        if not settled_manifest or str(settled_manifest.get("status") or "") != "completed":
+            continue
+        if _equivalent_sync_scope(settled_manifest) != target_scope:
+            continue
+        updated_at = _parse_timestamp(settled_manifest.get("updated_at"))
+        if latest_manifest is None or (
+            updated_at is not None
+            and (latest_updated_at is None or updated_at > latest_updated_at)
+        ):
+            latest_manifest = settled_manifest
+            latest_updated_at = updated_at
+    return latest_manifest
+
+
+def settle_equivalent_completed_sync_jobs(
+    paths: WorkspacePaths,
+    *,
+    job_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Settle stale confirmation-only sync jobs when an equivalent sync already completed."""
+    candidate_job_ids = (
+        list(job_ids)
+        if isinstance(job_ids, list)
+        else list(load_shared_jobs_index(paths).get("active_by_key", {}).values())
+    )
+    repairs: list[dict[str, Any]] = []
+    seen_job_ids: set[str] = set()
+    for job_id in candidate_job_ids:
+        if not isinstance(job_id, str) or not job_id or job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job_id)
+        manifest = load_shared_job(paths, job_id)
+        if not manifest or shared_job_is_settled(manifest):
+            continue
+        if str(manifest.get("status") or "") != "awaiting-confirmation":
+            continue
+        equivalent_manifest = _latest_equivalent_completed_sync_job(
+            paths,
+            manifest,
+            exclude_job_id=job_id,
+        )
+        if equivalent_manifest is None:
+            continue
+        settled_manifest = complete_shared_job(
+            paths,
+            job_id,
+            result={
+                "detail": EQUIVALENT_SYNC_COMPLETION_DETAIL,
+                "equivalent_shared_job_id": equivalent_manifest.get("job_id"),
+                "equivalent_shared_job_key": equivalent_manifest.get("job_key"),
+            },
+        )
+        repairs.append(
+            {
+                "kind": "settled-equivalent-sync-completion",
+                "job_id": str(settled_manifest.get("job_id") or job_id),
+                "job_key": settled_manifest.get("job_key"),
+                "equivalent_job_id": equivalent_manifest.get("job_id"),
+                "equivalent_job_key": equivalent_manifest.get("job_key"),
+            }
+        )
+    return repairs
 
 
 def resolved_attached_shared_job_ids(
@@ -467,13 +612,8 @@ def _shared_job_stale(manifest: dict[str, Any]) -> bool:
     owner = manifest.get("owner", {})
     owner_pid = owner.get("pid") if isinstance(owner, dict) else None
     if isinstance(owner_pid, int) and owner_pid > 0:
-        try:
-            os.kill(owner_pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        except OSError:
+        owner_active = _owner_process_is_active(owner_pid)
+        if owner_active is False:
             return True
     updated_at = _parse_timestamp(manifest.get("updated_at"))
     if updated_at is None:
@@ -782,8 +922,6 @@ def find_conversation_confirmation_job(
 
 def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
     """Settle or clear active shared jobs whose owners no longer exist legally."""
-    from .run_control import load_run_state
-
     repairs: list[dict[str, Any]] = []
     index = load_shared_jobs_index(paths)
     for job_key, job_id in list(index["active_by_key"].items()):
@@ -824,8 +962,13 @@ def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
                 }
             )
             continue
+        equivalent_sync_repairs = settle_equivalent_completed_sync_jobs(paths, job_ids=[job_id])
+        if equivalent_sync_repairs:
+            repairs.extend(equivalent_sync_repairs)
+            continue
         owner = manifest.get("owner", {})
         owner_pid = owner.get("pid") if isinstance(owner, dict) else None
+        inactive_owner_reason = shared_job_inactive_owner_reason(paths, manifest)
         if isinstance(owner_pid, int) and owner_pid > 0 and _shared_job_stale(manifest):
             block_shared_job(
                 paths,
@@ -845,13 +988,8 @@ def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
             continue
         if manifest.get("criticality") != "answer-critical":
             continue
-        if not isinstance(owner, dict) or owner.get("kind") != "run":
-            continue
-        owner_run_id = owner.get("id")
-        if not isinstance(owner_run_id, str) or not owner_run_id:
-            continue
-        run_state = load_run_state(paths, owner_run_id)
-        if not run_state:
+        owner_run_id = owner.get("id") if isinstance(owner, dict) else None
+        if inactive_owner_reason == "missing-owner-run":
             block_shared_job(
                 paths,
                 job_id,
@@ -866,7 +1004,10 @@ def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
                 }
             )
             continue
-        if run_state.get("status") != "active":
+        if inactive_owner_reason == "inactive-owner-run":
+            from .run_control import load_run_state
+
+            run_state = load_run_state(paths, str(owner_run_id))
             block_shared_job(
                 paths,
                 job_id,

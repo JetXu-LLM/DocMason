@@ -1667,6 +1667,198 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(run_commit["version_context"]["published_snapshot_id"], "snapshot-new")
         self.assertEqual(completed["version_context"]["published_snapshot_id"], "snapshot-new")
 
+    def test_complete_ask_turn_settles_equivalent_completed_sync_job_before_commit(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-equivalent-sync"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the project planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The planning brief connects the project outline to implementation.",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        stale_job = ensure_shared_job(
+            workspace,
+            job_key="sync:stale-confirmation",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "strong_source_fingerprint_signature": "fingerprint-shared",
+            },
+            input_signature="sync:stale-confirmation",
+            owner={"kind": "run", "id": turn["run_id"]},
+            run_id=turn["run_id"],
+            requires_confirmation=True,
+            confirmation_kind="material-sync",
+            confirmation_prompt="Approve stale confirmation job.",
+            confirmation_reason="test fixture stale confirmation",
+        )
+        equivalent_job = ensure_shared_job(
+            workspace,
+            job_key="sync:equivalent-completed",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "strong_source_fingerprint_signature": "fingerprint-shared",
+            },
+            input_signature="sync:equivalent-completed",
+            owner={"kind": "command", "id": "sync-command:equivalent", "pid": os.getpid()},
+        )
+        complete_control_plane_job(
+            workspace,
+            str(equivalent_job["manifest"]["job_id"]),
+            result={
+                "status": "valid",
+                "detail": "Published truth was already current, so final publication was skipped.",
+                "published": False,
+            },
+        )
+        update_conversation_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            updates={"attached_shared_job_ids": [str(stale_job["manifest"]["job_id"])]},
+        )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            session_ids=[trace["session_id"]],
+            trace_ids=[trace["trace_id"]],
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="The planning brief connects the project outline to implementation.",
+            status="answered",
+        )
+
+        settled_manifest = load_shared_job(workspace, str(stale_job["manifest"]["job_id"]))
+        settled_result = read_json(
+            workspace.shared_jobs_dir / stale_job["manifest"]["job_id"] / "result.json"
+        )
+        self.assertEqual(settled_manifest["status"], "completed")
+        self.assertEqual(
+            settled_result["result"]["detail"],
+            "Stale confirmation-only sync job settled after equivalent sync completion.",
+        )
+        self.assertEqual(completed["status"], "answered")
+
+    def test_complete_ask_turn_does_not_settle_nonequivalent_sync_job_before_commit(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-nonequivalent-sync"},
+            clear=False,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the project planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The planning brief connects the project outline to implementation.",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+        stale_job = ensure_shared_job(
+            workspace,
+            job_key="sync:stale-confirmation",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "strong_source_fingerprint_signature": "fingerprint-shared",
+            },
+            input_signature="sync:stale-confirmation",
+            owner={"kind": "run", "id": turn["run_id"]},
+            run_id=turn["run_id"],
+            requires_confirmation=True,
+            confirmation_kind="material-sync",
+            confirmation_prompt="Approve stale confirmation job.",
+            confirmation_reason="test fixture stale confirmation",
+        )
+        equivalent_job = ensure_shared_job(
+            workspace,
+            job_key="sync:different-target",
+            job_family="sync",
+            criticality="answer-critical",
+            scope={
+                "target": "staging",
+                "strong_source_fingerprint_signature": "fingerprint-shared",
+            },
+            input_signature="sync:different-target",
+            owner={"kind": "command", "id": "sync-command:equivalent", "pid": os.getpid()},
+        )
+        complete_control_plane_job(
+            workspace,
+            str(equivalent_job["manifest"]["job_id"]),
+            result={
+                "status": "valid",
+                "detail": "Published the staged knowledge base.",
+                "published": True,
+            },
+        )
+        update_conversation_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            updates={"attached_shared_job_ids": [str(stale_job["manifest"]["job_id"])]},
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            f"Attached shared job `{stale_job['manifest']['job_id']}` is not yet settled.",
+        ):
+            complete_ask_turn(
+                workspace,
+                conversation_id=turn["conversation_id"],
+                turn_id=turn["turn_id"],
+                inner_workflow_id="grounded-answer",
+                session_ids=[trace["session_id"]],
+                trace_ids=[trace["trace_id"]],
+                answer_file_path=turn["answer_file_path"],
+                response_excerpt="The planning brief connects the project outline to implementation.",
+                status="answered",
+            )
+
+        unresolved_manifest = load_shared_job(workspace, str(stale_job["manifest"]["job_id"]))
+        self.assertEqual(unresolved_manifest["status"], "awaiting-confirmation")
+
     def test_begin_lane_c_shared_refresh_reuses_shared_job_for_waiter(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)

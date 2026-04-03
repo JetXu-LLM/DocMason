@@ -777,53 +777,58 @@ def _install_libreoffice_from_official_macos_package(
                 f"Details: {attach.stderr or attach.stdout or 'no output'}",
             )
         attached = True
-        app_bundle = next(
-            (
-                path
-                for path in mount_point.rglob("LibreOffice.app")
-                if path.name == "LibreOffice.app"
-            ),
-            None,
-        )
-        if app_bundle is None:
-            return (
-                False,
-                "Official LibreOffice auto-install mounted the DMG, but `LibreOffice.app` "
-                "was not found inside it.",
+        detach_error = None
+        try:
+            app_bundle = next(
+                (
+                    path
+                    for path in mount_point.rglob("LibreOffice.app")
+                    if path.name == "LibreOffice.app"
+                ),
+                None,
             )
-
-        copy = command_runner(
-            ["/usr/bin/ditto", str(app_bundle), "/Applications/LibreOffice.app"],
-            workspace.root,
-        )
-        if copy.exit_code != 0:
-            return (
-                False,
-                "Official LibreOffice auto-install failed while copying LibreOffice.app into "
-                f"/Applications. Details: {copy.stderr or copy.stdout or 'no output'}",
-            )
-
-        validation = validate_soffice_binary("/Applications/LibreOffice.app/Contents/MacOS/soffice")
-        if not validation["ready"]:
-            return (
-                False,
-                "Official LibreOffice auto-install copied LibreOffice.app, but the installed "
-                f"`soffice` validation failed. Details: {validation['detail']}",
-            )
-
-        if attached:
-            detach_error = _detach_macos_disk_image(
-                mount_point,
-                command_runner=command_runner,
-                cwd=workspace.root,
-            )
-            if detach_error is not None:
+            if app_bundle is None:
                 return (
                     False,
-                    "Official LibreOffice auto-install succeeded through validation, but the "
-                    f"downloaded DMG could not be detached cleanly. Details: {detach_error}",
+                    "Official LibreOffice auto-install mounted the DMG, but `LibreOffice.app` "
+                    "was not found inside it.",
                 )
-            attached = False
+
+            copy = command_runner(
+                ["/usr/bin/ditto", str(app_bundle), "/Applications/LibreOffice.app"],
+                workspace.root,
+            )
+            if copy.exit_code != 0:
+                return (
+                    False,
+                    "Official LibreOffice auto-install failed while copying LibreOffice.app into "
+                    f"/Applications. Details: {copy.stderr or copy.stdout or 'no output'}",
+                )
+
+            validation = validate_soffice_binary(
+                "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+            )
+            if not validation["ready"]:
+                return (
+                    False,
+                    "Official LibreOffice auto-install copied LibreOffice.app, but the installed "
+                    f"`soffice` validation failed. Details: {validation['detail']}",
+                )
+        finally:
+            if attached:
+                detach_error = _detach_macos_disk_image(
+                    mount_point,
+                    command_runner=command_runner,
+                    cwd=workspace.root,
+                )
+                attached = False
+
+        if detach_error is not None:
+            return (
+                False,
+                "Official LibreOffice auto-install succeeded through validation, but the "
+                f"downloaded DMG could not be detached cleanly. Details: {detach_error}",
+            )
 
     version_suffix = (
         f" ({validation['version']})"

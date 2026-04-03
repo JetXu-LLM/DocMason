@@ -25,6 +25,7 @@ from .control_plane import (
     load_shared_job,
     normalize_confirmation_reply,
     resolved_attached_shared_job_ids,
+    settle_equivalent_completed_sync_jobs,
     shared_job_is_settled,
 )
 from .conversation import (
@@ -2838,6 +2839,18 @@ def complete_ask_turn(
         run_state=run_state,
         hybrid_refresh_job_ids=resolved_hybrid_refresh_job_ids,
     )
+    equivalent_sync_repairs = settle_equivalent_completed_sync_jobs(
+        paths,
+        job_ids=resolved_attached_job_ids,
+    )
+    if equivalent_sync_repairs:
+        record_run_event_if_present(
+            paths,
+            run_id=run_id,
+            stage="control-plane",
+            event_type="shared-job-auto-repaired",
+            payload={"repairs": equivalent_sync_repairs},
+        )
     effective_support_basis = (
         resolved_support_basis
         if isinstance(resolved_support_basis, str)
