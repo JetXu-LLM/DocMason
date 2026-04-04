@@ -22,40 +22,30 @@
   <p><sub>Already paying for OpenAI? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included in your plan. Open DocMason inside Codex — and finally put your AI to work on your real private documents, not just chat prompts. Zero-to-working in minutes. <b>Unlock the full power of your subscription.</b></sub></p>
 </div>
 
-Most workspace AI tools flatten your complex office documents into a single unstructured blob. They can summarize a file or retrieve a quote, but once the question gets hard, it becomes difficult to verify how the answer maps back to the source.
+Most workspace AI tools flatten your complex office documents into a single, unstructured text blob. They might summarize a file or retrieve a stray quote, but once your research gets complex, the illusion breaks. You lose the tables, the slide layouts, the hidden notes—and it becomes impossible to verify where the AI's answer actually came from.
 
-**DocMason** is built around a different thesis: **answers must be traceable**. It creates a local, file-based knowledge base over your private decks, spreadsheets, documents, PDFs, screenshots, and notes, so your AI agent can reason over multimodal evidence instead of a flattened text blob. It is not lightweight doc chat over anonymous chunks; it retrieves real evidence bundles with strict source provenance. A local repo, running as a deep-research AI app on Codex — no hidden backends, no cloud ingestion. Just local files and answers you can actually verify.
+**DocMason** is built on a different thesis: **answers must be strictly traceable.** It compiles your private decks, spreadsheets, PDFs, and emails into a local, file-based knowledge base. Instead of chatting with anonymous text chunks, your AI agent reasons over structured, multimodal evidence bundles. It’s not a cloud service or a lightweight wrapper. It is a local repo running as a deep-research AI app on Codex. No hidden backends, no cloud ingestion. Just your files, and answers you can actually trust.
 
-## Start Here
+## How It Works: A Production-Grade Runtime
 
-- **[Download DocMason](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip)**: The ready-to-use workspace — everything you need to start with your private files. No `.git`, no test suites, just empty workspace directories.
-- **[Try the Public Demo Bundle](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-demo-ico-gcs.zip)**: The fastest public proof path if you want to see a rigorously traceable answer before using your own files.
+DocMason is designed to enforce strict data contracts and provenance boundaries. The repo holds the truth; the agent does the reasoning.
 
-*Native path is Codex on macOS. Claude Code is also well supported.*
+![DocMason Architecture](./docs/product/architecture.svg)
 
-## Public Proof Case
+## Why This Exists
 
-The fastest public proof today uses the ICO + GCS demo corpus compiled from official UK public-sector releases.
+Most document AI tools map complex corporate files into flat, unreadable text strings. They strip out critical structural and formatting semantics:
 
-**Ask this through your AI agent:**
-> "Across the ICO and GCS materials, what are the main rollout risks, and which sources support them?"
+- **Slide Decks**: Visual layout, presenter notes, and chart-text relationships are discarded.
+- **Spreadsheets**: Multi-sheet references and nested tables break existing parsers.
+- **Format-as-Semantics**: Critical signals (like red text for "Risk" or indentation for hierarchies) are erased.
+- **Cross-Document Reasoning**: Multi-part proposals are disconnected, making global synthesis impossible.
 
-**What good looks like:**
-- **Cross-Document Reasoning:** The answer synthesizes overlapping governance risks instead of echoing documents one by one.
-- The answer explicitly points to the exact document origin, instead of blurring the corpus into one anonymous narrative.
-- **The answer is inherently traceable** — providing the real evidence bundles so you can verify the root context.
-
-[Try the ICO + GCS Demo Bundle](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-demo-ico-gcs.zip) to test a governed truth environment before transitioning to your own private folders.
-
-## Why It Feels Safer
-
-DocMason is built for **deep research** over your real work files — where every answer must be **traceable** to its actual source.
-
-* **Strict Source Identity.** DocMason enforces strict document boundaries. It prevents agents from hallucinating cross-source facts that only vaguely fit together.
-* **Answers Are Traceable.** You don't just get convincing text. You get a verifiable lineage pointing directly to the exact file and page you dropped in.
-* **100% Local and Auditable.** Your files, staged data, and compiled knowledge base remain physically inside your local folder boundary. [See more →](#privacy-and-local-first-boundary)
+DocMason addresses this by forcing AI to respect original document structure and visual semantics. It produces deterministic file-based evidence, runs strong offline retrieval and trace algorithms, and validates the resulting knowledge base through strict code rules — all locally, with nothing leaving your machine. The repo holds the truth. The agent does the reasoning.
 
 ## Two Easy Ways to Start
+
+Getting started requires zero developer experience. Just drop your files and let your AI agent handle the rest.
 
 ![Two ways to reach your first answer](./docs/product/readme-first-minute-flow.svg)
 
@@ -73,7 +63,54 @@ DocMason is built for **deep research** over your real work files — where ever
 
 *Inside a valid workspace, you do not need to memorize internal commands. Just speak naturally to your AI agent.*
 
-**What gets installed:** DocMason needs **[LibreOffice](https://www.libreoffice.org/)** to parse Office files (`.pptx`, `.docx`, `.xlsx`) with full fidelity — this is the most important external dependency. It also sets up a local Python environment automatically. If you don't have [Homebrew](https://brew.sh/) installed, DocMason will guide you through that too. All setup is handled through your AI agent — just approve installations when prompted.
+## Getting Started on macOS
+
+**Five steps from download to your first traceable answer — no developer experience required.**
+
+**1. Download, unzip, and drop in your files**
+**[Download DocMason](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip)**, unzip it to any folder on your Mac, then drag your `.pptx`, `.docx`, `.xlsx`, `.pdf`, and other work files into `DocMason/original_doc/`.
+
+**2. Open the DocMason folder in Codex**
+Launch [Codex for macOS](https://openai.com/codex) (or Claude Code) and open the DocMason folder as your workspace. This is the operating model — the repo is your app, the agent is your runtime.
+
+**3. Ask your agent to prepare the environment**
+> "Please prepare the DocMason environment."
+
+DocMason will set up a managed local Python environment, install required dependencies, and guide you through LibreOffice installation if it's not already present. Just **grant full access to Codex** when prompted.
+
+**4. Build the knowledge base** *(for medium-to-large corpora)*
+> "Please build the knowledge base."
+
+DocMason stages, compiles, validates, and publishes your documents into a searchable evidence layer. For a small handful of files, DocMason may handle this step automatically during your first question.
+
+**5. Start asking questions**
+> "What are the main rollout risks across these documents, and which sources support them?"
+
+Your answers come with exact source identity and provenance trace — you can verify every claim against the original file and page.
+
+## The Public Proof Case (Demo Bundle)
+
+If you want to see a rigorously traceable answer before using your own files, the fastest public proof uses the ICO + GCS demo corpus compiled from official UK public-sector releases.
+
+[Try the ICO + GCS Demo Bundle](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-demo-ico-gcs.zip) to test a governed truth environment before transitioning to your own private folders.
+
+**Ask this through your AI agent:**
+> "Across the ICO and GCS materials, what are the main rollout risks, and which sources support them?"
+
+**What good looks like:**
+- **Cross-Document Reasoning:** The answer synthesizes overlapping governance risks instead of echoing documents one by one.
+- **Strict Provenance:** The answer explicitly points to the exact document origin, instead of blurring the corpus into one anonymous narrative.
+- **Inherently Traceable:** It provides the real evidence bundles so you can verify the root context.
+
+## Why It Feels Safer
+
+DocMason is built for **deep research** over your real work files — where every answer must be **traceable** to its actual source.
+
+* **Strict Source Identity.** DocMason enforces strict document boundaries. It prevents agents from hallucinating cross-source facts that only vaguely fit together.
+* **Answers Are Traceable.** You don't just get convincing text. You get a verifiable lineage pointing directly to the exact file and page you dropped in.
+* **100% Local and Auditable.** Your files, staged data, and compiled knowledge base remain physically inside your local folder boundary. [See more →](#privacy-and-local-first-boundary)
+
+**What gets installed:** DocMason needs **[LibreOffice](https://www.libreoffice.org/)** to parse Office files (`.pptx`, `.docx`, `.xlsx`) with full fidelity — this is the most important external dependency. It also sets up a local Python environment automatically. All setup is handled through your AI agent — just approve installations when prompted.
 
 ## Supported Work File Types
 
@@ -82,47 +119,6 @@ DocMason is built for **deep research** over your real work files — where ever
 - **Lightweight Text**: `mdx`, `yaml`, `yml`, `tex`, `csv`, `tsv`
 
 High-fidelity Office file parsing relies on a lightweight local LibreOffice shim. PDF parsing uses the embedded stack (`PyMuPDF`, `pypdfium2`, `pypdf`, `pillow`). Together they preserve multimodal structure, layout, and sheet/page context for deeper analysis, not just plain-text extraction. Markdown, plain text, `.eml`, and the lightweight-compatible family do not require LibreOffice.
-
-## Why This Exists
-
-Most document AI tools map complex corporate files into flat, unreadable text strings. They strip out critical structural and formatting semantics:
-
-- **Slide Decks**: Visual layout, presenter notes, and chart-text relationships are discarded.
-- **Spreadsheets**: Multi-sheet references and nested tables break existing parsers.
-- **Format-as-Semantics**: Critical signals (like red text for "Risk" or indentation for hierarchies) are erased.
-- **Cross-Document Reasoning**: Multi-part proposals are disconnected, making global synthesis impossible.
-
-DocMason addresses this by forcing AI to respect original document structure and visual semantics. It produces deterministic file-based evidence, runs strong offline retrieval and trace algorithms, and validates the resulting knowledge base through strict code rules — all locally, with nothing leaving your machine. The repo holds the truth. The agent does the reasoning.
-
-## Getting Started on macOS
-
-**Five steps from download to your first traceable answer — no developer experience required.**
-
-**1. Download, unzip, and drop in your files**
-
-[Download DocMason](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip), unzip it to any folder on your Mac, then drag your `.pptx`, `.docx`, `.xlsx`, `.pdf`, and other work files into `DocMason/original_doc/`.
-
-**2. Open the DocMason folder in Codex**
-
-Launch [Codex for macOS](https://openai.com/codex) (or Claude Code) and open the DocMason folder as your workspace. This is the operating model — the repo is your app, the agent is your runtime.
-
-**3. Ask your agent to prepare the environment**
-
-> "Please prepare the DocMason environment."
-
-**DocMason will set up a managed local Python environment, install required dependencies, and guide you through LibreOffice installation via Homebrew if it's not already present. Just approve when prompted. If Homebrew itself is missing, DocMason will guide that installation too.**
-
-**4. Build the knowledge base** *(for medium-to-large corpora)*
-
-> "Please build the knowledge base."
-
-DocMason stages, compiles, validates, and publishes your documents into a searchable evidence layer. For a small handful of files, DocMason may handle this step automatically during your first question.
-
-**5. Start asking questions**
-
-> "What are the main rollout risks across these documents, and which sources support them?"
-
-Your answers come with exact source identity and provenance trace — you can verify every claim against the original file and page.
 
 ## What You Get Today
 

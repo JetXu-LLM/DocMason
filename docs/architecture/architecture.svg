@@ -1,0 +1,272 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 880" width="100%" height="100%" style="background-color: #1a1b26; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  
+  <!-- Definitions for arrows and gradients -->
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7aa2f7" />
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ece6a" />
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#bb9af7" />
+    </marker>
+    <marker id="arrow-orange" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#e0af68" />
+    </marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#565f89" />
+    </marker>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7dcfff" />
+    </marker>
+    
+    <!-- Subtle grid background -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#292e42" stroke-width="0.5"/>
+    </pattern>
+  </defs>
+
+  <!-- Background Grid -->
+  <rect width="100%" height="100%" fill="url(#grid)" />
+
+  <!-- HEADER SECTION -->
+  <text x="40" y="50" fill="#c0caf5" font-size="32" font-weight="bold" letter-spacing="1">DocMason</text>
+  <text x="40" y="80" fill="#9aa5ce" font-size="16" letter-spacing="0.5">The repo is the app. The Agent is the runtime. A file-only, agent-native knowledge base.</text>
+  
+  <!-- MAIN PIPELINE LABELS (Fixed Alignment) -->
+  <text x="150" y="130" fill="#565f89" font-size="12" font-weight="bold" letter-spacing="2" text-anchor="middle">1. RAW SOURCES</text>
+  <text x="440" y="130" fill="#565f89" font-size="12" font-weight="bold" letter-spacing="2" text-anchor="middle">2. COMPILE &amp; STAGE</text>
+  <text x="740" y="130" fill="#565f89" font-size="12" font-weight="bold" letter-spacing="2" text-anchor="middle">3. PUBLISHED KB TRUTH</text>
+  <text x="1060" y="130" fill="#565f89" font-size="12" font-weight="bold" letter-spacing="2" text-anchor="middle">4. AGENT RUNTIME &amp; OUTPUT</text>
+
+  <!-- ========================================== -->
+  <!-- COLUMN 1: RAW SOURCES -->
+  <!-- ========================================== -->
+  <rect x="40" y="150" width="220" height="380" rx="8" fill="#24283b" stroke="#f7768e" stroke-width="2" stroke-dasharray="4 4"/>
+  <text x="150" y="180" fill="#f7768e" font-size="16" font-weight="bold" text-anchor="middle">original_doc/</text>
+  
+  <!-- Source Items -->
+  <g transform="translate(60, 200)">
+    <rect width="180" height="50" rx="4" fill="#1f2335" stroke="#f7768e" stroke-width="1"/>
+    <text x="90" y="22" fill="#c0caf5" font-size="14" font-weight="bold" text-anchor="middle">PDFs</text>
+    <text x="90" y="40" fill="#9aa5ce" font-size="11" text-anchor="middle">Native render &amp; extraction</text>
+  </g>
+  <g transform="translate(60, 260)">
+    <rect width="180" height="60" rx="4" fill="#1f2335" stroke="#f7768e" stroke-width="1"/>
+    <text x="90" y="22" fill="#c0caf5" font-size="14" font-weight="bold" text-anchor="middle">PPTX / DOCX / XLSX</text>
+    <text x="90" y="38" fill="#9aa5ce" font-size="11" text-anchor="middle">Extract text, notes, hidden</text>
+    <text x="90" y="52" fill="#9aa5ce" font-size="11" text-anchor="middle">slides, tables &amp; charts</text>
+  </g>
+  <g transform="translate(60, 330)">
+    <rect width="180" height="60" rx="4" fill="#1f2335" stroke="#f7768e" stroke-width="1"/>
+    <text x="90" y="22" fill="#c0caf5" font-size="14" font-weight="bold" text-anchor="middle">EML (Emails)</text>
+    <text x="90" y="38" fill="#9aa5ce" font-size="11" text-anchor="middle">First-class w/ attachments</text>
+    <text x="90" y="52" fill="#9aa5ce" font-size="11" text-anchor="middle">Forms derived source tree</text>
+  </g>
+  <g transform="translate(60, 400)">
+    <rect width="180" height="50" rx="4" fill="#1f2335" stroke="#f7768e" stroke-width="1"/>
+    <text x="90" y="22" fill="#c0caf5" font-size="14" font-weight="bold" text-anchor="middle">MD / TXT / CSV</text>
+    <text x="90" y="40" fill="#9aa5ce" font-size="11" text-anchor="middle">Conservative struct parsing</text>
+  </g>
+  
+  <text x="150" y="480" fill="#f7768e" font-size="12" text-anchor="middle" font-style="italic">Live private corpus</text>
+
+  <!-- Arrow 1 to 2 -->
+  <path d="M 260 340 L 310 340" fill="none" stroke="#7aa2f7" stroke-width="2" marker-end="url(#arrow-blue)"/>
+
+  <!-- ========================================== -->
+  <!-- COLUMN 2: COMPILE & STAGE (DOCMASON CORE) -->
+  <!-- ========================================== -->
+  
+  <!-- Prepare Block -->
+  <rect x="320" y="150" width="240" height="100" rx="8" fill="#24283b" stroke="#7aa2f7" stroke-width="2"/>
+  <text x="440" y="175" fill="#7aa2f7" font-size="16" font-weight="bold" text-anchor="middle">docmason prepare</text>
+  <text x="440" y="195" fill="#c0caf5" font-size="12" text-anchor="middle">Auto-Environment Setup</text>
+  <text x="440" y="215" fill="#9aa5ce" font-size="11" text-anchor="middle">Installs LibreOffice, PDF renderers,</text>
+  <text x="440" y="230" fill="#9aa5ce" font-size="11" text-anchor="middle">and repo-local toolchains silently.</text>
+
+  <!-- Sync Block -->
+  <rect x="320" y="270" width="240" height="260" rx="8" fill="#24283b" stroke="#7aa2f7" stroke-width="2"/>
+  <text x="440" y="295" fill="#7aa2f7" font-size="16" font-weight="bold" text-anchor="middle">docmason sync</text>
+  <text x="440" y="315" fill="#c0caf5" font-size="12" text-anchor="middle">Incremental Compilation</text>
+  
+  <g transform="translate(340, 330)">
+    <rect width="200" height="25" rx="4" fill="#1f2335"/>
+    <text x="100" y="17" fill="#9aa5ce" font-size="11" text-anchor="middle">1. Detect &amp; Source Identity</text>
+  </g>
+  <g transform="translate(340, 360)">
+    <rect width="200" height="25" rx="4" fill="#1f2335"/>
+    <text x="100" y="17" fill="#9aa5ce" font-size="11" text-anchor="middle">2. Stage (Selective Rebuild)</text>
+  </g>
+  <g transform="translate(340, 390)">
+    <rect width="200" height="25" rx="4" fill="#1f2335"/>
+    <text x="100" y="17" fill="#9aa5ce" font-size="11" text-anchor="middle">3. Auto-Author Semantics</text>
+  </g>
+  
+  <!-- Validation Gate (Widened slightly for better fit) -->
+  <rect x="330" y="430" width="220" height="30" rx="4" fill="#ff9e64" fill-opacity="0.2" stroke="#ff9e64" stroke-width="1"/>
+  <text x="440" y="450" fill="#ff9e64" font-size="12" font-weight="bold" text-anchor="middle">Admissibility / Validation Gate</text>
+  
+  <g transform="translate(340, 470)">
+    <rect width="200" height="25" rx="4" fill="#1f2335"/>
+    <text x="100" y="17" fill="#9aa5ce" font-size="11" text-anchor="middle">4. Publish to Current</text>
+  </g>
+
+  <text x="440" y="515" fill="#7aa2f7" font-size="11" text-anchor="middle" font-style="italic">Silent, smart backend</text>
+
+  <!-- Arrow 2 to 3 -->
+  <path d="M 560 340 L 610 340" fill="none" stroke="#9ece6a" stroke-width="2" marker-end="url(#arrow-green)"/>
+
+  <!-- ========================================== -->
+  <!-- COLUMN 3: THE WIKI / PUBLISHED KB TRUTH -->
+  <!-- ========================================== -->
+  <rect x="620" y="150" width="240" height="380" rx="8" fill="#24283b" stroke="#9ece6a" stroke-width="2"/>
+  <text x="740" y="180" fill="#9ece6a" font-size="16" font-weight="bold" text-anchor="middle">knowledge_base/current/</text>
+  <text x="740" y="200" fill="#c0caf5" font-size="12" text-anchor="middle">100% Local File-Based Truth</text>
+
+  <g transform="translate(640, 220)">
+    <rect width="200" height="50" rx="4" fill="#1f2335" stroke="#9ece6a" stroke-width="1"/>
+    <text x="100" y="20" fill="#c0caf5" font-size="13" font-weight="bold" text-anchor="middle">Semantic Layer</text>
+    <text x="100" y="38" fill="#9aa5ce" font-size="11" text-anchor="middle">knowledge.json, summary.md</text>
+  </g>
+  
+  <g transform="translate(640, 280)">
+    <rect width="200" height="50" rx="4" fill="#1f2335" stroke="#9ece6a" stroke-width="1"/>
+    <text x="100" y="20" fill="#c0caf5" font-size="13" font-weight="bold" text-anchor="middle">Retrieval Substrate</text>
+    <text x="100" y="38" fill="#9aa5ce" font-size="11" text-anchor="middle">Deterministic Lexical + Graph</text>
+  </g>
+
+  <g transform="translate(640, 340)">
+    <rect width="200" height="50" rx="4" fill="#1f2335" stroke="#9ece6a" stroke-width="1"/>
+    <text x="100" y="20" fill="#c0caf5" font-size="13" font-weight="bold" text-anchor="middle">Trace Artifacts</text>
+    <text x="100" y="38" fill="#9aa5ce" font-size="11" text-anchor="middle">Provenance &amp; Relation Index</text>
+  </g>
+
+  <g transform="translate(640, 400)">
+    <rect width="200" height="50" rx="4" fill="#1f2335" stroke="#9ece6a" stroke-width="1"/>
+    <text x="100" y="20" fill="#c0caf5" font-size="13" font-weight="bold" text-anchor="middle">Multimodal Assets</text>
+    <text x="100" y="38" fill="#9aa5ce" font-size="11" text-anchor="middle">Focus Renders, Visual Layouts</text>
+  </g>
+
+  <text x="740" y="480" fill="#9ece6a" font-size="12" text-anchor="middle" font-style="italic">No Vector DB needed</text>
+
+  <!-- Arrow 3 to 4 -->
+  <path d="M 860 340 L 910 340" fill="none" stroke="#bb9af7" stroke-width="2" marker-end="url(#arrow-purple)"/>
+
+  <!-- ========================================== -->
+  <!-- COLUMN 4: AGENT RUNTIME & OUTPUT -->
+  <!-- ========================================== -->
+  
+  <!-- Agent Box -->
+  <rect x="920" y="150" width="280" height="150" rx="8" fill="#24283b" stroke="#bb9af7" stroke-width="2"/>
+  <text x="1060" y="175" fill="#bb9af7" font-size="16" font-weight="bold" text-anchor="middle">Codex / Claude Code</text>
+  <text x="1060" y="195" fill="#c0caf5" font-size="12" font-weight="bold" text-anchor="middle">(The Runtime Engine)</text>
+  
+  <g transform="translate(940, 210)">
+    <rect width="240" height="70" rx="4" fill="#1f2335" stroke="#bb9af7" stroke-dasharray="2 2" stroke-width="1"/>
+    <text x="120" y="20" fill="#c0caf5" font-size="12" font-weight="bold" text-anchor="middle">docmason _ask (Front Controller)</text>
+    <text x="120" y="38" fill="#9aa5ce" font-size="11" text-anchor="middle">Governed host integration protocol.</text>
+    <text x="120" y="52" fill="#9aa5ce" font-size="11" text-anchor="middle">Manages bundle scaffolds &amp; traces.</text>
+  </g>
+
+  <!-- Arrow Agent to Output -->
+  <path d="M 1060 300 L 1060 330" fill="none" stroke="#e0af68" stroke-width="2" marker-end="url(#arrow-orange)"/>
+
+  <!-- Output Box -->
+  <rect x="920" y="340" width="280" height="190" rx="8" fill="#24283b" stroke="#e0af68" stroke-width="2"/>
+  <text x="1060" y="370" fill="#e0af68" font-size="16" font-weight="bold" text-anchor="middle">Grounded-Composition</text>
+  <text x="1060" y="390" fill="#c0caf5" font-size="12" text-anchor="middle">Top-tier Consulting QA &amp; Research</text>
+
+  <g transform="translate(940, 410)">
+    <rect width="240" height="25" rx="4" fill="#1f2335"/>
+    <text x="120" y="17" fill="#9aa5ce" font-size="11" text-anchor="middle">Repeated Retrieve / Trace Loop</text>
+  </g>
+  <g transform="translate(940, 440)">
+    <rect width="240" height="25" rx="4" fill="#1f2335"/>
+    <text x="120" y="17" fill="#9aa5ce" font-size="11" text-anchor="middle">Research Notes &amp; Draft Bundles</text>
+  </g>
+
+  <!-- Commit Barrier -->
+  <rect x="940" y="475" width="240" height="30" rx="4" fill="#f7768e" fill-opacity="0.2" stroke="#f7768e" stroke-width="1"/>
+  <text x="1060" y="495" fill="#f7768e" font-size="12" font-weight="bold" text-anchor="middle">Commit Barrier (Answer-file Trace)</text>
+  
+  <text x="1060" y="520" fill="#e0af68" font-size="11" text-anchor="middle" font-style="italic">Truth contract enforced</text>
+
+
+  <!-- ========================================== -->
+  <!-- BOTTOM LAYER: CONTINUOUS LEARNING & FEEDBACK -->
+  <!-- ========================================== -->
+  <rect x="40" y="600" width="1160" height="140" rx="8" fill="#1f2335" stroke="#565f89" stroke-width="1" stroke-dasharray="6 6"/>
+  <text x="60" y="625" fill="#c0caf5" font-size="13" font-weight="bold" letter-spacing="1">SUPPORT LAYER: CONTINUOUS LEARNING &amp; GOVERNANCE</text>
+  
+  <!-- Interaction Memory -->
+  <g transform="translate(100, 650)">
+    <rect width="280" height="70" rx="4" fill="#24283b" stroke="#7dcfff" stroke-width="1"/>
+    <text x="140" y="25" fill="#7dcfff" font-size="14" font-weight="bold" text-anchor="middle">Chat &amp; Context Memory</text>
+    <text x="140" y="45" fill="#9aa5ce" font-size="11" text-anchor="middle">Captures conversation history.</text>
+    <text x="140" y="60" fill="#9aa5ce" font-size="11" text-anchor="middle">Promotes insights back to KB.</text>
+  </g>
+
+  <!-- Multimodal Processing -->
+  <g transform="translate(480, 650)">
+    <rect width="280" height="70" rx="4" fill="#24283b" stroke="#e0af68" stroke-width="1"/>
+    <text x="140" y="25" fill="#e0af68" font-size="14" font-weight="bold" text-anchor="middle">Multimodal Processing</text>
+    <text x="140" y="45" fill="#9aa5ce" font-size="11" text-anchor="middle">On-demand image rendering &amp;</text>
+    <text x="140" y="60" fill="#9aa5ce" font-size="11" text-anchor="middle">semantic overlay extraction.</text>
+  </g>
+
+  <!-- Review & Eval -->
+  <g transform="translate(860, 650)">
+    <rect width="280" height="70" rx="4" fill="#24283b" stroke="#bb9af7" stroke-width="1"/>
+    <text x="140" y="25" fill="#bb9af7" font-size="14" font-weight="bold" text-anchor="middle">Telemetry &amp; Governance</text>
+    <text x="140" y="45" fill="#9aa5ce" font-size="11" text-anchor="middle">Local runtime log projections.</text>
+    <text x="140" y="60" fill="#9aa5ce" font-size="11" text-anchor="middle">Operator evaluation &amp; updates.</text>
+  </g>
+
+  <!-- RE-ROUTED FEEDBACK ARROWS (Clean Circuit Routing) -->
+  
+  <!-- 1. Output -> Memory (Down) -->
+  <path d="M 960 530 L 960 580 L 240 580 L 240 650" fill="none" stroke="#7dcfff" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrow-cyan)"/>
+  
+  <!-- 2. Output -> Multimodal (Down) -->
+  <path d="M 1060 530 L 1060 570 L 620 570 L 620 650" fill="none" stroke="#e0af68" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrow-orange)"/>
+  
+  <!-- 3. Output -> Governance (Down) -->
+  <path d="M 1160 530 L 1160 580 L 1000 580 L 1000 650" fill="none" stroke="#bb9af7" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrow-purple)"/>
+
+  <!-- 4. Memory -> Sync (Up) -->
+  <path d="M 320 650 L 320 550 L 440 550 L 440 530" fill="none" stroke="#7dcfff" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrow-cyan)"/>
+  
+  <!-- 5. Multimodal -> KB (Up) -->
+  <path d="M 700 650 L 700 550 L 740 550 L 740 530" fill="none" stroke="#e0af68" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrow-orange)"/>
+
+
+  <!-- ========================================== -->
+  <!-- LEGEND & FOOTER -->
+  <!-- ========================================== -->
+  
+  <!-- Legend Box -->
+  <g transform="translate(40, 760)">
+    <rect width="480" height="70" rx="4" fill="#1f2335" stroke="#565f89" stroke-width="1"/>
+    <text x="15" y="20" fill="#c0caf5" font-size="11" font-weight="bold" letter-spacing="1">LEGEND</text>
+    
+    <!-- Line Types -->
+    <path d="M 15 35 L 45 35" fill="none" stroke="#7aa2f7" stroke-width="2" marker-end="url(#arrow-blue)"/>
+    <text x="55" y="39" fill="#9aa5ce" font-size="11">Primary Data Flow</text>
+    
+    <path d="M 15 55 L 45 55" fill="none" stroke="#7dcfff" stroke-width="2" stroke-dasharray="4 4" marker-end="url(#arrow-cyan)"/>
+    <text x="55" y="59" fill="#9aa5ce" font-size="11">Async Feedback / Governance</text>
+
+    <!-- Color Semantics -->
+    <rect x="250" y="28" width="12" height="12" fill="#f7768e" rx="2" fill-opacity="0.8"/>
+    <text x="270" y="39" fill="#9aa5ce" font-size="11">Raw / Untrusted Boundary</text>
+    
+    <rect x="250" y="48" width="12" height="12" fill="#9ece6a" rx="2" fill-opacity="0.8"/>
+    <text x="270" y="59" fill="#9aa5ce" font-size="11">Verified Knowledge Truth</text>
+  </g>
+
+  <text x="850" y="768" fill="#565f89" font-size="12" text-anchor="middle">Built for complex real-world workflows. Not just another RAG wrapper.</text>
+  <text x="950" y="785" fill="#565f89" font-size="12" text-anchor="middle">-- https://github.com/JetXu-LLM/DocMason</text>
+
+</svg>
