@@ -30,7 +30,7 @@ Most workspace AI tools flatten your complex office documents into a single, uns
 
 DocMason is designed to enforce strict data contracts and provenance boundaries. The repo holds the truth; the agent does the reasoning.
 
-![DocMason Architecture](./docs/product/architecture.svg)
+![DocMason Architecture](./docs/architecture/architecture.svg)
 
 ## Why This Exists
 
