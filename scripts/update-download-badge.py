@@ -9,7 +9,6 @@ import os
 import urllib.error
 import urllib.request
 from collections import OrderedDict
-from datetime import datetime, timezone
 from pathlib import Path
 
 API_ROOT = "https://api.github.com"
@@ -149,12 +148,7 @@ def build_badge_payload(
     color: str,
     cache_seconds: int,
 ) -> dict[str, object]:
-    """Build a Shields endpoint JSON payload with extra metadata."""
-    generated_at = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-    asset_counts = [
-        {"name": name, "download_count": count}
-        for name, count in per_asset_downloads.items()
-    ]
+    """Build a Shields endpoint JSON payload."""
     return {
         "schemaVersion": 1,
         "label": label,
@@ -162,12 +156,6 @@ def build_badge_payload(
         "color": color,
         "cacheSeconds": cache_seconds,
         "namedLogo": "github",
-        "repo": repo,
-        "scope": "combined-selected-release-assets",
-        "selected_asset_names": list(asset_names),
-        "downloads_total": total_downloads,
-        "assets": asset_counts,
-        "generated_at": generated_at,
     }
 
 
