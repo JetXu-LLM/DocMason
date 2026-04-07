@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "label": "downloads",
+  "message": "100",
+  "color": "0DAFC6",
+  "cacheSeconds": 21600,
+  "namedLogo": "github",
+  "repo": "JetXu-LLM/DocMason",
+  "scope": "combined-selected-release-assets",
+  "selected_asset_names": [
+    "DocMason-clean.zip",
+    "DocMason-demo-ico-gcs.zip"
+  ],
+  "downloads_total": 100,
+  "assets": [
+    {
+      "name": "DocMason-clean.zip",
+      "download_count": 58
+    },
+    {
+      "name": "DocMason-demo-ico-gcs.zip",
+      "download_count": 42
+    }
+  ],
+  "generated_at": "2026-04-07T05:13:54.937862Z"
+}
