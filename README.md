@@ -14,7 +14,7 @@
   
   <p>
     <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-7959A2?style=flat-square&logo=apple&logoColor=white">
-    <img alt="Supported formats" src="https://img.shields.io/badge/supported%20formats-Office%2FPDF%20%2B%20text-4A5568?style=flat-square">
+    <img alt="Supported formats" src="https://img.shields.io/badge/supported%20formats-Office%20%2F%20PDF%20%2F%20Text-492D22?style=flat-square">
     <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-0F64B5?style=flat-square">
     <a href="https://github.com/JetXu-LLM/DocMason/releases">
       <img alt="Total downloads" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FJetXu-LLM%2FDocMason%2Fmain%2Fdocs%2Fbadges%2Fdownloads-endpoint.json&style=flat-square&v=3">
