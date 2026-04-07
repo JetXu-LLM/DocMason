@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "label": "downloads",
-  "message": "101",
+  "label": "total downloads",
+  "message": "106",
   "color": "0DAFC6",
   "cacheSeconds": 21600,
   "namedLogo": "github"

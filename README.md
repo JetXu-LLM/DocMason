@@ -14,11 +14,10 @@
   
   <p>
     <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-7959A2?style=flat-square&logo=apple&logoColor=white">
-    <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-0F64B5?style=flat-square">
+    <img alt="Formats" src="https://img.shields.io/badge/formats-Office%2FPDF-4A5568?style=flat-square&logo=libreoffice&logoColor=white">
     <img alt="License" src="https://img.shields.io/badge/license-Apache%202.0-0F64B5?style=flat-square">
-    <img alt="Release" src="https://img.shields.io/github/v/release/JetXu-LLM/DocMason?style=flat-square&color=04D994">
     <a href="https://github.com/JetXu-LLM/DocMason/releases">
-      <img alt="Combined bundle downloads" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FJetXu-LLM%2FDocMason%2Fmain%2Fdocs%2Fbadges%2Fdownloads-endpoint.json&style=flat-square&v=2">
+      <img alt="Total downloads" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FJetXu-LLM%2FDocMason%2Fmain%2Fdocs%2Fbadges%2Fdownloads-endpoint.json&style=flat-square&v=3">
     </a>
   </p>
   

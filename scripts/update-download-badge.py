@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a combined GitHub release-download badge payload."""
+"""Generate a GitHub release-download badge payload."""
 
 from __future__ import annotations
 
@@ -12,17 +12,14 @@ from collections import OrderedDict
 from pathlib import Path
 
 API_ROOT = "https://api.github.com"
-DEFAULT_ASSET_NAMES = (
-    "DocMason-clean.zip",
-    "DocMason-demo-ico-gcs.zip",
-)
+DEFAULT_EXCLUDED_SUFFIXES = (".sha256",)
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser."""
     parser = argparse.ArgumentParser(
         description=(
-            "Query GitHub releases and write a Shields endpoint payload for combined downloads."
+            "Query GitHub releases and write a Shields endpoint payload for installation downloads."
         )
     )
     parser.add_argument(
@@ -37,7 +34,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Release asset name to include. Repeat the flag for multiple assets. "
-            "Defaults to the clean and demo bundles."
+            "When omitted, all non-excluded release assets are counted."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-suffix",
+        action="append",
+        dest="exclude_suffixes",
+        default=None,
+        help=(
+            "Asset suffix to exclude when --asset-name is omitted. "
+            "Repeat the flag for multiple suffixes. Defaults to .sha256."
         ),
     )
     parser.add_argument(
@@ -48,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--label",
-        default="downloads",
+        default="total downloads",
         help="Badge label.",
     )
     parser.add_argument(
@@ -115,10 +122,13 @@ def fetch_releases(repo: str) -> list[dict[str, object]]:
 
 
 def collect_downloads(
-    releases: list[dict[str, object]], asset_names: tuple[str, ...]
+    releases: list[dict[str, object]],
+    asset_names: tuple[str, ...] | None,
+    exclude_suffixes: tuple[str, ...],
 ) -> tuple[int, OrderedDict[str, int]]:
-    """Sum downloads for the selected asset names."""
-    counts: OrderedDict[str, int] = OrderedDict((name, 0) for name in asset_names)
+    """Sum downloads for the selected or inferred release assets."""
+    explicit_names = set(asset_names or ())
+    counts: OrderedDict[str, int] = OrderedDict((name, 0) for name in asset_names or ())
     total = 0
 
     for release in releases:
@@ -129,11 +139,18 @@ def collect_downloads(
             if not isinstance(asset, dict):
                 continue
             name = asset.get("name")
-            if not isinstance(name, str) or name not in counts:
+            if not isinstance(name, str):
+                continue
+            if asset_names:
+                if name not in explicit_names:
+                    continue
+            elif any(name.endswith(suffix) for suffix in exclude_suffixes):
                 continue
             download_count = asset.get("download_count")
             if not isinstance(download_count, int):
                 continue
+            if name not in counts:
+                counts[name] = 0
             counts[name] += download_count
             total += download_count
     return total, counts
@@ -169,13 +186,18 @@ def main() -> int:
     """Run the badge generator."""
     parser = build_parser()
     args = parser.parse_args()
-    asset_names = tuple(args.asset_names or DEFAULT_ASSET_NAMES)
+    asset_names = tuple(args.asset_names) if args.asset_names else None
+    exclude_suffixes = tuple(args.exclude_suffixes or DEFAULT_EXCLUDED_SUFFIXES)
 
     releases = fetch_releases(args.repo)
-    total_downloads, per_asset_downloads = collect_downloads(releases, asset_names)
+    total_downloads, per_asset_downloads = collect_downloads(
+        releases,
+        asset_names=asset_names,
+        exclude_suffixes=exclude_suffixes,
+    )
     payload = build_badge_payload(
         repo=args.repo,
-        asset_names=asset_names,
+        asset_names=asset_names or tuple(per_asset_downloads.keys()),
         total_downloads=total_downloads,
         per_asset_downloads=per_asset_downloads,
         label=args.label,
