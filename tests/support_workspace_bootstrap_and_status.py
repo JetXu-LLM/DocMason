@@ -128,6 +128,54 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         return WorkspacePaths(root=root)
 
+    def seed_codex_thread_context(
+        self,
+        home: Path,
+        *,
+        thread_id: str,
+        sandbox_policy: dict[str, object],
+        approval_mode: str = "never",
+    ) -> Path:
+        codex_root = home / ".codex"
+        sessions_root = codex_root / "sessions" / "2026" / "04" / "08"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+        rollout_path = sessions_root / f"rollout-{thread_id}.jsonl"
+        rollout_path.write_text(
+            json.dumps(
+                {
+                    "type": "turn_context",
+                    "payload": {
+                        "approval_policy": approval_mode,
+                        "sandbox_policy": sandbox_policy,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        database_path = codex_root / "state_5.sqlite"
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "CREATE TABLE threads ("
+                "id TEXT PRIMARY KEY, rollout_path TEXT, sandbox_policy TEXT, "
+                "approval_mode TEXT)"
+            )
+            connection.execute(
+                (
+                    "INSERT INTO threads "
+                    "(id, rollout_path, sandbox_policy, approval_mode) "
+                    "VALUES (?, ?, ?, ?)"
+                ),
+                (
+                    thread_id,
+                    str(rollout_path),
+                    json.dumps(sandbox_policy),
+                    approval_mode,
+                ),
+            )
+            connection.commit()
+        return rollout_path
+
     def fake_prepare_runner(self, workspace: WorkspacePaths):
         def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
             del cwd
@@ -531,6 +579,242 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(context["permission_mode"], "default-permissions")
         self.assertFalse(context["workspace_write_network_access"])
         self.assertEqual(context["sandbox_writable_roots"], [str(workspace.root)])
+
+    def test_bootstrap_launcher_uses_healthy_versioned_host_context_python(self) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        (workspace.root / "scripts" / "read-host-execution-context.py").write_text(
+            (ROOT / "scripts" / "read-host-execution-context.py").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        (workspace.root / "runtime").mkdir(parents=True, exist_ok=True)
+        marker_path = workspace.root / "runtime" / "launcher-ran.txt"
+        host_context_marker = workspace.root / "runtime" / "host-context-python.txt"
+        runtime_python = workspace.root / ".manual-bootstrap-python" / "bin" / "python3"
+        runtime_python.parent.mkdir(parents=True, exist_ok=True)
+        runtime_python.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        runtime_python.chmod(0o755)
+        (workspace.root / "src" / "docmason" / "__main__.py").write_text(
+            "from __future__ import annotations\n"
+            "import json\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "\n"
+            "Path(os.environ['DOCMASON_BOOTSTRAP_MARKER']).write_text('ran\\n', encoding='utf-8')\n"
+            "print(json.dumps({'status': 'ready'}))\n",
+            encoding="utf-8",
+        )
+
+        fake_bin_dir = workspace.root / ".fake-bin-host-context-versioned"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        (fake_bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        (fake_bin_dir / "uname").chmod(0o755)
+        (fake_bin_dir / "python3").write_text(
+            "#!/bin/sh\n"
+            "sleep 10\n",
+            encoding="utf-8",
+        )
+        (fake_bin_dir / "python3").chmod(0o755)
+        (fake_bin_dir / "python3.13").write_text(
+            "#!/bin/sh\n"
+            "if [ \"${1##*/}\" = \"read-host-execution-context.py\" ]; then\n"
+            f"  printf 'python3.13\\n' > {shlex.quote(str(host_context_marker))}\n"
+            "fi\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin_dir / "python3.13").chmod(0o755)
+
+        with tempfile.TemporaryDirectory() as home_name:
+            home = Path(home_name)
+            self.seed_codex_thread_context(
+                home,
+                thread_id="thread-full-access",
+                sandbox_policy={"type": "danger-full-access"},
+            )
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "CODEX_THREAD_ID": "thread-full-access",
+                "DOCMASON_BOOTSTRAP_PYTHON": str(runtime_python),
+                "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
+                "PATH": str(fake_bin_dir) + os.pathsep + "/usr/bin:/bin",
+            }
+            completed = subprocess.run(
+                [str(script_path), "--yes", "--json"],
+                cwd=workspace.root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertTrue(marker_path.exists())
+        self.assertEqual(host_context_marker.read_text(encoding="utf-8").strip(), "python3.13")
+        self.assertEqual(json.loads(completed.stdout)["status"], READY)
+
+    def test_bootstrap_launcher_preserves_conservative_fallback_without_healthy_host_context_python(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        (workspace.root / "scripts" / "read-host-execution-context.py").write_text(
+            (ROOT / "scripts" / "read-host-execution-context.py").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        fake_bin_dir = workspace.root / ".fake-bin-host-context-missing"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        (fake_bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        (fake_bin_dir / "uname").chmod(0o755)
+        (fake_bin_dir / "python3").write_text(
+            "#!/bin/sh\n"
+            "sleep 10\n",
+            encoding="utf-8",
+        )
+        (fake_bin_dir / "python3").chmod(0o755)
+
+        with tempfile.TemporaryDirectory() as home_name:
+            home = Path(home_name)
+            self.seed_codex_thread_context(
+                home,
+                thread_id="thread-fallback",
+                sandbox_policy={"type": "danger-full-access"},
+            )
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "CODEX_THREAD_ID": "thread-fallback",
+                "PATH": str(fake_bin_dir) + os.pathsep + "/usr/bin:/bin",
+            }
+            completed = subprocess.run(
+                [str(script_path), "--yes", "--json"],
+                cwd=workspace.root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 1)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], ACTION_REQUIRED)
+        self.assertEqual(
+            payload["detail"],
+            "DocMason cannot safely confirm that this Codex turn allows the network downloads required for repo-local runtime bootstrap.",
+        )
+        self.assertEqual(payload["host_execution"]["context_source"], "env-codex-thread-id-fallback")
+        self.assertIsNone(payload["host_execution"]["sandbox_policy"])
+        self.assertIsNone(payload["host_execution"]["permission_mode"])
+        self.assertFalse(payload["host_execution"]["full_machine_access"])
+
+    def test_bootstrap_launcher_skips_unhealthy_explicit_host_context_python_override(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        (workspace.root / "scripts" / "read-host-execution-context.py").write_text(
+            (ROOT / "scripts" / "read-host-execution-context.py").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        (workspace.root / "runtime").mkdir(parents=True, exist_ok=True)
+        marker_path = workspace.root / "runtime" / "launcher-ran.txt"
+        host_context_marker = workspace.root / "runtime" / "host-context-python.txt"
+        runtime_python = workspace.root / ".manual-bootstrap-python" / "bin" / "python3"
+        runtime_python.parent.mkdir(parents=True, exist_ok=True)
+        runtime_python.write_text(
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        runtime_python.chmod(0o755)
+        bad_helper_python = workspace.root / ".bad-host-context-python" / "python3"
+        bad_helper_python.parent.mkdir(parents=True, exist_ok=True)
+        bad_helper_python.write_text(
+            "#!/bin/sh\n"
+            "sleep 10\n",
+            encoding="utf-8",
+        )
+        bad_helper_python.chmod(0o755)
+        (workspace.root / "src" / "docmason" / "__main__.py").write_text(
+            "from __future__ import annotations\n"
+            "import json\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "\n"
+            "Path(os.environ['DOCMASON_BOOTSTRAP_MARKER']).write_text('ran\\n', encoding='utf-8')\n"
+            "print(json.dumps({'status': 'ready'}))\n",
+            encoding="utf-8",
+        )
+
+        fake_bin_dir = workspace.root / ".fake-bin-host-context-explicit"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        (fake_bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        (fake_bin_dir / "uname").chmod(0o755)
+        (fake_bin_dir / "python3.13").write_text(
+            "#!/bin/sh\n"
+            "if [ \"${1##*/}\" = \"read-host-execution-context.py\" ]; then\n"
+            f"  printf 'python3.13\\n' > {shlex.quote(str(host_context_marker))}\n"
+            "fi\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin_dir / "python3.13").chmod(0o755)
+
+        with tempfile.TemporaryDirectory() as home_name:
+            home = Path(home_name)
+            self.seed_codex_thread_context(
+                home,
+                thread_id="thread-explicit-override",
+                sandbox_policy={"type": "danger-full-access"},
+            )
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "CODEX_THREAD_ID": "thread-explicit-override",
+                "DOCMASON_HOST_CONTEXT_PYTHON": str(bad_helper_python),
+                "DOCMASON_BOOTSTRAP_PYTHON": str(runtime_python),
+                "DOCMASON_BOOTSTRAP_MARKER": str(marker_path),
+                "PATH": str(fake_bin_dir) + os.pathsep + "/usr/bin:/bin",
+            }
+            completed = subprocess.run(
+                [str(script_path), "--yes", "--json"],
+                cwd=workspace.root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertTrue(marker_path.exists())
+        self.assertEqual(host_context_marker.read_text(encoding="utf-8").strip(), "python3.13")
+        self.assertEqual(json.loads(completed.stdout)["status"], READY)
 
     def test_prepare_uses_uv_when_available(self) -> None:
         workspace = self.make_workspace()
