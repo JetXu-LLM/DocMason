@@ -56,6 +56,24 @@ ROOT = Path(__file__).resolve().parents[1]
 class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
     """Cover the CLI, workspace bootstrap, and adapter behavior."""
 
+    @contextlib.contextmanager
+    def neutral_host_execution_context(self):
+        """Run one test with a host context that does not trigger Codex-specific gating."""
+        with mock.patch(
+            "docmason.conversation.current_host_execution_context",
+            return_value={
+                "host_provider": "unknown-agent",
+                "sandbox_policy": None,
+                "approval_mode": None,
+                "permission_mode": None,
+                "full_machine_access": False,
+                "workspace_write_network_access": None,
+                "sandbox_writable_roots": [],
+                "context_source": "test-override",
+            },
+        ):
+            yield
+
     def seed_workflow_metadata(
         self,
         skill_dir: Path,
@@ -483,17 +501,18 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_prepare_requests_repo_local_uv_bootstrap_when_uv_is_missing(self) -> None:
         workspace = self.make_workspace()
-        with (
-            mock.patch("docmason.commands.find_uv_binary", return_value=None),
-            mock.patch("docmason.commands.find_brew_binary", return_value=None),
-        ):
-            report = prepare_workspace(
-                workspace,
-                assume_yes=False,
-                command_runner=self.fake_prepare_runner(workspace),
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with (
+                mock.patch("docmason.commands.find_uv_binary", return_value=None),
+                mock.patch("docmason.commands.find_brew_binary", return_value=None),
+            ):
+                report = prepare_workspace(
+                    workspace,
+                    assume_yes=False,
+                    command_runner=self.fake_prepare_runner(workspace),
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
         self.assertEqual(report.exit_code, 1)
         self.assertEqual(report.payload["status"], ACTION_REQUIRED)
         self.assertEqual(report.payload["environment"]["package_manager"], "uv")
@@ -685,12 +704,21 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         fake_bin_dir.mkdir(parents=True, exist_ok=True)
         (fake_bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
         (fake_bin_dir / "uname").chmod(0o755)
-        (fake_bin_dir / "python3").write_text(
-            "#!/bin/sh\n"
-            "sleep 10\n",
-            encoding="utf-8",
-        )
-        (fake_bin_dir / "python3").chmod(0o755)
+        for helper_name in (
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3.10",
+            "python3.9",
+            "python3",
+            "python",
+        ):
+            (fake_bin_dir / helper_name).write_text(
+                "#!/bin/sh\n"
+                "sleep 10\n",
+                encoding="utf-8",
+            )
+            (fake_bin_dir / helper_name).chmod(0o755)
 
         with tempfile.TemporaryDirectory() as home_name:
             home = Path(home_name)
@@ -875,16 +903,17 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             seen_commands.append(command_list)
             return self.fake_prepare_runner(workspace)(command_list, cwd)
 
-        with mock.patch(
-            "docmason.commands.find_uv_binary",
-            return_value=str(workspace.toolchain_bootstrap_uv),
-        ):
-            report = prepare_workspace(
-                workspace,
-                command_runner=runner,
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with mock.patch(
+                "docmason.commands.find_uv_binary",
+                return_value=str(workspace.toolchain_bootstrap_uv),
+            ):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=runner,
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
 
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
@@ -906,16 +935,17 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_prepare_reports_managed_python_version_instead_of_bootstrap_version(self) -> None:
         workspace = self.make_workspace()
-        with (
-            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
-            mock.patch("docmason.commands.sys.version_info", (3, 11, 9)),
-        ):
-            report = prepare_workspace(
-                workspace,
-                command_runner=self.fake_prepare_runner(workspace),
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with (
+                mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+                mock.patch("docmason.commands.sys.version_info", (3, 11, 9)),
+            ):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=self.fake_prepare_runner(workspace),
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["environment"]["python_version"], "3.13.5")
         self.assertTrue(
@@ -931,13 +961,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             seen_commands.append(command_list)
             return self.fake_prepare_runner(workspace)(command_list, cwd)
 
-        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
-            report = prepare_workspace(
-                workspace,
-                command_runner=runner,
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=runner,
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
 
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
@@ -1553,23 +1584,24 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             brew_call_count["value"] += 1
             return None if brew_call_count["value"] < 5 else "/opt/homebrew/bin/brew"
 
-        with (
-            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
-            mock.patch(
-                "docmason.commands.pdf_renderer_snapshot",
-                return_value={
-                    "ready": False,
-                    "detail": "Current bootstrap interpreter lacks PDF dependencies.",
-                    "missing": ["pymupdf"],
-                },
-            ),
-        ):
-            report = prepare_workspace(
-                workspace,
-                command_runner=self.fake_prepare_runner(workspace),
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with (
+                mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+                mock.patch(
+                    "docmason.commands.pdf_renderer_snapshot",
+                    return_value={
+                        "ready": False,
+                        "detail": "Current bootstrap interpreter lacks PDF dependencies.",
+                        "missing": ["pymupdf"],
+                    },
+                ),
+            ):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=self.fake_prepare_runner(workspace),
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
 
         self.assertEqual(report.exit_code, 0)
         state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
@@ -1665,17 +1697,18 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             seen_commands.append(command_list)
             return self.fake_prepare_runner(workspace)(command_list, workspace.root)
 
-        with (
-            mock.patch("docmason.commands.find_uv_binary", return_value=None),
-            mock.patch("docmason.commands.sys.platform", "darwin"),
-        ):
-            report = prepare_workspace(
-                workspace,
-                assume_yes=True,
-                command_runner=runner,
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with (
+                mock.patch("docmason.commands.find_uv_binary", return_value=None),
+                mock.patch("docmason.commands.sys.platform", "darwin"),
+            ):
+                report = prepare_workspace(
+                    workspace,
+                    assume_yes=True,
+                    command_runner=runner,
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
         self.assertTrue(
@@ -1750,29 +1783,30 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_prepare_retries_transient_startup_silent_before_failing(self) -> None:
         workspace = self.make_workspace()
-        with (
-            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
-            mock.patch(
-                "docmason.commands.inspect_entrypoint",
-                side_effect=[
-                    {
-                        "entrypoint_health": "startup-silent",
-                        "detail": "The launcher timed out during startup.",
-                    },
-                    {
-                        "entrypoint_health": "ready",
-                        "detail": None,
-                    },
-                ],
-            ) as inspect_mock,
-            mock.patch("docmason.commands.time.sleep") as sleep_mock,
-        ):
-            report = prepare_workspace(
-                workspace,
-                command_runner=self.fake_prepare_runner(workspace),
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with (
+                mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+                mock.patch(
+                    "docmason.commands.inspect_entrypoint",
+                    side_effect=[
+                        {
+                            "entrypoint_health": "startup-silent",
+                            "detail": "The launcher timed out during startup.",
+                        },
+                        {
+                            "entrypoint_health": "ready",
+                            "detail": None,
+                        },
+                    ],
+                ) as inspect_mock,
+                mock.patch("docmason.commands.time.sleep") as sleep_mock,
+            ):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=self.fake_prepare_runner(workspace),
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
 
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.payload["status"], READY)
@@ -1786,29 +1820,30 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_prepare_still_fails_when_startup_silent_persists_after_retry(self) -> None:
         workspace = self.make_workspace()
-        with (
-            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
-            mock.patch(
-                "docmason.commands.inspect_entrypoint",
-                side_effect=[
-                    {
-                        "entrypoint_health": "startup-silent",
-                        "detail": "The launcher timed out during startup.",
-                    },
-                    {
-                        "entrypoint_health": "startup-silent",
-                        "detail": "The launcher timed out during startup.",
-                    },
-                ],
-            ) as inspect_mock,
-            mock.patch("docmason.commands.time.sleep") as sleep_mock,
-        ):
-            report = prepare_workspace(
-                workspace,
-                command_runner=self.fake_prepare_runner(workspace),
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with (
+                mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+                mock.patch(
+                    "docmason.commands.inspect_entrypoint",
+                    side_effect=[
+                        {
+                            "entrypoint_health": "startup-silent",
+                            "detail": "The launcher timed out during startup.",
+                        },
+                        {
+                            "entrypoint_health": "startup-silent",
+                            "detail": "The launcher timed out during startup.",
+                        },
+                    ],
+                ) as inspect_mock,
+                mock.patch("docmason.commands.time.sleep") as sleep_mock,
+            ):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=self.fake_prepare_runner(workspace),
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
 
         self.assertEqual(report.exit_code, 1)
         self.assertEqual(report.payload["status"], ACTION_REQUIRED)
@@ -2018,13 +2053,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
     def test_prepare_generates_repo_local_skill_shims(self) -> None:
         workspace = self.make_workspace()
 
-        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
-            report = prepare_workspace(
-                workspace,
-                command_runner=self.fake_prepare_runner(workspace),
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=self.fake_prepare_runner(workspace),
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
 
         self.assertIn(
             "Refreshed repo-local skill shims under .agents/skills and .claude/skills.",
@@ -2043,13 +2079,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         workspace.claude_skill_shim_dir.parent.mkdir(parents=True, exist_ok=True)
         os.symlink("../skills", workspace.claude_skill_shim_dir)
 
-        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
-            report = prepare_workspace(
-                workspace,
-                command_runner=self.fake_prepare_runner(workspace),
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=self.fake_prepare_runner(workspace),
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
 
         self.assertEqual(report.exit_code, 0)
         self.assertFalse(workspace.claude_skill_shim_dir.is_symlink())
@@ -2066,13 +2103,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         optional_skill.parent.mkdir(parents=True, exist_ok=True)
         optional_skill.write_text("# Public Sample Workspace\n", encoding="utf-8")
 
-        with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
-            report = prepare_workspace(
-                workspace,
-                command_runner=self.fake_prepare_runner(workspace),
-                editable_install_probe=self.ready_probe,
-                interactive=False,
-            )
+        with self.neutral_host_execution_context():
+            with mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"):
+                report = prepare_workspace(
+                    workspace,
+                    command_runner=self.fake_prepare_runner(workspace),
+                    editable_install_probe=self.ready_probe,
+                    interactive=False,
+                )
 
         self.assertEqual(report.exit_code, 0)
         codex_shim = workspace.repo_skill_shim_dir / "public-sample-workspace"
@@ -2194,17 +2232,18 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 progress_stream=progress_stream,
             )
 
-        with (
-            mock.patch("docmason.cli.prepare_workspace", side_effect=cli_prepare),
-            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
-        ):
-            stdout_buffer = io.StringIO()
-            stderr_buffer = io.StringIO()
+        with self.neutral_host_execution_context():
             with (
-                contextlib.redirect_stdout(stdout_buffer),
-                contextlib.redirect_stderr(stderr_buffer),
+                mock.patch("docmason.cli.prepare_workspace", side_effect=cli_prepare),
+                mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
             ):
-                exit_code = main(["prepare", "--json", "--yes"])
+                stdout_buffer = io.StringIO()
+                stderr_buffer = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(stdout_buffer),
+                    contextlib.redirect_stderr(stderr_buffer),
+                ):
+                    exit_code = main(["prepare", "--json", "--yes"])
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(stdout_buffer.getvalue())
@@ -2393,7 +2432,8 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         source_file = workspace.source_dir / "example.pdf"
         source_file.write_text("pdf placeholder\n", encoding="utf-8")
 
-        foundation = status_workspace(workspace, editable_install_probe=self.missing_probe)
+        with self.neutral_host_execution_context():
+            foundation = status_workspace(workspace, editable_install_probe=self.missing_probe)
         self.assertEqual(foundation.exit_code, 1)
         self.assertEqual(foundation.payload["stage"], "foundation-only")
         self.assertEqual(
@@ -2402,7 +2442,8 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
 
         self.seed_self_contained_bootstrap_state(workspace, package_manager="uv")
-        bootstrapped = status_workspace(workspace, editable_install_probe=self.ready_probe)
+        with self.neutral_host_execution_context():
+            bootstrapped = status_workspace(workspace, editable_install_probe=self.ready_probe)
         self.assertEqual(bootstrapped.exit_code, 0)
         self.assertEqual(bootstrapped.payload["stage"], "workspace-bootstrapped")
         self.assertEqual(bootstrapped.payload["bootstrap_state"]["reason"], "cached-ready")
