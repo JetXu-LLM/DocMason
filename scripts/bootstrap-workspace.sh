@@ -108,10 +108,18 @@ emit_simple_action_required() {
 }
 
 python_is_supported() {
+  python_meets_minimum_version "$1" "3" "11" "30"
+}
+
+python_meets_minimum_version() {
   local candidate="$1"
+  local minimum_major="$2"
+  local minimum_minor="$3"
+  local timeout_ticks="$4"
   local first_line=""
   local probe_pid=""
   local ticks=0
+  local version_probe=""
 
   if [[ ! -x "$candidate" ]]; then
     return 1
@@ -123,11 +131,12 @@ python_is_supported() {
     return 1
   fi
 
-  "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+  version_probe="import sys; raise SystemExit(0 if sys.version_info >= (${minimum_major}, ${minimum_minor}) else 1)"
+  "$candidate" -c "$version_probe" \
     >/dev/null 2>&1 &
   probe_pid="$!"
   while kill -0 "$probe_pid" >/dev/null 2>&1; do
-    if (( ticks >= 30 )); then
+    if (( ticks >= timeout_ticks )); then
       pkill -P "$probe_pid" >/dev/null 2>&1 || true
       kill "$probe_pid" >/dev/null 2>&1 || true
       sleep 0.1
@@ -140,6 +149,10 @@ python_is_supported() {
     ticks=$((ticks + 1))
   done
   wait "$probe_pid" >/dev/null 2>&1
+}
+
+host_context_python_is_supported() {
+  python_meets_minimum_version "$1" "3" "9" "20"
 }
 
 launch_prepare() {
@@ -160,6 +173,34 @@ find_repo_local_bootstrap_python() {
   local candidate
   for candidate in "${candidates[@]}"; do
     if [[ -x "$candidate" ]] && python_is_supported "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_host_context_helper_python() {
+  local candidates=()
+  local candidate=""
+  local shared_name=""
+
+  if [[ -n "${DOCMASON_HOST_CONTEXT_PYTHON:-}" ]]; then
+    candidates+=("${DOCMASON_HOST_CONTEXT_PYTHON}")
+  fi
+  candidates+=(
+    "$ROOT/.docmason/toolchain/python/current/bin/python3.13"
+    "$ROOT/.docmason/toolchain/bootstrap/venv/bin/python"
+  )
+  for shared_name in python3.13 python3.12 python3.11 python3.10 python3.9 python3 python; do
+    candidate="$(command -v "$shared_name" 2>/dev/null || true)"
+    if [[ -n "$candidate" ]]; then
+      candidates+=("$candidate")
+    fi
+  done
+
+  for candidate in "${candidates[@]}"; do
+    if host_context_python_is_supported "$candidate"; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -279,13 +320,7 @@ load_host_execution_context() {
   CONTEXT_SOURCE="unknown"
 
   if [[ -f "$HOST_CONTEXT_HELPER" ]]; then
-    if [[ -n "${DOCMASON_HOST_CONTEXT_PYTHON:-}" ]]; then
-      helper_python="${DOCMASON_HOST_CONTEXT_PYTHON}"
-    elif command -v python3 >/dev/null 2>&1; then
-      helper_python="$(command -v python3)"
-    elif command -v python >/dev/null 2>&1; then
-      helper_python="$(command -v python)"
-    fi
+    helper_python="$(find_host_context_helper_python || true)"
     if [[ -n "$helper_python" ]]; then
       while IFS= read -r shell_line; do
         eval "export $shell_line"

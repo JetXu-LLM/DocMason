@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache-seconds",
         type=int,
-        default=21600,
+        default=7200,
         help="Suggested badge cache TTL in seconds.",
     )
     return parser
