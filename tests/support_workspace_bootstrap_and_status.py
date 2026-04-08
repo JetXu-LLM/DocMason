@@ -704,12 +704,21 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         fake_bin_dir.mkdir(parents=True, exist_ok=True)
         (fake_bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
         (fake_bin_dir / "uname").chmod(0o755)
-        (fake_bin_dir / "python3").write_text(
-            "#!/bin/sh\n"
-            "sleep 10\n",
-            encoding="utf-8",
-        )
-        (fake_bin_dir / "python3").chmod(0o755)
+        for helper_name in (
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3.10",
+            "python3.9",
+            "python3",
+            "python",
+        ):
+            (fake_bin_dir / helper_name).write_text(
+                "#!/bin/sh\n"
+                "sleep 10\n",
+                encoding="utf-8",
+            )
+            (fake_bin_dir / helper_name).chmod(0o755)
 
         with tempfile.TemporaryDirectory() as home_name:
             home = Path(home_name)
