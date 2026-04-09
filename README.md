@@ -77,7 +77,7 @@ Getting started requires zero developer experience. Just drop your files and let
   <img alt="Watch on YouTube" src="https://img.shields.io/badge/▶️_Click_to_Watch_the_3--min_Tutorial-0D3A69?style=for-the-badge&logo=youtube&logoColor=white">
 </a>
 
-<br><br>
+<br>
 
 **Five steps from download to your first traceable answer — no developer experience required.**
 
