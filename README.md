@@ -67,6 +67,9 @@ Getting started requires zero developer experience. Just drop your files and let
 
 ## Getting Started on macOS
 
+**📺 Prefer a visual guide? Watch the 3-minute full setup tutorial:**
+[![DocMason Setup Guide](https://img.youtube.com/vi/jWRtr70Rvug/maxresdefault.jpg)](https://youtu.be/jWRtr70Rvug)
+
 **Five steps from download to your first traceable answer — no developer experience required.**
 
 **1. Download, unzip, and drop in your files**
