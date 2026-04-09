@@ -74,7 +74,7 @@ Getting started requires zero developer experience. Just drop your files and let
 </a>
 <br>
 <a href="https://youtu.be/jWRtr70Rvug">
-  <img alt="Watch on YouTube" src="https://img.shields.io/badge/▶️_Click_to_Watch_the_3--min_Tutorial-FF0000?style=for-the-badge&logo=youtube&logoColor=white">
+  <img alt="Watch on YouTube" src="https://img.shields.io/badge/▶️_Click_to_Watch_the_3--min_Tutorial-0D3A69?style=for-the-badge&logo=youtube&logoColor=white">
 </a>
 
 <br><br>
