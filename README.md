@@ -21,7 +21,7 @@
     </a>
   </p>
   
-  <p><sub>Already paying for ChatGPT? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included. Turn that unused capacity into a local Second Brain. Watch the <a href="https://youtu.be/Sq3a5qxsLwM"><b>▶️ video demo</b></a> to see how DocMason cross-references complex office files (decks, spreadsheets, memos, emails). Zero-to-working in minutes.</sub></p>
+  <p><sub>Already paying for ChatGPT? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included. Turn that unused capacity into a local Second Brain. Watch the <a href="https://youtu.be/Sq3a5qxsLwM"><b>▶️ video demo</b></a> to see how DocMason cross-references complex office files (decks, spreadsheets, memos, emails). Get zero-to-working in minutes with our <a href="https://www.youtube.com/watch?v=jWRtr70Rvug"><b>▶️ 3-min setup video</b></a>.</sub></p>
 </div>
 
 Most workspace AI tools flatten your complex office documents into a single, unstructured text blob. They might summarize a file or retrieve a stray quote, but once your research gets complex, the illusion breaks. You lose the tables, the slide layouts, the hidden notes—and it becomes impossible to verify where the AI's answer actually came from.
