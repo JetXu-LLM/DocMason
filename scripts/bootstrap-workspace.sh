@@ -347,42 +347,78 @@ workspace_runtime_ready() {
   [[ -x "$ROOT/.venv/bin/python" && -f "$ROOT/runtime/bootstrap_state.json" ]]
 }
 
-validated_soffice_binary() {
-  local candidate="$1"
-  local output_path=""
-  local probe_pid=""
-  local ticks=0
+probe_libreoffice_validation() {
+  local probe_python=""
+  local shell_line=""
+  local candidate=""
 
-  [[ -x "$candidate" ]] || return 1
-  output_path="$(mktemp "${TMPDIR:-/tmp}/docmason-soffice-version.XXXXXX")" || return 1
+  LIBREOFFICE_BINARY=""
+  LIBREOFFICE_CANDIDATE_BINARY=""
+  LIBREOFFICE_VALIDATION_DETAIL=""
+  LIBREOFFICE_PROBE_CONTRACT=""
+  LIBREOFFICE_DETECTED_BUT_UNUSABLE="0"
+  LIBREOFFICE_VALIDATION_UNAVAILABLE="0"
 
-  "$candidate" --version >"$output_path" 2>&1 &
-  probe_pid="$!"
-  while kill -0 "$probe_pid" >/dev/null 2>&1; do
-    if (( ticks >= 150 )); then
-      pkill -P "$probe_pid" >/dev/null 2>&1 || true
-      kill "$probe_pid" >/dev/null 2>&1 || true
-      sleep 0.1
-      pkill -P "$probe_pid" >/dev/null 2>&1 || true
-      kill -9 "$probe_pid" >/dev/null 2>&1 || true
-      wait "$probe_pid" >/dev/null 2>&1 || true
-      rm -f "$output_path"
-      return 1
-    fi
-    sleep 0.1
-    ticks=$((ticks + 1))
-  done
-  if ! wait "$probe_pid" >/dev/null 2>&1; then
-    rm -f "$output_path"
-    return 1
-  fi
-  if grep -qi "libreoffice" "$output_path"; then
-    rm -f "$output_path"
-    printf '%s\n' "$candidate"
+  probe_python="$(find_host_context_helper_python || true)"
+  if [[ -z "$probe_python" ]]; then
+    for candidate in \
+      "$(command -v soffice 2>/dev/null || true)" \
+      "$(command -v libreoffice 2>/dev/null || true)" \
+      "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    do
+      [[ -n "$candidate" ]] || continue
+      if [[ -e "$candidate" ]]; then
+        LIBREOFFICE_CANDIDATE_BINARY="$candidate"
+        LIBREOFFICE_VALIDATION_UNAVAILABLE="1"
+        break
+      fi
+    done
+    LIBREOFFICE_VALIDATION_DETAIL="No supported Python runtime was available to validate LibreOffice with the current smoke-probe contract."
     return 0
   fi
-  rm -f "$output_path"
-  return 1
+
+  while IFS= read -r shell_line; do
+    eval "$shell_line"
+  done < <(
+    ROOT="$ROOT" PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$probe_python" - <<'PY'
+import os
+import shlex
+import sys
+
+root = os.environ["ROOT"]
+sys.path.insert(0, os.path.join(root, "src"))
+
+payload = {
+    "ready": False,
+    "binary": None,
+    "detail": "",
+    "probe_contract": "",
+    "candidate_failures": [],
+}
+try:
+    from docmason.libreoffice_runtime import LIBREOFFICE_PROBE_CONTRACT, validate_soffice_binary
+
+    payload = validate_soffice_binary(None)
+    if not payload.get("probe_contract"):
+        payload["probe_contract"] = LIBREOFFICE_PROBE_CONTRACT
+except Exception as exc:  # pragma: no cover - launcher fallback path
+    payload["detail"] = f"LibreOffice validation probe failed: {exc}"
+
+
+def emit(name: str, value: object) -> None:
+    text = "" if value is None else str(value)
+    print(f"{name}={shlex.quote(text)}")
+
+
+binary = payload.get("binary")
+ready = bool(payload.get("ready"))
+emit("LIBREOFFICE_BINARY", binary if ready else "")
+emit("LIBREOFFICE_CANDIDATE_BINARY", binary or "")
+emit("LIBREOFFICE_VALIDATION_DETAIL", payload.get("detail") or "")
+emit("LIBREOFFICE_PROBE_CONTRACT", payload.get("probe_contract") or "")
+emit("LIBREOFFICE_DETECTED_BUT_UNUSABLE", "1" if (not ready and binary) else "0")
+PY
+  )
 }
 
 scan_office_renderer_requirement() {
@@ -411,16 +447,21 @@ scan_office_renderer_requirement() {
 
 probe_machine_baseline() {
   local platform_name=""
-  local soffice_binary=""
   local missing=()
-  local candidate=""
+  local baseline_gap_detail=""
 
   MACHINE_BASELINE_APPLICABLE=0
   MACHINE_BASELINE_READY=1
   MACHINE_BASELINE_STATUS="not-applicable"
   MACHINE_BASELINE_DETAIL="Native macOS machine-baseline policy is not active for this host surface."
+  MACHINE_BASELINE_HOST_ACCESS_REASON=""
   BREW_BINARY=""
   LIBREOFFICE_BINARY=""
+  LIBREOFFICE_CANDIDATE_BINARY=""
+  LIBREOFFICE_VALIDATION_DETAIL=""
+  LIBREOFFICE_PROBE_CONTRACT=""
+  LIBREOFFICE_DETECTED_BUT_UNUSABLE="0"
+  LIBREOFFICE_VALIDATION_UNAVAILABLE="0"
   OFFICE_RENDERER_REQUIRED=0
   MACHINE_BASELINE_MISSING_COMPONENTS=()
 
@@ -434,19 +475,16 @@ probe_machine_baseline() {
   if command -v brew >/dev/null 2>&1; then
     BREW_BINARY="$(command -v brew)"
   fi
-  for candidate in \
-    "$(command -v soffice 2>/dev/null || true)" \
-    "$(command -v libreoffice 2>/dev/null || true)" \
-    "/Applications/LibreOffice.app/Contents/MacOS/soffice"
-  do
-    [[ -n "$candidate" ]] || continue
-    soffice_binary="$(validated_soffice_binary "$candidate" || true)"
-    [[ -n "$soffice_binary" ]] && break
-  done
-  LIBREOFFICE_BINARY="$soffice_binary"
+  probe_libreoffice_validation
 
   if [[ "$OFFICE_RENDERER_REQUIRED" == "1" && -z "$LIBREOFFICE_BINARY" ]]; then
-    missing+=("LibreOffice")
+    if [[ "$LIBREOFFICE_VALIDATION_UNAVAILABLE" == "1" ]]; then
+      missing+=("LibreOffice")
+    elif [[ "$LIBREOFFICE_DETECTED_BUT_UNUSABLE" == "1" ]]; then
+      missing+=("LibreOffice (detected but unusable)")
+    else
+      missing+=("LibreOffice")
+    fi
   fi
 
   if (( ${#missing[@]} == 0 )); then
@@ -464,15 +502,39 @@ probe_machine_baseline() {
 
   MACHINE_BASELINE_READY=0
   MACHINE_BASELINE_MISSING_COMPONENTS=("${missing[@]}")
+  if [[ "$LIBREOFFICE_VALIDATION_UNAVAILABLE" == "1" ]]; then
+    baseline_gap_detail="Native Codex machine baseline detected LibreOffice"
+    if [[ -n "$LIBREOFFICE_CANDIDATE_BINARY" ]]; then
+      baseline_gap_detail="$baseline_gap_detail at \`$LIBREOFFICE_CANDIDATE_BINARY\`"
+    fi
+    baseline_gap_detail="$baseline_gap_detail, but the current bootstrap path cannot execute the required smoke probe yet because no supported helper Python or bootstrap runtime is available."
+    if [[ -n "$LIBREOFFICE_VALIDATION_DETAIL" ]]; then
+      baseline_gap_detail="$baseline_gap_detail Validation detail: $LIBREOFFICE_VALIDATION_DETAIL"
+    fi
+    MACHINE_BASELINE_HOST_ACCESS_REASON="Native Codex machine baseline cannot yet validate LibreOffice for the current Office corpus because no supported helper Python or bootstrap runtime is available."
+  elif [[ "$LIBREOFFICE_DETECTED_BUT_UNUSABLE" == "1" ]]; then
+    baseline_gap_detail="Native Codex machine baseline detected LibreOffice"
+    if [[ -n "$LIBREOFFICE_CANDIDATE_BINARY" ]]; then
+      baseline_gap_detail="$baseline_gap_detail at \`$LIBREOFFICE_CANDIDATE_BINARY\`"
+    fi
+    baseline_gap_detail="$baseline_gap_detail, but it is not currently usable for the current Office corpus."
+    if [[ -n "$LIBREOFFICE_VALIDATION_DETAIL" ]]; then
+      baseline_gap_detail="$baseline_gap_detail Validation detail: $LIBREOFFICE_VALIDATION_DETAIL"
+    fi
+    MACHINE_BASELINE_HOST_ACCESS_REASON="Native Codex machine baseline detected LibreOffice, but it is not currently usable for the current Office corpus and needs machine-level repair."
+  else
+    baseline_gap_detail="Native Codex machine baseline is missing ${missing[*]} for the current Office corpus."
+    MACHINE_BASELINE_HOST_ACCESS_REASON="Native Codex machine baseline is missing ${missing[*]} for the current Office corpus and needs machine-level installation."
+  fi
   if [[ "$FULL_MACHINE_ACCESS" == "true" ]]; then
     MACHINE_BASELINE_STATUS="install-required"
-    MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]} for the current Office corpus."
+    MACHINE_BASELINE_DETAIL="$baseline_gap_detail"
   else
     MACHINE_BASELINE_STATUS="host-access-upgrade-required"
     if [[ "$PERMISSION_MODE" == "default-permissions" ]]; then
-      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]} for the current Office corpus, and the current thread is still in \`Default permissions\`."
+      MACHINE_BASELINE_DETAIL="$baseline_gap_detail The current thread is still in \`Default permissions\`."
     else
-      MACHINE_BASELINE_DETAIL="Native Codex machine baseline is missing ${missing[*]} for the current Office corpus, and the current turn does not expose \`Full access\` yet."
+      MACHINE_BASELINE_DETAIL="$baseline_gap_detail The current turn does not expose \`Full access\` yet."
     fi
   fi
 }
@@ -507,6 +569,20 @@ emit_host_access_upgrade() {
       printf 'false,\n'
     fi
     printf '  "machine_baseline_status": "%s",\n' "$(json_escape "$MACHINE_BASELINE_STATUS")"
+    printf '  "libreoffice_candidate_binary": '
+    json_string_or_null "$LIBREOFFICE_CANDIDATE_BINARY"
+    printf ',\n'
+    printf '  "libreoffice_validation_detail": '
+    json_string_or_null "$LIBREOFFICE_VALIDATION_DETAIL"
+    printf ',\n'
+    printf '  "libreoffice_probe_contract": '
+    json_string_or_null "$LIBREOFFICE_PROBE_CONTRACT"
+    printf ',\n'
+    if [[ "$LIBREOFFICE_DETECTED_BUT_UNUSABLE" == "1" ]]; then
+      printf '  "libreoffice_detected_but_unusable": true,\n'
+    else
+      printf '  "libreoffice_detected_but_unusable": false,\n'
+    fi
     printf '  "bootstrap_source": '
     json_string_or_null "$BOOTSTRAP_SOURCE"
     printf ',\n'
@@ -584,7 +660,7 @@ probe_machine_baseline
 HOST_ACCESS_REASONS=()
 if [[ "$MACHINE_BASELINE_APPLICABLE" == "1" && "$MACHINE_BASELINE_READY" != "1" && "$FULL_MACHINE_ACCESS" != "true" ]]; then
   HOST_ACCESS_REASONS+=(
-    "Native Codex machine baseline is missing ${MACHINE_BASELINE_MISSING_COMPONENTS[*]} and needs machine-level installation."
+    "${MACHINE_BASELINE_HOST_ACCESS_REASON:-Native Codex machine baseline is not ready and needs machine-level repair.}"
   )
 fi
 if [[ "$WORKSPACE_RUNTIME_READY" != "1" ]]; then

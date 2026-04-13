@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import shutil
-import subprocess
 import uuid
 from collections import Counter
 from collections.abc import Iterable
@@ -16,6 +13,10 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
+from .libreoffice_runtime import (
+    LIBREOFFICE_PROBE_CONTRACT,
+    validate_soffice_binary,
+)
 from .project import (
     WorkspacePaths,
     relative_paths,
@@ -27,7 +28,6 @@ from .project import (
 )
 
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z]+|[\u4e00-\u9fff]+")
-_SOFFICE_VERSION_TIMEOUT_SECONDS = 15.0
 
 
 def utc_now() -> str:
@@ -67,106 +67,6 @@ def pdf_renderer_snapshot() -> dict[str, Any]:
     return {"ready": ready, "detail": detail, "missing": missing}
 
 
-def validate_soffice_binary(candidate: str | None) -> dict[str, Any]:
-    """Validate that a detected command is a usable LibreOffice renderer."""
-    if not candidate:
-        return {
-            "ready": False,
-            "binary": None,
-            "version": None,
-            "detail": "No LibreOffice command candidate was detected.",
-        }
-    binary = Path(candidate)
-    if not binary.exists():
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": "The detected LibreOffice command path does not exist.",
-        }
-    if not os.access(binary, os.X_OK):
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": "The detected LibreOffice command path is not executable.",
-        }
-    try:
-        completed = subprocess.run(
-            [str(binary), "--version"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_SOFFICE_VERSION_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": (
-                "The detected LibreOffice command timed out during the version probe "
-                f"after {_SOFFICE_VERSION_TIMEOUT_SECONDS:.1f}s."
-            ),
-        }
-    except OSError as exc:
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": f"The detected LibreOffice command failed to execute: {exc}.",
-        }
-    output = (completed.stdout or completed.stderr or "").strip()
-    if completed.returncode != 0:
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": (
-                "The detected LibreOffice command failed the version probe: "
-                f"{output or f'exit code {completed.returncode}'}."
-            ),
-        }
-    if "libreoffice" not in output.lower():
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": output or None,
-            "detail": "The detected command did not identify itself as LibreOffice.",
-        }
-    return {
-        "ready": True,
-        "binary": str(binary),
-        "version": output or None,
-        "detail": "Validated LibreOffice renderer capability.",
-    }
-
-
-def discover_soffice_binary() -> str | None:
-    """Locate the most likely LibreOffice command path without trusting it yet."""
-    for candidate in (
-        shutil.which("soffice"),
-        shutil.which("libreoffice"),
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    ):
-        if candidate and Path(candidate).exists():
-            return str(Path(candidate))
-    return None
-
-
-def find_soffice_binary() -> str | None:
-    """Resolve a validated LibreOffice `soffice` executable when one exists."""
-    for candidate in (
-        shutil.which("soffice"),
-        shutil.which("libreoffice"),
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    ):
-        validation = validate_soffice_binary(candidate)
-        if validation["ready"]:
-            return str(validation["binary"])
-    return None
-
-
 def office_source_documents(paths: WorkspacePaths) -> list[Path]:
     """Return Office documents that require the LibreOffice rendering path."""
     return [
@@ -179,15 +79,37 @@ def office_source_documents(paths: WorkspacePaths) -> list[Path]:
 
 def office_renderer_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     """Describe Office renderer readiness for the current workspace."""
-    discovery = discover_soffice_binary()
-    validation = validate_soffice_binary(discovery)
-    soffice_binary = str(validation["binary"]) if validation["ready"] else None
     office_sources = office_source_documents(paths)
     required = bool(office_sources)
-    ready = soffice_binary is not None
     if not required:
         detail = "LibreOffice is optional until PowerPoint, Word, or Excel sources are present."
-    elif ready:
+        return {
+            "ready": False,
+            "required": False,
+            "binary": None,
+            "candidate_binary": None,
+            "validation_detail": detail,
+            "validated": False,
+            "version": None,
+            "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "validation_launcher": None,
+            "detected_but_unusable": False,
+            "failed_candidates": [],
+            "detail": detail,
+            "office_sources": [],
+        }
+
+    validation = validate_soffice_binary(None)
+    soffice_binary = str(validation["binary"]) if validation["ready"] else None
+    ready = soffice_binary is not None
+    candidate_binary = validation.get("binary") if not validation["ready"] else soffice_binary
+    failed_candidates = [
+        attempt.get("binary")
+        for attempt in list(validation.get("candidate_failures") or [])
+        if isinstance(attempt.get("binary"), str) and attempt.get("binary")
+    ]
+    detected_but_unusable = bool(required and not ready and candidate_binary)
+    if ready:
         version_suffix = (
             f" ({validation['version']})"
             if isinstance(validation.get("version"), str) and validation["version"]
@@ -195,12 +117,11 @@ def office_renderer_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
         )
         detail = f"LibreOffice rendering is available at {soffice_binary}{version_suffix}."
     else:
-        candidate_path = validation.get("binary") or discovery
-        if candidate_path:
+        if candidate_binary:
             detail = (
                 "LibreOffice `soffice` is required to render PowerPoint, Word, and Excel "
-                f"sources, but the detected candidate `{candidate_path}` is not a validated "
-                f"LibreOffice install. {validation['detail']}"
+                f"sources, but the detected candidate `{candidate_binary}` is not currently "
+                f"usable. {validation['detail']}"
             )
         else:
             detail = (
@@ -211,10 +132,14 @@ def office_renderer_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
         "ready": ready,
         "required": required,
         "binary": soffice_binary,
-        "candidate_binary": validation.get("binary") or discovery,
+        "candidate_binary": candidate_binary,
         "validation_detail": validation["detail"],
         "validated": bool(validation["ready"]),
         "version": validation.get("version"),
+        "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+        "validation_launcher": validation.get("launcher"),
+        "detected_but_unusable": detected_but_unusable,
+        "failed_candidates": failed_candidates,
         "detail": detail,
         "office_sources": relative_paths(paths, office_sources),
     }

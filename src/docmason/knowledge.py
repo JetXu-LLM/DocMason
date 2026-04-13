@@ -68,6 +68,11 @@ from .interaction import (
     mark_promoted_interaction_entries,
     repair_interaction_memory_related_sources,
 )
+from .libreoffice_runtime import (
+    find_soffice_binary,
+    run_office_conversion,
+    validate_soffice_binary,
+)
 from .project import (
     WorkspacePaths,
     isoformat_timestamp,
@@ -106,6 +111,7 @@ from .versioning import (
     publish_staging_snapshot,
     publish_storage_summary,
 )
+from .workspace_probe import office_renderer_snapshot
 
 PLACEHOLDER_TERMS = ("todo", "tbd", "placeholder", "lorem ipsum", "fill in")
 DOCX_ORDERED_STEP_PATTERN = re.compile(r"^\s*(\d+)(?:[.)-])\s+")
@@ -143,7 +149,6 @@ BENIGN_THIRD_PARTY_DIAGNOSTIC_SUBSTRINGS = (
     "cannot parse header or footer so it will be ignored",
     "ignoring wrong pointing object",
 )
-_SOFFICE_VERSION_TIMEOUT_SECONDS = 15.0
 
 
 def utc_now() -> str:
@@ -305,160 +310,6 @@ def pdf_renderer_snapshot() -> dict[str, Any]:
     if missing:
         detail = "Missing Python packages for PDF rendering/extraction: " + ", ".join(missing)
     return {"ready": ready, "detail": detail, "missing": missing}
-
-
-def find_soffice_binary() -> str | None:
-    """Resolve a validated LibreOffice soffice executable from common locations."""
-    for candidate in (
-        shutil.which("soffice"),
-        shutil.which("libreoffice"),
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    ):
-        validation = validate_soffice_binary(candidate)
-        if validation["ready"]:
-            return str(validation["binary"])
-    return None
-
-
-def office_source_documents(paths: WorkspacePaths) -> list[Path]:
-    """Return Office documents that require the LibreOffice rendering path."""
-    return [
-        path
-        for path in supported_source_documents(paths)
-        if (definition := source_type_definition_for_path(path)) is not None
-        and definition.requires_office_renderer
-    ]
-
-
-def office_renderer_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
-    """Describe Office renderer readiness for the current workspace."""
-    discovery = discover_soffice_binary()
-    validation = validate_soffice_binary(discovery)
-    soffice_binary = str(validation["binary"]) if validation["ready"] else None
-    office_sources = office_source_documents(paths)
-    required = bool(office_sources)
-    ready = soffice_binary is not None
-    if not required:
-        detail = "LibreOffice is optional until PowerPoint, Word, or Excel sources are present."
-    elif ready:
-        version_suffix = (
-            f" ({validation['version']})"
-            if isinstance(validation.get("version"), str) and validation["version"]
-            else ""
-        )
-        detail = f"LibreOffice rendering is available at {soffice_binary}{version_suffix}."
-    else:
-        candidate_path = validation.get("binary") or discovery
-        if candidate_path:
-            detail = (
-                "LibreOffice `soffice` is required to render PowerPoint, Word, and Excel "
-                f"sources, but the detected candidate `{candidate_path}` is not a validated "
-                f"LibreOffice install. {validation['detail']}"
-            )
-        else:
-            detail = (
-                "LibreOffice `soffice` is required to render PowerPoint, Word, and Excel "
-                "sources, but it is not available."
-            )
-    return {
-        "ready": ready,
-        "required": required,
-        "binary": soffice_binary,
-        "candidate_binary": validation.get("binary") or discovery,
-        "validation_detail": validation["detail"],
-        "validated": bool(validation["ready"]),
-        "version": validation.get("version"),
-        "detail": detail,
-        "office_sources": relative_paths(paths, office_sources),
-    }
-
-
-def discover_soffice_binary() -> str | None:
-    """Locate the most likely LibreOffice command path without trusting it yet."""
-    for candidate in (
-        shutil.which("soffice"),
-        shutil.which("libreoffice"),
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    ):
-        if candidate and Path(candidate).exists():
-            return str(Path(candidate))
-    return None
-
-
-def validate_soffice_binary(candidate: str | None) -> dict[str, Any]:
-    """Validate that a detected command is a usable LibreOffice renderer."""
-    if not candidate:
-        return {
-            "ready": False,
-            "binary": None,
-            "version": None,
-            "detail": "No LibreOffice command candidate was detected.",
-        }
-    binary = Path(candidate)
-    if not binary.exists():
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": "The detected LibreOffice command path does not exist.",
-        }
-    if not os.access(binary, os.X_OK):
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": "The detected LibreOffice command path is not executable.",
-        }
-    try:
-        completed = subprocess.run(
-            [str(binary), "--version"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_SOFFICE_VERSION_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": (
-                "The detected LibreOffice command timed out during the version probe "
-                f"after {_SOFFICE_VERSION_TIMEOUT_SECONDS:.1f}s."
-            ),
-        }
-    except OSError as exc:
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": f"The detected LibreOffice command failed to execute: {exc}.",
-        }
-    output = (completed.stdout or completed.stderr or "").strip()
-    if completed.returncode != 0:
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": None,
-            "detail": (
-                "The detected LibreOffice command failed the version probe: "
-                f"{output or f'exit code {completed.returncode}'}."
-            ),
-        }
-    normalized_output = output.lower()
-    if "libreoffice" not in normalized_output:
-        return {
-            "ready": False,
-            "binary": str(binary),
-            "version": output or None,
-            "detail": "The detected command did not identify itself as LibreOffice.",
-        }
-    return {
-        "ready": True,
-        "binary": str(binary),
-        "version": output or None,
-        "detail": "Validated LibreOffice renderer capability.",
-    }
 
 
 def ensure_directory(path: Path) -> None:
@@ -1100,35 +951,32 @@ def convert_office_to_format(
 ) -> tuple[Path | None, list[dict[str, str]]]:
     """Convert an Office document to another format via LibreOffice."""
     failures: list[dict[str, str]] = []
-    command = [
+    conversion = run_office_conversion(
+        source_path,
+        output_dir,
         soffice_binary,
-        "--headless",
-        "--norestore",
-        "--nolockcheck",
-        "--nodefault",
-        "--convert-to",
-        target_format,
-        "--outdir",
-        str(output_dir),
-        str(source_path),
-    ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
-        failures.append({"stage": "convert-office-to-pdf", "detail": detail})
-        return None, failures
-
-    extension = target_format.split(":", 1)[0].lower()
-    converted = sorted(output_dir.glob(f"*.{extension}"))
-    if not converted:
+        target_format=target_format,
+    )
+    if not conversion["success"]:
+        extension = target_format.split(":", 1)[0].lower()
         failures.append(
             {
                 "stage": f"convert-office-to-{extension}",
-                "detail": f"LibreOffice completed without producing a .{extension} output.",
+                "detail": f"LibreOffice conversion failed: {conversion['cause']}.",
             }
         )
         return None, failures
-    return converted[0], failures
+    converted = conversion.get("output_path")
+    if not isinstance(converted, Path):
+        extension = target_format.split(":", 1)[0].lower()
+        failures.append(
+            {
+                "stage": f"convert-office-to-{extension}",
+                "detail": f"LibreOffice conversion completed without producing a .{extension} output.",
+            }
+        )
+        return None, failures
+    return converted, failures
 
 
 def normalize_legacy_office_source(
@@ -2674,10 +2522,18 @@ def build_email_source_tree(
         if previous_source_dir is not None
         else {}
     )
+    previous_contract_complete = bool(
+        previous_source_dir is not None
+        and source_tree_artifact_contract_complete(
+            previous_source_dir,
+            document_type="email",
+        )
+    )
     if (
         previous_source_dir is not None
         and source_entry.get("change_classification") == "unchanged"
         and previous_manifest.get("source_fingerprint") == source_entry.get("source_fingerprint")
+        and previous_contract_complete
     ):
         _copy_reused_source_tree(
             paths,
@@ -2812,10 +2668,18 @@ def build_email_source_tree(
                         lineage_segments=combined_segments,
                     )
                 else:
+                    child_previous_contract_complete = bool(
+                        child_previous_dir is not None
+                        and source_tree_artifact_contract_complete(
+                            child_previous_dir,
+                            document_type=str(child_document_type or "unknown"),
+                        )
+                    )
                     if (
                         child_previous_dir is not None
                         and child_previous_manifest.get("source_fingerprint")
                         == child_entry["source_fingerprint"]
+                        and child_previous_contract_complete
                     ):
                         child_entry["change_traits"] = append_unique_strings(
                             [
@@ -3369,6 +3233,43 @@ def source_artifact_contract_complete(
     return True
 
 
+def source_tree_artifact_contract_complete(
+    source_dir: Path,
+    *,
+    document_type: str,
+    seen_source_ids: set[str] | None = None,
+) -> bool:
+    """Return whether a source directory and its derived source tree satisfy the contract."""
+    source_manifest = read_json(source_dir / "source_manifest.json")
+    if not source_manifest:
+        return False
+    if not source_artifact_contract_complete(source_dir, document_type=document_type):
+        return False
+    source_key = str(source_manifest.get("source_id") or source_dir.resolve())
+    active_seen_source_ids = set(seen_source_ids or ())
+    if source_key in active_seen_source_ids:
+        return True
+    active_seen_source_ids.add(source_key)
+    child_source_ids = source_manifest.get("child_source_ids", [])
+    if not isinstance(child_source_ids, list):
+        return False
+    for child_source_id in child_source_ids:
+        if not isinstance(child_source_id, str) or not child_source_id:
+            return False
+        child_source_dir = source_dir.parent / child_source_id
+        if not child_source_dir.exists():
+            return False
+        child_manifest = read_json(child_source_dir / "source_manifest.json")
+        child_document_type = str(child_manifest.get("document_type") or "unknown")
+        if not source_tree_artifact_contract_complete(
+            child_source_dir,
+            document_type=child_document_type,
+            seen_source_ids=active_seen_source_ids,
+        ):
+            return False
+    return True
+
+
 def staging_source_artifacts_complete(
     paths: WorkspacePaths,
     active_sources: list[dict[str, Any]],
@@ -3402,7 +3303,7 @@ def staging_incomplete_source_ids(
             complete = False
         else:
             source_manifest = read_json(source_dir / "source_manifest.json")
-            if not source_artifact_contract_complete(
+            if not source_tree_artifact_contract_complete(
                 source_dir,
                 document_type=str(source_manifest.get("document_type") or "unknown"),
             ):
@@ -3464,7 +3365,7 @@ def repair_staging_artifact_contract(
             or previous_manifest.get("document_type")
             or "unknown"
         )
-        if not source_artifact_contract_complete(
+        if not source_tree_artifact_contract_complete(
             previous_source_dir,
             document_type=document_type,
         ):
@@ -4666,7 +4567,7 @@ def build_staging_artifacts(
             reuse_previous_directory = False
         previous_contract_complete = bool(
             previous_source_dir is not None
-            and source_artifact_contract_complete(
+            and source_tree_artifact_contract_complete(
                 previous_source_dir,
                 document_type=str(source_entry.get("document_type") or "unknown"),
             )

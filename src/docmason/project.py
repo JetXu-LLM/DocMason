@@ -11,8 +11,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from .libreoffice_runtime import LIBREOFFICE_PROBE_CONTRACT
+
 MINIMUM_PYTHON = (3, 11)
-BOOTSTRAP_STATE_SCHEMA_VERSION = 5
+BOOTSTRAP_STATE_SCHEMA_VERSION = 6
 BOOTSTRAP_STATE_FULL_COMPAT_SCHEMA_FLOOR = 4
 MANUAL_WORKSPACE_RECOVERY_DOC = "docs/setup/manual-workspace-recovery.md"
 
@@ -1290,6 +1292,24 @@ def cached_bootstrap_readiness(
 
     if require_sync_capability:
         requirements = source_runtime_requirements(paths)
+        if requirements["requires_office_renderer"]:
+            probe_contract = str(state.get("office_probe_contract") or "")
+            if (
+                schema_version < BOOTSTRAP_STATE_SCHEMA_VERSION
+                or probe_contract != LIBREOFFICE_PROBE_CONTRACT
+            ):
+                return {
+                    "ready": False,
+                    "reason": "office-renderer-probe-contract-upgrade-required",
+                    "detail": (
+                        "The current source corpus needs the current LibreOffice smoke-probe "
+                        "contract before sync can trust cached readiness. Run `docmason "
+                        "prepare` to refresh the machine-baseline marker."
+                    ),
+                    "manual_recovery_doc": manual_doc,
+                    "state": state,
+                    "toolchain": toolchain,
+                }
         if requirements["requires_office_renderer"] and not bool(
             state.get("office_renderer_ready")
         ):
@@ -1353,6 +1373,7 @@ def bootstrap_state_summary(
         else False,
         "machine_baseline_status": state.get("machine_baseline_status") if state else None,
         "bootstrap_source": state.get("bootstrap_source") if state else None,
+        "office_probe_contract": state.get("office_probe_contract") if state else None,
         "host_access_required": bool(state.get("host_access_required")) if state else False,
         "host_access_guidance": state.get("host_access_guidance") if state else None,
         "host_access_reasons": (
@@ -1360,6 +1381,17 @@ def bootstrap_state_summary(
             if state and isinstance(state.get("host_access_reasons"), list)
             else []
         ),
+        "libreoffice_candidate_binary": (
+            state.get("libreoffice_candidate_binary") if state else None
+        ),
+        "libreoffice_validation_detail": (
+            state.get("libreoffice_validation_detail") if state else None
+        ),
+        "libreoffice_detected_but_unusable": bool(
+            state.get("libreoffice_detected_but_unusable")
+        )
+        if state
+        else False,
         "toolchain": dict(toolchain_value) if isinstance(toolchain_value, dict) else {},
         "manual_recovery_doc": readiness.get("manual_recovery_doc")
         or manual_workspace_recovery_doc(),

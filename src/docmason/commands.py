@@ -38,6 +38,7 @@ from .control_plane import (
     workspace_state_snapshot,
 )
 from .coordination import LeaseConflictError, workspace_lease
+from .libreoffice_runtime import validate_soffice_binary
 from .project import (
     BOOTSTRAP_STATE_SCHEMA_VERSION,
     MINIMUM_PYTHON,
@@ -78,7 +79,6 @@ from .workspace_probe import (
     office_renderer_snapshot,
     pdf_renderer_snapshot,
     preview_source_changes,
-    validate_soffice_binary,
 )
 
 READY = "ready"
@@ -1367,23 +1367,24 @@ def validation_command_status(validation_status: str) -> str:
 
 
 def office_renderer_next_step() -> str:
-    """Return the preferred next-step guidance for installing LibreOffice."""
+    """Return the preferred next-step guidance for installing or repairing LibreOffice."""
     if sys.platform == "darwin":
         if find_brew_binary():
             return (
-                "Run `docmason prepare --yes` to let the workspace install LibreOffice with "
-                "Homebrew, or install it yourself with `brew install --cask libreoffice-still`. "
-                f"You can also use the official macOS installer from {_LIBREOFFICE_DOWNLOAD_PAGE}, "
-                "then rerun `docmason doctor`."
+                "Run `docmason prepare --yes` to let the workspace install or repair "
+                "LibreOffice. If you need to do it manually, use `brew install --cask "
+                "libreoffice-still` or the official macOS installer from "
+                f"{_LIBREOFFICE_DOWNLOAD_PAGE}, then rerun `docmason doctor`."
             )
         return (
-            "Run `docmason prepare --yes` to let the workspace install LibreOffice through the "
-            f"official macOS installer path, or download it from {_LIBREOFFICE_DOWNLOAD_PAGE}. "
-            "On macOS, drag the app into `/Applications`; DocMason will detect the standard "
-            "`soffice` path there. Then rerun `docmason doctor`."
+            "Run `docmason prepare --yes` to let the workspace install or repair "
+            "LibreOffice through the official macOS installer path, or download it from "
+            f"{_LIBREOFFICE_DOWNLOAD_PAGE}. On macOS, drag the app into `/Applications`; "
+            "DocMason will detect the standard `soffice` path there. Then rerun "
+            "`docmason doctor`."
         )
     return (
-        "Install LibreOffice with your Linux distribution's package manager or from "
+        "Install or repair LibreOffice with your Linux distribution's package manager or from "
         f"{_LIBREOFFICE_DOWNLOAD_PAGE}, ensure `soffice` is on PATH, "
         "then rerun `docmason doctor`."
     )
@@ -1575,6 +1576,11 @@ def _machine_baseline_snapshot(
     brew_ready = bool(brew_binary)
     libreoffice_required = bool(office.get("required"))
     libreoffice_ready = bool(office.get("ready"))
+    libreoffice_binary = office.get("binary")
+    libreoffice_candidate_binary = office.get("candidate_binary") or libreoffice_binary
+    libreoffice_validation_detail = office.get("validation_detail")
+    libreoffice_probe_contract = office.get("probe_contract")
+    libreoffice_detected_but_unusable = bool(office.get("detected_but_unusable"))
     provider = str(host_execution.get("host_provider") or "unknown-agent")
     applicable = sys.platform == "darwin" and provider == "codex"
     if not applicable:
@@ -1587,7 +1593,11 @@ def _machine_baseline_snapshot(
             "brew_binary": brew_binary,
             "libreoffice_required": libreoffice_required,
             "libreoffice_ready": libreoffice_ready,
-            "libreoffice_binary": office.get("binary"),
+            "libreoffice_binary": libreoffice_binary,
+            "libreoffice_candidate_binary": libreoffice_candidate_binary,
+            "libreoffice_validation_detail": libreoffice_validation_detail,
+            "libreoffice_probe_contract": libreoffice_probe_contract,
+            "libreoffice_detected_but_unusable": libreoffice_detected_but_unusable,
             "host_access_required": False,
             "host_access_guidance": None,
             "host_access_reasons": [],
@@ -1618,7 +1628,11 @@ def _machine_baseline_snapshot(
             "brew_binary": brew_binary,
             "libreoffice_required": libreoffice_required,
             "libreoffice_ready": libreoffice_ready,
-            "libreoffice_binary": office.get("binary"),
+            "libreoffice_binary": libreoffice_binary,
+            "libreoffice_candidate_binary": libreoffice_candidate_binary,
+            "libreoffice_validation_detail": libreoffice_validation_detail,
+            "libreoffice_probe_contract": libreoffice_probe_contract,
+            "libreoffice_detected_but_unusable": libreoffice_detected_but_unusable,
             "host_access_required": False,
             "host_access_guidance": None,
             "host_access_reasons": [],
@@ -1626,6 +1640,36 @@ def _machine_baseline_snapshot(
         }
 
     missing_detail = ", ".join(missing_components)
+    if libreoffice_detected_but_unusable:
+        candidate_detail = (
+            f" at `{libreoffice_candidate_binary}`"
+            if isinstance(libreoffice_candidate_binary, str) and libreoffice_candidate_binary
+            else ""
+        )
+        validation_suffix = (
+            f" Validation detail: {libreoffice_validation_detail}"
+            if isinstance(libreoffice_validation_detail, str) and libreoffice_validation_detail
+            else ""
+        )
+        baseline_gap_detail = (
+            "Native Codex machine baseline detected LibreOffice"
+            f"{candidate_detail}, but it is not currently usable for the current Office corpus."
+            f"{validation_suffix}"
+        )
+        host_access_reason = (
+            "Native Codex machine baseline detected LibreOffice, but it is not currently "
+            "usable for the current Office corpus and needs machine-level repair."
+        )
+    else:
+        baseline_gap_detail = (
+            "Native Codex machine baseline is missing "
+            f"{missing_detail} for the current Office corpus."
+        )
+        host_access_reason = (
+            "Native Codex machine baseline is missing "
+            f"{missing_detail} for the current Office corpus and needs machine-level "
+            "installation."
+        )
     full_machine_access = bool(host_execution.get("full_machine_access"))
     permission_mode = str(host_execution.get("permission_mode") or "")
     if not full_machine_access:
@@ -1633,29 +1677,16 @@ def _machine_baseline_snapshot(
         status = "host-access-upgrade-required"
         if permission_mode == "default-permissions":
             detail = (
-                f"Native Codex machine baseline is missing {missing_detail} for the current "
-                "Office corpus, and the current thread is still in `Default permissions`."
+                f"{baseline_gap_detail} The current thread is still in `Default permissions`."
             )
         else:
-            detail = (
-                f"Native Codex machine baseline is missing {missing_detail} for the current "
-                "Office corpus, and the current turn does not expose `Full access` yet."
-            )
+            detail = f"{baseline_gap_detail} The current turn does not expose `Full access` yet."
         host_access_required = True
-        host_access_reasons = [
-            (
-                "Native Codex machine baseline is missing "
-                f"{missing_detail} for the current Office corpus and needs machine-level "
-                "installation."
-            )
-        ]
+        host_access_reasons = [host_access_reason]
     else:
         guidance = _native_machine_baseline_install_guidance()
         status = "install-required"
-        detail = (
-            "Native Codex machine baseline is missing "
-            f"{missing_detail} for the current Office corpus."
-        )
+        detail = baseline_gap_detail
         host_access_required = False
         host_access_reasons = []
 
@@ -1668,7 +1699,11 @@ def _machine_baseline_snapshot(
         "brew_binary": brew_binary,
         "libreoffice_required": libreoffice_required,
         "libreoffice_ready": libreoffice_ready,
-        "libreoffice_binary": office.get("binary"),
+        "libreoffice_binary": libreoffice_binary,
+        "libreoffice_candidate_binary": libreoffice_candidate_binary,
+        "libreoffice_validation_detail": libreoffice_validation_detail,
+        "libreoffice_probe_contract": libreoffice_probe_contract,
+        "libreoffice_detected_but_unusable": libreoffice_detected_but_unusable,
         "host_access_required": host_access_required,
         "host_access_guidance": guidance,
         "host_access_reasons": host_access_reasons,
@@ -1771,8 +1806,17 @@ def write_bootstrap_ready_marker(
         "host_access_guidance": machine_baseline.get("host_access_guidance"),
         "host_access_reasons": list(machine_baseline.get("host_access_reasons") or []),
         "libreoffice_executable": office_snapshot.get("binary"),
+        "office_probe_contract": office_snapshot.get("probe_contract"),
+        "libreoffice_candidate_binary": office_snapshot.get("candidate_binary"),
+        "libreoffice_validation_detail": office_snapshot.get("validation_detail"),
+        "libreoffice_detected_but_unusable": bool(
+            office_snapshot.get("detected_but_unusable")
+        ),
+        "libreoffice_validation_launcher": office_snapshot.get("validation_launcher"),
         "libreoffice_origin": (
-            "system-discovery" if office_snapshot.get("binary") else None
+            "system-discovery"
+            if office_snapshot.get("binary") or office_snapshot.get("candidate_binary")
+            else None
         ),
         "homebrew_binary": machine_baseline.get("brew_binary"),
         "homebrew_ready": bool(machine_baseline.get("brew_ready")),
@@ -2617,7 +2661,31 @@ def prepare_workspace(
         and not bool(office_snapshot.get("ready"))
     ):
         install_command, install_display = preferred_libreoffice_install_command()
-        if install_command is not None and install_display is not None:
+        detected_but_unusable = bool(office_snapshot.get("detected_but_unusable"))
+        if detected_but_unusable:
+            _emit_prepare_progress(
+                progress_stream,
+                "repairing LibreOffice via the official macOS package...",
+            )
+            installed, detail = _install_libreoffice_from_official_macos_package(
+                workspace,
+                command_runner=command_runner,
+            )
+            if installed:
+                actions_performed.append(detail)
+                office_snapshot = office_renderer_snapshot(workspace)
+                if not bool(office_snapshot.get("ready")):
+                    actions_skipped.append(
+                        "LibreOffice repair completed, but the renderer is still not usable. "
+                        f"Details: {office_snapshot.get('validation_detail') or office_snapshot.get('detail')}"
+                    )
+            else:
+                actions_skipped.append(detail)
+                next_steps.append(
+                    "Official LibreOffice auto-repair failed. Reinstall LibreOffice from "
+                    f"{_LIBREOFFICE_DOWNLOAD_PAGE} and rerun `docmason prepare --yes`."
+                )
+        elif install_command is not None and install_display is not None:
             _emit_prepare_progress(progress_stream, "installing LibreOffice via Homebrew...")
             execution = command_runner(install_command, workspace.root)
             if execution.exit_code == 0:

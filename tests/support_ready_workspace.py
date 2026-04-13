@@ -9,6 +9,7 @@ import stat
 import sys
 from pathlib import Path
 
+from docmason.libreoffice_runtime import LIBREOFFICE_PROBE_CONTRACT
 from docmason.project import BOOTSTRAP_STATE_SCHEMA_VERSION, WorkspacePaths, write_json
 
 
@@ -154,6 +155,14 @@ def seed_self_contained_bootstrap_state(
             "last_repair_at": timestamp,
             "host_access_required": False,
             "host_access_guidance": None,
+            "office_probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "libreoffice_candidate_binary": None,
+            "libreoffice_validation_detail": (
+                "Validated LibreOffice renderer capability."
+                if office_renderer_ready
+                else "No LibreOffice command candidate was detected."
+            ),
+            "libreoffice_detected_but_unusable": False,
             "homebrew_ready": True,
             "homebrew_binary": "/opt/homebrew/bin/brew",
             "pdf_renderer_ready": pdf_renderer_ready,
@@ -228,6 +237,10 @@ def seed_mixed_external_venv_bootstrap_state(
             "last_repair_at": prepared_at,
             "host_access_required": False,
             "host_access_guidance": None,
+            "office_probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "libreoffice_candidate_binary": None,
+            "libreoffice_validation_detail": "Validated LibreOffice renderer capability.",
+            "libreoffice_detected_but_unusable": False,
             "homebrew_ready": True,
             "homebrew_binary": "/opt/homebrew/bin/brew",
             "pdf_renderer_ready": True,
@@ -295,6 +308,10 @@ def seed_degraded_broken_venv_bootstrap_state(
             "last_repair_at": prepared_at,
             "host_access_required": False,
             "host_access_guidance": None,
+            "office_probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "libreoffice_candidate_binary": None,
+            "libreoffice_validation_detail": "Validated LibreOffice renderer capability.",
+            "libreoffice_detected_but_unusable": False,
             "homebrew_ready": True,
             "homebrew_binary": "/opt/homebrew/bin/brew",
             "pdf_renderer_ready": True,

@@ -29,6 +29,7 @@ If the agent cannot run local commands or inspect the resulting artifacts, stop 
    - if `sync_status=waiting-shared-job`, treat the existing shared sync job as the legal owner and wait or retry rather than starting a second path
    - if `sync_status=action-required`, surface the blocker directly
      - when the blocker is missing sync capability, route the operator to `prepare`
+     - when the blocker is a repairable Office machine-baseline gap and the host can provide `Full access`, continue through `docmason prepare --yes --json` and then resume the same sync task instead of stopping at a passive blocker report
 4. Treat successful `sync` as the deterministic truth-building path.
    - detect source changes
    - rebuild or reuse staged evidence
@@ -54,7 +55,7 @@ If the agent cannot run local commands or inspect the resulting artifacts, stop 
 ## Escalation Rules
 
 - Do not invent a second approval surface. The public approval command is `docmason sync --yes`.
-- If Office rendering is required but unavailable, stop and return the concrete install step.
+- If Office rendering is required but unavailable, stop only when the governed `prepare` path still cannot repair or install LibreOffice honestly; otherwise continue through that repair path first.
 - If staged or hybrid follow-up work requires per-source editing, that bounded work may be parallelized, but the final rerun and final judgment remain on the main path.
 - Do not silently trigger this workflow from an ordinary answer path without surfacing the governed state transition.
 

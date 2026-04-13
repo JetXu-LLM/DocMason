@@ -39,6 +39,7 @@ from docmason.control_plane import (
 )
 from docmason.conversation import current_host_execution_context
 from docmason.coordination import LeaseConflictError, lease_dir, workspace_lease
+from docmason.libreoffice_runtime import LIBREOFFICE_PROBE_CONTRACT
 from docmason.project import (
     BOOTSTRAP_STATE_SCHEMA_VERSION,
     WorkspacePaths,
@@ -131,6 +132,12 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "__version__ = '0.0.0'\n",
             encoding="utf-8",
         )
+        (root / "src" / "docmason" / "libreoffice_runtime.py").write_text(
+            (ROOT / "src" / "docmason" / "libreoffice_runtime.py").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
         (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
         (root / "skills" / "canonical" / "workspace-bootstrap" / "SKILL.md").write_text(
             "# Workspace Bootstrap\n",
@@ -145,6 +152,22 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             background_commands=["docmason prepare --json"],
         )
         return WorkspacePaths(root=root)
+
+    def rewrite_workspace_libreoffice_runtime(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        app_bundle_path: Path,
+    ) -> None:
+        runtime_path = workspace.root / "src" / "docmason" / "libreoffice_runtime.py"
+        binary_path = app_bundle_path / "Contents" / "MacOS" / "soffice"
+        text = runtime_path.read_text(encoding="utf-8")
+        text = text.replace(
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            str(binary_path),
+        )
+        text = text.replace("/Applications/LibreOffice.app", str(app_bundle_path))
+        runtime_path.write_text(text, encoding="utf-8")
 
     def seed_codex_thread_context(
         self,
@@ -1346,6 +1369,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             encoding="utf-8",
         )
         script_path.chmod(0o755)
+        self.rewrite_workspace_libreoffice_runtime(
+            workspace,
+            app_bundle_path=fake_soffice_path.parent.parent.parent,
+        )
         (workspace.root / "runtime").mkdir(parents=True, exist_ok=True)
         marker_path = workspace.root / "runtime" / "launcher-should-not-run.txt"
         workspace.toolchain_bootstrap_python.parent.mkdir(parents=True, exist_ok=True)
@@ -1398,7 +1425,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
         self.assertFalse(marker_path.exists())
 
-    def test_bootstrap_launcher_treats_invalid_soffice_candidate_as_missing(self) -> None:
+    def test_bootstrap_launcher_reports_detected_but_unusable_soffice_candidate(self) -> None:
         workspace = self.make_workspace()
         script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
         script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1415,6 +1442,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             encoding="utf-8",
         )
         script_path.chmod(0o755)
+        self.rewrite_workspace_libreoffice_runtime(
+            workspace,
+            app_bundle_path=fake_soffice_path.parent.parent.parent,
+        )
         (workspace.source_dir / "deck.docx").write_text("docx placeholder\n", encoding="utf-8")
 
         fake_bin_dir = workspace.root / ".fake-bin-invalid-soffice"
@@ -1449,6 +1480,95 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["status"], ACTION_REQUIRED)
         self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
+        self.assertTrue(payload["libreoffice_detected_but_unusable"])
+        self.assertEqual(
+            payload["libreoffice_candidate_binary"],
+            str(fake_bin_dir / "soffice"),
+        )
+        self.assertIn("not currently usable", payload["detail"])
+
+    def test_bootstrap_launcher_reports_validation_unavailable_without_unusable_flag(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_soffice_path = (
+            workspace.root / "missing-LibreOffice.app" / "Contents" / "MacOS" / "soffice"
+        )
+        script_path.write_text(
+            (ROOT / "scripts" / "bootstrap-workspace.sh")
+            .read_text(encoding="utf-8")
+            .replace(
+                "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                str(fake_soffice_path),
+            ),
+            encoding="utf-8",
+        )
+        script_path.chmod(0o755)
+        self.rewrite_workspace_libreoffice_runtime(
+            workspace,
+            app_bundle_path=fake_soffice_path.parent.parent.parent,
+        )
+        (workspace.source_dir / "deck.docx").write_text("docx placeholder\n", encoding="utf-8")
+
+        fake_bin_dir = workspace.root / ".fake-bin-validation-unavailable"
+        fake_bin_dir.mkdir(parents=True, exist_ok=True)
+        (fake_bin_dir / "uname").write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
+        (fake_bin_dir / "uname").chmod(0o755)
+        (fake_bin_dir / "soffice").write_text(
+            "#!/bin/sh\n"
+            "printf 'Preview 1.0\\n'\n",
+            encoding="utf-8",
+        )
+        (fake_bin_dir / "soffice").chmod(0o755)
+        for python_name in (
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3.10",
+            "python3.9",
+            "python3",
+            "python",
+        ):
+            (fake_bin_dir / python_name).write_text(
+                "#!/bin/sh\n"
+                "printf 'Python 3.8.0\\n' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            (fake_bin_dir / python_name).chmod(0o755)
+
+        env = {
+            **os.environ,
+            "DOCMASON_AGENT_SURFACE": "codex",
+            "DOCMASON_PERMISSION_MODE": "default-permissions",
+            "DOCMASON_CODEX_NETWORK_ACCESS": "true",
+            "DOCMASON_CODEX_WRITABLE_ROOTS": json.dumps([str(workspace.root)]),
+            "PATH": str(fake_bin_dir) + os.pathsep + "/usr/bin:/bin",
+        }
+        completed = subprocess.run(
+            [str(script_path), "--yes", "--json"],
+            cwd=workspace.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], ACTION_REQUIRED)
+        self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
+        self.assertFalse(payload["libreoffice_detected_but_unusable"])
+        self.assertEqual(
+            payload["libreoffice_candidate_binary"],
+            str(fake_bin_dir / "soffice"),
+        )
+        self.assertIn("cannot yet validate LibreOffice", payload["detail"])
+        self.assertIn("no supported helper Python or bootstrap runtime", payload["detail"])
+        self.assertNotIn("not currently usable", payload["detail"])
+        self.assertNotIn("needs machine-level repair", payload["detail"])
 
     def test_bootstrap_launcher_uses_repo_local_cache_in_controlled_codex_mode(self) -> None:
         workspace = self.make_workspace()
@@ -1620,25 +1740,18 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_cached_bootstrap_readiness_requires_current_contract_for_sync_capability(self) -> None:
         workspace = self.make_workspace()
-        workspace.venv_python.parent.mkdir(parents=True, exist_ok=True)
-        workspace.venv_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         (workspace.source_dir / "example.docx").write_text("docx placeholder\n", encoding="utf-8")
-        write_json(
-            workspace.bootstrap_state_path,
-            {
-                "prepared_at": "2026-03-16T00:00:00Z",
-                "package_manager": "uv",
-                "python_executable": "/usr/bin/python3",
-                "venv_python": ".venv/bin/python",
-                "editable_install": True,
-            },
-        )
+        self.seed_self_contained_bootstrap_state(workspace)
+        state = json.loads(workspace.bootstrap_state_path.read_text(encoding="utf-8"))
+        state["schema_version"] = 5
+        state.pop("office_probe_contract", None)
+        write_json(workspace.bootstrap_state_path, state)
 
         ordinary = cached_bootstrap_readiness(workspace)
         sync_ready = cached_bootstrap_readiness(workspace, require_sync_capability=True)
-        self.assertFalse(ordinary["ready"])
+        self.assertTrue(ordinary["ready"])
         self.assertFalse(sync_ready["ready"])
-        self.assertEqual(sync_ready["reason"], "legacy-bootstrap-state-sync-capability-unknown")
+        self.assertEqual(sync_ready["reason"], "office-renderer-probe-contract-upgrade-required")
 
     def test_cached_bootstrap_readiness_accepts_schema4_marker_for_ordinary_and_sync(self) -> None:
         workspace = self.make_workspace()
@@ -1780,6 +1893,60 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         )
         self.assertTrue(report.payload["host_access_required"])
         self.assertEqual(report.payload["machine_baseline_status"], "host-access-upgrade-required")
+
+    def test_prepare_reports_detected_but_unusable_libreoffice_as_host_access_upgrade(self) -> None:
+        workspace = self.make_workspace()
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch(
+                "docmason.commands.office_renderer_snapshot",
+                return_value={
+                    "required": True,
+                    "ready": False,
+                    "binary": None,
+                    "candidate_binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                    "validation_detail": (
+                        "The detected LibreOffice command failed the conversion smoke test: "
+                        "terminated by signal 6."
+                    ),
+                    "detected_but_unusable": True,
+                    "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+                    "detail": (
+                        "LibreOffice `soffice` is required to render PowerPoint, Word, and "
+                        "Excel sources, but the detected candidate "
+                        "`/Applications/LibreOffice.app/Contents/MacOS/soffice` is not "
+                        "currently usable."
+                    ),
+                },
+            ),
+            mock.patch("docmason.commands.find_brew_binary", return_value="/opt/homebrew/bin/brew"),
+            mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "default-permissions",
+                },
+                clear=False,
+            ),
+        ):
+            report = prepare_workspace(
+                workspace,
+                command_runner=self.fake_prepare_runner(workspace),
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(report.payload["status"], ACTION_REQUIRED)
+        self.assertEqual(report.payload["machine_baseline_status"], "host-access-upgrade-required")
+        machine_baseline = report.payload["environment"]["machine_baseline"]
+        self.assertTrue(machine_baseline["libreoffice_detected_but_unusable"])
+        self.assertEqual(
+            machine_baseline["libreoffice_candidate_binary"],
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        )
+        self.assertIn("terminated by signal 6", machine_baseline["detail"])
 
     def test_prepare_retries_transient_startup_silent_before_failing(self) -> None:
         workspace = self.make_workspace()
@@ -1949,6 +2116,91 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertIn(
             ["/opt/homebrew/bin/brew", "install", "--cask", "libreoffice-still"],
             seen_commands,
+        )
+
+    def test_prepare_reinstalls_detected_but_unusable_libreoffice_from_official_macos_path(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        seen_commands: list[list[str]] = []
+
+        def runner(command: list[str] | tuple[str, ...], cwd: Path) -> CommandExecution:
+            command_list = list(command)
+            seen_commands.append(command_list)
+            return self.fake_prepare_runner(workspace)(command_list, cwd)
+
+        with (
+            mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
+            mock.patch(
+                "docmason.commands.office_renderer_snapshot",
+                side_effect=[
+                    {
+                        "required": True,
+                        "ready": False,
+                        "binary": None,
+                        "candidate_binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                        "validation_detail": (
+                            "The detected LibreOffice command failed the conversion smoke test: "
+                            "terminated by signal 6."
+                        ),
+                        "detected_but_unusable": True,
+                        "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+                        "detail": (
+                            "LibreOffice `soffice` is required to render PowerPoint, Word, and "
+                            "Excel sources, but the detected candidate "
+                            "`/Applications/LibreOffice.app/Contents/MacOS/soffice` is not "
+                            "currently usable."
+                        ),
+                    },
+                    {
+                        "required": True,
+                        "ready": True,
+                        "binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                        "candidate_binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                        "validation_detail": "Validated LibreOffice renderer capability.",
+                        "detected_but_unusable": False,
+                        "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+                        "detail": "LibreOffice rendering is available.",
+                    },
+                ],
+            ),
+            mock.patch(
+                "docmason.commands.find_brew_binary",
+                return_value="/opt/homebrew/bin/brew",
+            ),
+            mock.patch(
+                "docmason.commands._install_libreoffice_from_official_macos_package",
+                return_value=(
+                    True,
+                    "Installed LibreOffice from the official macOS package at "
+                    "/Applications/LibreOffice.app.",
+                ),
+            ) as official_install,
+            mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "full-access",
+                    "DOCMASON_HOST_FULL_MACHINE_ACCESS": "true",
+                },
+                clear=False,
+            ),
+        ):
+            report = prepare_workspace(
+                workspace,
+                assume_yes=True,
+                command_runner=runner,
+                editable_install_probe=self.ready_probe,
+                interactive=False,
+            )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["status"], READY)
+        self.assertEqual(report.payload["machine_baseline_status"], "ready")
+        official_install.assert_called_once()
+        self.assertFalse(
+            any(command == ["/opt/homebrew/bin/brew", "install", "--cask", "libreoffice-still"] for command in seen_commands)
         )
 
     def test_prepare_is_ready_without_homebrew_when_office_renderer_is_already_available(
@@ -2313,6 +2565,100 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(office_check["status"], ACTION_REQUIRED)
         self.assertIn("libreoffice.org/download/download/", office_check["action"])
 
+    def test_doctor_reports_detected_but_unusable_libreoffice_under_default_permissions(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        with (
+            mock.patch(
+                "docmason.commands.office_renderer_snapshot",
+                return_value={
+                    "required": True,
+                    "ready": False,
+                    "binary": None,
+                    "candidate_binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                    "validation_detail": (
+                        "The detected LibreOffice command failed the conversion smoke test: "
+                        "terminated by signal 6."
+                    ),
+                    "detected_but_unusable": True,
+                    "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+                    "detail": (
+                        "LibreOffice `soffice` is required to render PowerPoint, Word, and "
+                        "Excel sources, but the detected candidate "
+                        "`/Applications/LibreOffice.app/Contents/MacOS/soffice` is not "
+                        "currently usable."
+                    ),
+                },
+            ),
+            mock.patch("docmason.commands.find_brew_binary", return_value="/opt/homebrew/bin/brew"),
+            mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "default-permissions",
+                },
+                clear=False,
+            ),
+        ):
+            report = doctor_workspace(workspace, editable_install_probe=self.missing_probe)
+
+        machine_check = next(
+            check for check in report.payload["checks"] if check["name"] == "machine-baseline"
+        )
+        self.assertEqual(machine_check["status"], ACTION_REQUIRED)
+        self.assertIn("not currently usable", machine_check["detail"])
+        self.assertIn("Full access", machine_check["action"])
+
+    def test_status_reports_detected_but_unusable_libreoffice_under_default_permissions(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        with (
+            mock.patch(
+                "docmason.commands.office_renderer_snapshot",
+                return_value={
+                    "required": True,
+                    "ready": False,
+                    "binary": None,
+                    "candidate_binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                    "validation_detail": (
+                        "The detected LibreOffice command failed the conversion smoke test: "
+                        "terminated by signal 6."
+                    ),
+                    "detected_but_unusable": True,
+                    "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+                    "detail": (
+                        "LibreOffice `soffice` is required to render PowerPoint, Word, and "
+                        "Excel sources, but the detected candidate "
+                        "`/Applications/LibreOffice.app/Contents/MacOS/soffice` is not "
+                        "currently usable."
+                    ),
+                },
+            ),
+            mock.patch("docmason.commands.find_brew_binary", return_value="/opt/homebrew/bin/brew"),
+            mock.patch("docmason.commands.sys.platform", "darwin"),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "default-permissions",
+                },
+                clear=False,
+            ),
+        ):
+            report = status_workspace(workspace, editable_install_probe=self.missing_probe)
+
+        self.assertEqual(report.payload["environment"]["machine_baseline_status"], "host-access-upgrade-required")
+        self.assertTrue(
+            report.payload["environment"]["machine_baseline"]["libreoffice_detected_but_unusable"]
+        )
+        self.assertIn(
+            "not currently usable",
+            report.payload["environment"]["machine_baseline"]["detail"],
+        )
+
     def test_status_survives_reconciliation_lease_conflict_with_warning(self) -> None:
         workspace = self.make_workspace()
         self.seed_self_contained_bootstrap_state(workspace)
@@ -2416,7 +2762,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
 
     def test_workspace_probe_soffice_timeout_returns_structured_detail(self) -> None:
         with mock.patch(
-            "docmason.workspace_probe.subprocess.run",
+            "docmason.libreoffice_runtime.subprocess.run",
             side_effect=subprocess.TimeoutExpired(
                 cmd=[sys.executable, "--version"],
                 timeout=15.0,

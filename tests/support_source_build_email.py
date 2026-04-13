@@ -93,7 +93,13 @@ class SourceBuildEmailTests(unittest.TestCase):
             msg.add_attachment(payload, maintype=maintype, subtype=subtype, filename=filename)
         return msg
 
-    def write_email_fixture(self, path: Path) -> None:
+    def write_email_fixture(
+        self,
+        path: Path,
+        *,
+        plain_body: str | None = None,
+        html_body: str | None = None,
+    ) -> None:
         nested = self.make_email(
             subject="Forwarded Budget Email",
             plain_body="Budget line one.\n\nBudget line two.",
@@ -101,11 +107,13 @@ class SourceBuildEmailTests(unittest.TestCase):
         )
         root = self.make_email(
             subject="Delivery Kickoff Email",
-            plain_body=(
+            plain_body=plain_body
+            or (
                 "Roadmap decisions are tracked in the attached note.\n"
                 "Please review the forwarded budget mail as well."
             ),
-            html_body=(
+            html_body=html_body
+            or (
                 "<p>Roadmap decisions are tracked in the attached note.</p>"
                 '<p><img src="cid:chart-1" /></p>'
             ),
@@ -382,6 +390,88 @@ class SourceBuildEmailTests(unittest.TestCase):
 
         validation = read_json(workspace.current_validation_report_path)
         self.assertEqual(validation["status"], "valid")
+
+    def test_sync_rebuilds_email_tree_when_previous_child_artifact_contract_is_broken(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        source_path = workspace.source_dir / "delivery.eml"
+        self.write_email_fixture(source_path)
+
+        source_ids = self.publish_seeded_sources(workspace)
+        child_source_id = source_ids["original_doc/delivery.eml#attachment/002-roadmap-notes.txt"]
+        broken_child_dir = workspace.knowledge_base_current_dir / "sources" / child_source_id
+        (broken_child_dir / "artifact_index.json").unlink()
+        if workspace.knowledge_base_staging_dir.exists():
+            shutil.rmtree(workspace.knowledge_base_staging_dir)
+
+        rebuilt = sync_workspace(workspace, autonomous=False)
+
+        self.assertEqual(rebuilt.payload["sync_status"], "valid")
+        self.assertEqual(rebuilt.payload["build_stats"]["rebuilt_sources"], 1)
+        self.assertTrue(
+            (
+                workspace.knowledge_base_current_dir
+                / "sources"
+                / child_source_id
+                / "artifact_index.json"
+            ).exists()
+        )
+
+    def test_sync_rebuilds_unchanged_email_child_when_parent_changes_and_previous_child_is_broken(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        source_path = workspace.source_dir / "delivery.eml"
+        self.write_email_fixture(source_path)
+
+        source_ids = self.publish_seeded_sources(workspace)
+        child_source_id = source_ids["original_doc/delivery.eml#attachment/002-roadmap-notes.txt"]
+        broken_child_dir = workspace.knowledge_base_current_dir / "sources" / child_source_id
+        (broken_child_dir / "artifact_index.json").unlink()
+        self.write_email_fixture(
+            source_path,
+            plain_body=(
+                "Updated roadmap commentary stays in the email body.\n"
+                "The attachments are unchanged and should keep the same derived source IDs."
+            ),
+            html_body=(
+                "<p>Updated roadmap commentary stays in the email body.</p>"
+                '<p><img src="cid:chart-1" /></p>'
+            ),
+        )
+        if workspace.knowledge_base_staging_dir.exists():
+            shutil.rmtree(workspace.knowledge_base_staging_dir)
+
+        pending = sync_workspace(workspace, autonomous=False)
+
+        self.assertEqual(pending.payload["sync_status"], "pending-synthesis")
+        self.assertEqual(pending.payload["build_stats"]["rebuilt_sources"], 1)
+        staged_child_dir = workspace.knowledge_base_staging_dir / "sources" / child_source_id
+        self.assertTrue((staged_child_dir / "artifact_index.json").exists())
+        staged_child_manifest = read_json(staged_child_dir / "source_manifest.json")
+        self.assertEqual(
+            staged_child_manifest["current_path"],
+            "original_doc/delivery.eml#attachment/002-roadmap-notes.txt",
+        )
+
+        for pending_source in pending.payload["pending_sources"]:
+            self.seed_agent_outputs(
+                workspace.knowledge_base_staging_dir / "sources" / pending_source["source_id"]
+            )
+        published = sync_workspace(workspace)
+
+        self.assertEqual(published.payload["sync_status"], "valid")
+        self.assertTrue(
+            (
+                workspace.knowledge_base_current_dir
+                / "sources"
+                / child_source_id
+                / "artifact_index.json"
+            ).exists()
+        )
 
 
 if __name__ == "__main__":
