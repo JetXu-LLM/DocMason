@@ -2675,9 +2675,13 @@ def prepare_workspace(
                 actions_performed.append(detail)
                 office_snapshot = office_renderer_snapshot(workspace)
                 if not bool(office_snapshot.get("ready")):
+                    validation_detail = (
+                        office_snapshot.get("validation_detail")
+                        or office_snapshot.get("detail")
+                    )
                     actions_skipped.append(
                         "LibreOffice repair completed, but the renderer is still not usable. "
-                        f"Details: {office_snapshot.get('validation_detail') or office_snapshot.get('detail')}"
+                        f"Details: {validation_detail}"
                     )
             else:
                 actions_skipped.append(detail)

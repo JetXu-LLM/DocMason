@@ -1120,7 +1120,8 @@ def ensure_hires_focus_render(
         pdf_path = source_path
         document_type = str(source_manifest.get("document_type") or "")
         if document_type != "pdf":
-            from .knowledge import convert_office_to_pdf, validate_soffice_binary
+            from .knowledge import convert_office_to_pdf
+            from .libreoffice_runtime import validate_soffice_binary
 
             office_state = validate_soffice_binary(None)
             office_binary = office_state.get("binary")

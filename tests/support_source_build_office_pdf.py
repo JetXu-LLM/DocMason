@@ -33,11 +33,6 @@ from docmason.hybrid import (
     required_overlay_slots,
     select_lane_b_batch,
 )
-from docmason.libreoffice_runtime import (
-    find_soffice_binary,
-    run_office_conversion,
-    validate_soffice_binary,
-)
 from docmason.knowledge import (
     _ThirdPartyDiagnosticCapture,
     build_docx_source,
@@ -48,6 +43,11 @@ from docmason.knowledge import (
     render_pdf_document,
     sanitize_text,
     source_artifact_contract_complete,
+)
+from docmason.libreoffice_runtime import (
+    find_soffice_binary,
+    run_office_conversion,
+    validate_soffice_binary,
 )
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.semantic_overlays import semantic_overlay_candidates, write_semantic_overlay
@@ -1018,7 +1018,12 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
             ) -> subprocess.CompletedProcess[str]:
                 del capture_output, text, check, timeout, env
                 if command[0] == "/usr/bin/open":
-                    return subprocess.CompletedProcess(command, 1, stdout="", stderr="launch failed")
+                    return subprocess.CompletedProcess(
+                        command,
+                        1,
+                        stdout="",
+                        stderr="launch failed",
+                    )
                 return subprocess.CompletedProcess(command, 134, stdout="", stderr="Abort trap: 6")
 
             with (

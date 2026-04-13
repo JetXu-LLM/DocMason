@@ -770,9 +770,15 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(payload["status"], ACTION_REQUIRED)
         self.assertEqual(
             payload["detail"],
-            "DocMason cannot safely confirm that this Codex turn allows the network downloads required for repo-local runtime bootstrap.",
+            (
+                "DocMason cannot safely confirm that this Codex turn allows the network "
+                "downloads required for repo-local runtime bootstrap."
+            ),
         )
-        self.assertEqual(payload["host_execution"]["context_source"], "env-codex-thread-id-fallback")
+        self.assertEqual(
+            payload["host_execution"]["context_source"],
+            "env-codex-thread-id-fallback",
+        )
         self.assertIsNone(payload["host_execution"]["sandbox_policy"])
         self.assertIsNone(payload["host_execution"]["permission_mode"])
         self.assertFalse(payload["host_execution"]["full_machine_access"])
@@ -2200,7 +2206,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(report.payload["machine_baseline_status"], "ready")
         official_install.assert_called_once()
         self.assertFalse(
-            any(command == ["/opt/homebrew/bin/brew", "install", "--cask", "libreoffice-still"] for command in seen_commands)
+            any(
+                command == ["/opt/homebrew/bin/brew", "install", "--cask", "libreoffice-still"]
+                for command in seen_commands
+            )
         )
 
     def test_prepare_is_ready_without_homebrew_when_office_renderer_is_already_available(
@@ -2650,7 +2659,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         ):
             report = status_workspace(workspace, editable_install_probe=self.missing_probe)
 
-        self.assertEqual(report.payload["environment"]["machine_baseline_status"], "host-access-upgrade-required")
+        self.assertEqual(
+            report.payload["environment"]["machine_baseline_status"],
+            "host-access-upgrade-required",
+        )
         self.assertTrue(
             report.payload["environment"]["machine_baseline"]["libreoffice_detected_but_unusable"]
         )

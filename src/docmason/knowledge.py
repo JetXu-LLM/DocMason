@@ -7,7 +7,6 @@ import io
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import uuid
@@ -68,16 +67,11 @@ from .interaction import (
     mark_promoted_interaction_entries,
     repair_interaction_memory_related_sources,
 )
-from .libreoffice_runtime import (
-    find_soffice_binary,
-    run_office_conversion,
-    validate_soffice_binary,
-)
+from .libreoffice_runtime import run_office_conversion
 from .project import (
     WorkspacePaths,
     isoformat_timestamp,
     read_json,
-    relative_paths,
     source_index,
     source_inventory_signature,
     source_type_definition,
@@ -972,7 +966,10 @@ def convert_office_to_format(
         failures.append(
             {
                 "stage": f"convert-office-to-{extension}",
-                "detail": f"LibreOffice conversion completed without producing a .{extension} output.",
+                "detail": (
+                    "LibreOffice conversion completed without producing "
+                    f"a .{extension} output."
+                ),
             }
         )
         return None, failures
