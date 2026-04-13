@@ -23,7 +23,7 @@
   
   <p><sub>Already paying for ChatGPT? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included in your plan. Turn that unused capacity into a local Second Brain. Watch the <a href="https://youtu.be/Sq3a5qxsLwM"><b>▶️ video demo</b></a> to see how DocMason deep research on local complex office files (decks, spreadsheets, memos, emails). Get zero-to-working in minutes with this <a href="https://www.youtube.com/watch?v=jWRtr70Rvug"><b>▶️ 3-min setup tutorial video</b></a>.</sub></p>
 </div>
-
+<br>
 Most workspace AI tools flatten your complex office documents into a single, unstructured text blob. They might summarize a file or retrieve a stray quote, but once your research gets complex, the illusion breaks. You lose the tables, the slide layouts, the hidden notes—and it becomes impossible to verify where the AI's answer actually came from.
 
 **DocMason** is built on a different thesis: **answers must be strictly traceable.** It compiles your private decks, spreadsheets, PDFs, and emails into a local, file-based knowledge base. Instead of chatting with anonymous text chunks, your AI agent reasons over structured, multimodal evidence bundles. It’s not a cloud service or a lightweight wrapper. It is a local repo running as a deep-research AI app on Codex. No hidden backends, no cloud ingestion. Just your files, and answers you can actually trust.
