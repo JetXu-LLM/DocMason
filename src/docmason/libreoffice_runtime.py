@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
 import shutil
 import subprocess
@@ -15,10 +14,9 @@ from typing import Any
 LIBREOFFICE_PROBE_CONTRACT = "libreoffice-docx-pdf-smoke-v1"
 _SOFFICE_VERSION_TIMEOUT_SECONDS = 15.0
 _SOFFICE_CONVERSION_TIMEOUT_SECONDS = 30.0
-_MACOS_LIBREOFFICE_APP = Path("/Applications/LibreOffice.app")
-_MACOS_LIBREOFFICE_BINARY = _MACOS_LIBREOFFICE_APP / "Contents" / "MacOS" / "soffice"
+_MACOS_LIBREOFFICE_BINARY = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
 _DIRECT_LAUNCHER = "direct"
-_LAUNCHSERVICES_LAUNCHER = "launchservices"
+_FULL_ACCESS_GUIDANCE = "Switch Codex to `Full access`, then continue the same task."
 
 
 def _normalized_command_output(stdout: str | None, stderr: str | None) -> str:
@@ -50,18 +48,39 @@ def _format_process_failure(returncode: int, output: str) -> str:
     return f"exit code {returncode}"
 
 
-def _is_known_macos_startup_abort(returncode: int | None, output: str) -> bool:
-    if sys.platform != "darwin" or returncode is None:
-        return False
-    normalized_output = output.lower()
-    if returncode in {-6, 134}:
-        return True
-    return (
-        "abort trap: 6" in normalized_output
-        or "terminated by signal 6" in normalized_output
-        or "signal 6" in normalized_output
-        or "abort() called" in normalized_output
-    )
+def current_host_execution_context() -> dict[str, Any]:
+    """Return the current host execution context with a minimal fallback path.
+
+    The shared LibreOffice runtime is imported by lightweight bootstrap probes and
+    test fixtures that may not ship the full DocMason conversation module. Fall
+    back to the small env-derived subset needed for the host-access guard.
+    """
+    permission_mode = str(os.environ.get("DOCMASON_PERMISSION_MODE") or "").strip()
+    host_provider = str(os.environ.get("DOCMASON_AGENT_SURFACE") or "").strip()
+    if host_provider or permission_mode:
+        return {
+            "host_provider": host_provider,
+            "permission_mode": permission_mode,
+            "full_machine_access": permission_mode == "full-access",
+        }
+
+    try:
+        from .conversation import current_host_execution_context as conversation_host_context
+    except ImportError:
+        return {
+            "host_provider": host_provider,
+            "permission_mode": permission_mode,
+            "full_machine_access": permission_mode == "full-access",
+        }
+    try:
+        context = conversation_host_context()
+    except Exception:
+        return {
+            "host_provider": host_provider,
+            "permission_mode": permission_mode,
+            "full_machine_access": permission_mode == "full-access",
+        }
+    return context if isinstance(context, dict) else {}
 
 
 def soffice_candidate_paths() -> tuple[str, ...]:
@@ -210,50 +229,6 @@ def _build_direct_conversion_command(
     ]
 
 
-def _launchservices_app_path(binary: Path) -> Path | None:
-    with contextlib.suppress(OSError):
-        resolved = binary.resolve()
-        if (
-            resolved.name == "soffice"
-            and resolved.parent.name == "MacOS"
-            and resolved.parent.parent.name == "Contents"
-        ):
-            app_bundle = resolved.parent.parent.parent
-            if app_bundle.name.endswith(".app") and app_bundle.exists():
-                return app_bundle
-    if _MACOS_LIBREOFFICE_APP.exists():
-        return _MACOS_LIBREOFFICE_APP
-    return None
-
-
-def _build_launchservices_conversion_command(
-    *,
-    app_path: Path,
-    source_path: Path,
-    output_dir: Path,
-    target_format: str,
-    profile_dir: Path,
-) -> list[str]:
-    return [
-        "/usr/bin/open",
-        "-W",
-        "-n",
-        "-a",
-        str(app_path),
-        "--args",
-        f"-env:UserInstallation={profile_dir.resolve().as_uri()}",
-        "--headless",
-        "--norestore",
-        "--nolockcheck",
-        "--nodefault",
-        "--convert-to",
-        target_format,
-        "--outdir",
-        str(output_dir),
-        str(source_path),
-    ]
-
-
 def _run_conversion_attempt(
     *,
     launcher: str,
@@ -324,6 +299,36 @@ def _run_conversion_attempt(
     }
 
 
+def _libreoffice_host_access_block(*, candidate_binary: str | None) -> dict[str, Any] | None:
+    """Return a structured block when this Codex thread cannot spawn LibreOffice safely."""
+    if sys.platform != "darwin":
+        return None
+
+    host_execution = current_host_execution_context()
+    if str(host_execution.get("host_provider") or "") != "codex":
+        return None
+    if str(host_execution.get("permission_mode") or "") != "default-permissions":
+        return None
+    if bool(host_execution.get("full_machine_access")):
+        return None
+
+    candidate_detail = (
+        f" Detected candidate: `{candidate_binary}`."
+        if isinstance(candidate_binary, str) and candidate_binary
+        else ""
+    )
+    return {
+        "detail": (
+            "DocMason is currently running in Codex `Default permissions` on macOS, so it "
+            "needs `Full access` before it can continue Office rendering through LibreOffice."
+            f"{candidate_detail}"
+        ),
+        "blocked_by_host_access": True,
+        "host_access_required": True,
+        "host_access_guidance": _FULL_ACCESS_GUIDANCE,
+    }
+
+
 def run_office_conversion(
     source_path: Path,
     output_dir: Path,
@@ -336,6 +341,19 @@ def run_office_conversion(
     binary = Path(soffice_binary)
     extension = target_format.split(":", 1)[0].lower()
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    host_access_block = _libreoffice_host_access_block(candidate_binary=str(binary))
+    if host_access_block is not None:
+        return {
+            "success": False,
+            "launcher": None,
+            "output_path": None,
+            "cause": host_access_block["detail"],
+            "attempts": [],
+            "blocked_by_host_access": True,
+            "host_access_required": True,
+            "host_access_guidance": host_access_block["host_access_guidance"],
+        }
 
     with tempfile.TemporaryDirectory(prefix="docmason-libreoffice-runtime-") as tempdir_name:
         runtime_root = Path(tempdir_name)
@@ -366,58 +384,21 @@ def run_office_conversion(
                 "output_path": direct_attempt["output_path"],
                 "cause": None,
                 "attempts": [direct_attempt],
+                "blocked_by_host_access": False,
+                "host_access_required": False,
+                "host_access_guidance": None,
             }
 
-        attempts = [direct_attempt]
-        if _is_known_macos_startup_abort(
-            direct_attempt.get("returncode"),
-            str(direct_attempt.get("output") or direct_attempt.get("cause") or ""),
-        ):
-            app_path = _launchservices_app_path(binary)
-            if app_path is not None:
-                fallback_profile_dir, fallback_environment = _isolated_runtime_environment(
-                    runtime_root,
-                    label=_LAUNCHSERVICES_LAUNCHER,
-                )
-                fallback_command = _build_launchservices_conversion_command(
-                    app_path=app_path,
-                    source_path=source_path,
-                    output_dir=output_dir,
-                    target_format=target_format,
-                    profile_dir=fallback_profile_dir,
-                )
-                fallback_attempt = _run_conversion_attempt(
-                    launcher=_LAUNCHSERVICES_LAUNCHER,
-                    command=fallback_command,
-                    source_path=source_path,
-                    output_dir=output_dir,
-                    extension=extension,
-                    environment=fallback_environment,
-                    timeout_seconds=timeout_seconds,
-                )
-                attempts.append(fallback_attempt)
-                if fallback_attempt["success"]:
-                    return {
-                        "success": True,
-                        "launcher": _LAUNCHSERVICES_LAUNCHER,
-                        "output_path": fallback_attempt["output_path"],
-                        "cause": None,
-                        "attempts": attempts,
-                    }
-
         cause = str(direct_attempt.get("cause") or "conversion failed")
-        if len(attempts) > 1:
-            fallback_attempt = attempts[-1]
-            cause = (
-                f"direct start failed with {direct_attempt['cause']}; "
-                f"LaunchServices fallback failed with {fallback_attempt['cause']}"
-            )
         return {
             "success": False,
             "launcher": None,
             "output_path": None,
             "cause": cause,
-            "attempts": attempts,
+            "attempts": [direct_attempt],
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
         }
 
 
@@ -426,20 +407,44 @@ def _validate_detected_soffice_binary(binary: Path) -> dict[str, Any]:
         return {
             "ready": False,
             "binary": str(binary),
+            "candidate_binary": str(binary),
             "version": None,
             "detail": "The detected LibreOffice command path does not exist.",
             "launcher": None,
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
         }
     if not os.access(binary, os.X_OK):
         return {
             "ready": False,
             "binary": str(binary),
+            "candidate_binary": str(binary),
             "version": None,
             "detail": "The detected LibreOffice command path is not executable.",
             "launcher": None,
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
         }
+
+    host_access_block = _libreoffice_host_access_block(candidate_binary=str(binary))
+    if host_access_block is not None:
+        return {
+            "ready": False,
+            "binary": None,
+            "candidate_binary": str(binary),
+            "version": None,
+            "detail": host_access_block["detail"],
+            "launcher": None,
+            "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "blocked_by_host_access": True,
+            "host_access_required": True,
+            "host_access_guidance": host_access_block["host_access_guidance"],
+        }
+
     try:
         completed = subprocess.run(
             [str(binary), "--version"],
@@ -452,6 +457,7 @@ def _validate_detected_soffice_binary(binary: Path) -> dict[str, Any]:
         return {
             "ready": False,
             "binary": str(binary),
+            "candidate_binary": str(binary),
             "version": None,
             "detail": (
                 "The detected LibreOffice command timed out during the version probe "
@@ -459,21 +465,30 @@ def _validate_detected_soffice_binary(binary: Path) -> dict[str, Any]:
             ),
             "launcher": None,
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
         }
     except OSError as exc:
         return {
             "ready": False,
             "binary": str(binary),
+            "candidate_binary": str(binary),
             "version": None,
             "detail": f"The detected LibreOffice command failed to execute: {exc}.",
             "launcher": None,
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
         }
+
     output = _normalized_command_output(completed.stdout, completed.stderr)
     if completed.returncode != 0:
         return {
             "ready": False,
             "binary": str(binary),
+            "candidate_binary": str(binary),
             "version": None,
             "detail": (
                 "The detected LibreOffice command failed the version probe: "
@@ -481,15 +496,22 @@ def _validate_detected_soffice_binary(binary: Path) -> dict[str, Any]:
             ),
             "launcher": None,
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
         }
     if "libreoffice" not in output.lower():
         return {
             "ready": False,
             "binary": str(binary),
+            "candidate_binary": str(binary),
             "version": output or None,
             "detail": "The detected command did not identify itself as LibreOffice.",
             "launcher": None,
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
         }
 
     with tempfile.TemporaryDirectory(prefix="docmason-libreoffice-probe-") as tempdir_name:
@@ -507,6 +529,7 @@ def _validate_detected_soffice_binary(binary: Path) -> dict[str, Any]:
         return {
             "ready": False,
             "binary": str(binary),
+            "candidate_binary": str(binary),
             "version": output or None,
             "detail": (
                 "The detected LibreOffice command failed the conversion smoke test: "
@@ -514,14 +537,21 @@ def _validate_detected_soffice_binary(binary: Path) -> dict[str, Any]:
             ),
             "launcher": conversion.get("launcher"),
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+            "blocked_by_host_access": bool(conversion.get("blocked_by_host_access")),
+            "host_access_required": bool(conversion.get("host_access_required")),
+            "host_access_guidance": conversion.get("host_access_guidance"),
         }
     return {
         "ready": True,
         "binary": str(binary),
+        "candidate_binary": str(binary),
         "version": output or None,
         "detail": "Validated LibreOffice renderer capability.",
         "launcher": conversion.get("launcher"),
         "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
+        "blocked_by_host_access": False,
+        "host_access_required": False,
+        "host_access_guidance": None,
     }
 
 
@@ -538,12 +568,16 @@ def validate_soffice_binary(candidate: str | None) -> dict[str, Any]:
         return {
             "ready": False,
             "binary": None,
+            "candidate_binary": None,
             "version": None,
             "detail": "No LibreOffice command candidate was detected.",
             "launcher": None,
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
             "attempts": [],
             "candidate_failures": [],
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
         }
 
     attempts: list[dict[str, Any]] = []
@@ -555,6 +589,10 @@ def validate_soffice_binary(candidate: str | None) -> dict[str, Any]:
             validation["candidate_failures"] = [
                 attempt for attempt in attempts if not bool(attempt.get("ready"))
             ]
+            return validation
+        if validation.get("blocked_by_host_access"):
+            validation["attempts"] = attempts
+            validation["candidate_failures"] = attempts
             return validation
 
     first_failure = dict(attempts[0])

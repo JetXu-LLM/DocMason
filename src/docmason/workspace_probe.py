@@ -94,6 +94,9 @@ def office_renderer_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
             "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
             "validation_launcher": None,
             "detected_but_unusable": False,
+            "blocked_by_host_access": False,
+            "host_access_required": False,
+            "host_access_guidance": None,
             "failed_candidates": [],
             "detail": detail,
             "office_sources": [],
@@ -102,13 +105,21 @@ def office_renderer_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     validation = validate_soffice_binary(None)
     soffice_binary = str(validation["binary"]) if validation["ready"] else None
     ready = soffice_binary is not None
-    candidate_binary = validation.get("binary") if not validation["ready"] else soffice_binary
+    candidate_binary = (
+        validation.get("candidate_binary") if not validation["ready"] else soffice_binary
+    )
+    blocked_by_host_access = bool(validation.get("blocked_by_host_access"))
+    host_access_required = bool(validation.get("host_access_required"))
+    host_access_guidance = validation.get("host_access_guidance")
     failed_candidates = [
-        attempt.get("binary")
+        attempt.get("candidate_binary") or attempt.get("binary")
         for attempt in list(validation.get("candidate_failures") or [])
-        if isinstance(attempt.get("binary"), str) and attempt.get("binary")
+        if isinstance(attempt.get("candidate_binary") or attempt.get("binary"), str)
+        and (attempt.get("candidate_binary") or attempt.get("binary"))
     ]
-    detected_but_unusable = bool(required and not ready and candidate_binary)
+    detected_but_unusable = bool(
+        required and not ready and candidate_binary and not blocked_by_host_access
+    )
     if ready:
         version_suffix = (
             f" ({validation['version']})"
@@ -117,7 +128,12 @@ def office_renderer_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
         )
         detail = f"LibreOffice rendering is available at {soffice_binary}{version_suffix}."
     else:
-        if candidate_binary:
+        if blocked_by_host_access:
+            detail = (
+                "LibreOffice `soffice` is required to render PowerPoint, Word, and Excel "
+                f"sources. {validation['detail']}"
+            )
+        elif candidate_binary:
             detail = (
                 "LibreOffice `soffice` is required to render PowerPoint, Word, and Excel "
                 f"sources, but the detected candidate `{candidate_binary}` is not currently "
@@ -139,6 +155,9 @@ def office_renderer_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
         "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
         "validation_launcher": validation.get("launcher"),
         "detected_but_unusable": detected_but_unusable,
+        "blocked_by_host_access": blocked_by_host_access,
+        "host_access_required": host_access_required,
+        "host_access_guidance": host_access_guidance,
         "failed_candidates": failed_candidates,
         "detail": detail,
         "office_sources": relative_paths(paths, office_sources),

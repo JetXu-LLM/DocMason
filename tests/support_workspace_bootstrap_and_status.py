@@ -422,6 +422,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 "last_repair_at": "2026-03-25T00:00:00Z",
                 "host_access_required": False,
                 "host_access_guidance": None,
+                "machine_baseline_detail": "Native Codex machine baseline is ready.",
                 "homebrew_ready": True,
                 "homebrew_binary": "/opt/homebrew/bin/brew",
                 "pdf_renderer_ready": pdf_renderer_ready,
@@ -430,6 +431,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                 "requires_pdf_renderer": False,
                 "requires_office_renderer": False,
                 "manual_recovery_doc": "docs/setup/manual-workspace-recovery.md",
+                "libreoffice_blocked_by_host_access": False,
             },
         )
 
@@ -1431,7 +1433,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
         self.assertFalse(marker_path.exists())
 
-    def test_bootstrap_launcher_reports_detected_but_unusable_soffice_candidate(self) -> None:
+    def test_bootstrap_launcher_reports_host_access_blocked_soffice_candidate(self) -> None:
         workspace = self.make_workspace()
         script_path = workspace.root / "scripts" / "bootstrap-workspace.sh"
         script_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1486,12 +1488,14 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["status"], ACTION_REQUIRED)
         self.assertEqual(payload["machine_baseline_status"], "host-access-upgrade-required")
-        self.assertTrue(payload["libreoffice_detected_but_unusable"])
+        self.assertTrue(payload["libreoffice_blocked_by_host_access"])
+        self.assertFalse(payload["libreoffice_detected_but_unusable"])
         self.assertEqual(
             payload["libreoffice_candidate_binary"],
             str(fake_bin_dir / "soffice"),
         )
-        self.assertIn("not currently usable", payload["detail"])
+        self.assertIn("Full access", payload["detail"])
+        self.assertIn("Office rendering", payload["detail"])
 
     def test_bootstrap_launcher_reports_validation_unavailable_without_unusable_flag(
         self,
@@ -1900,7 +1904,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertTrue(report.payload["host_access_required"])
         self.assertEqual(report.payload["machine_baseline_status"], "host-access-upgrade-required")
 
-    def test_prepare_reports_detected_but_unusable_libreoffice_as_host_access_upgrade(self) -> None:
+    def test_prepare_reports_host_access_blocked_libreoffice_as_host_access_upgrade(self) -> None:
         workspace = self.make_workspace()
         with (
             mock.patch("docmason.commands.find_uv_binary", return_value="/usr/local/bin/uv"),
@@ -1912,16 +1916,22 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                     "binary": None,
                     "candidate_binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                     "validation_detail": (
-                        "The detected LibreOffice command failed the conversion smoke test: "
-                        "terminated by signal 6."
+                        "DocMason is currently running in Codex `Default permissions` on "
+                        "macOS, so it needs `Full access` before it can continue Office "
+                        "rendering through LibreOffice."
                     ),
-                    "detected_but_unusable": True,
+                    "detected_but_unusable": False,
+                    "blocked_by_host_access": True,
+                    "host_access_required": True,
+                    "host_access_guidance": (
+                        "Switch Codex to `Full access`, then continue the same task."
+                    ),
                     "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
                     "detail": (
                         "LibreOffice `soffice` is required to render PowerPoint, Word, and "
-                        "Excel sources, but the detected candidate "
-                        "`/Applications/LibreOffice.app/Contents/MacOS/soffice` is not "
-                        "currently usable."
+                        "Excel sources. DocMason is currently running in Codex `Default "
+                        "permissions` on macOS, so it needs `Full access` before it can "
+                        "continue Office rendering through LibreOffice."
                     ),
                 },
             ),
@@ -1947,12 +1957,13 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(report.payload["status"], ACTION_REQUIRED)
         self.assertEqual(report.payload["machine_baseline_status"], "host-access-upgrade-required")
         machine_baseline = report.payload["environment"]["machine_baseline"]
-        self.assertTrue(machine_baseline["libreoffice_detected_but_unusable"])
+        self.assertTrue(machine_baseline["libreoffice_blocked_by_host_access"])
+        self.assertFalse(machine_baseline["libreoffice_detected_but_unusable"])
         self.assertEqual(
             machine_baseline["libreoffice_candidate_binary"],
             "/Applications/LibreOffice.app/Contents/MacOS/soffice",
         )
-        self.assertIn("terminated by signal 6", machine_baseline["detail"])
+        self.assertIn("Full access", machine_baseline["detail"])
 
     def test_prepare_retries_transient_startup_silent_before_failing(self) -> None:
         workspace = self.make_workspace()
@@ -2574,7 +2585,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertEqual(office_check["status"], ACTION_REQUIRED)
         self.assertIn("libreoffice.org/download/download/", office_check["action"])
 
-    def test_doctor_reports_detected_but_unusable_libreoffice_under_default_permissions(
+    def test_doctor_reports_host_access_blocked_libreoffice_under_default_permissions(
         self,
     ) -> None:
         workspace = self.make_workspace()
@@ -2587,16 +2598,22 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                     "binary": None,
                     "candidate_binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                     "validation_detail": (
-                        "The detected LibreOffice command failed the conversion smoke test: "
-                        "terminated by signal 6."
+                        "DocMason is currently running in Codex `Default permissions` on "
+                        "macOS, so it needs `Full access` before it can continue Office "
+                        "rendering through LibreOffice."
                     ),
-                    "detected_but_unusable": True,
+                    "detected_but_unusable": False,
+                    "blocked_by_host_access": True,
+                    "host_access_required": True,
+                    "host_access_guidance": (
+                        "Switch Codex to `Full access`, then continue the same task."
+                    ),
                     "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
                     "detail": (
                         "LibreOffice `soffice` is required to render PowerPoint, Word, and "
-                        "Excel sources, but the detected candidate "
-                        "`/Applications/LibreOffice.app/Contents/MacOS/soffice` is not "
-                        "currently usable."
+                        "Excel sources. DocMason is currently running in Codex `Default "
+                        "permissions` on macOS, so it needs `Full access` before it can "
+                        "continue Office rendering through LibreOffice."
                     ),
                 },
             ),
@@ -2617,10 +2634,10 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             check for check in report.payload["checks"] if check["name"] == "machine-baseline"
         )
         self.assertEqual(machine_check["status"], ACTION_REQUIRED)
-        self.assertIn("not currently usable", machine_check["detail"])
+        self.assertIn("Full access", machine_check["detail"])
         self.assertIn("Full access", machine_check["action"])
 
-    def test_status_reports_detected_but_unusable_libreoffice_under_default_permissions(
+    def test_status_reports_host_access_blocked_libreoffice_under_default_permissions(
         self,
     ) -> None:
         workspace = self.make_workspace()
@@ -2633,16 +2650,22 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
                     "binary": None,
                     "candidate_binary": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
                     "validation_detail": (
-                        "The detected LibreOffice command failed the conversion smoke test: "
-                        "terminated by signal 6."
+                        "DocMason is currently running in Codex `Default permissions` on "
+                        "macOS, so it needs `Full access` before it can continue Office "
+                        "rendering through LibreOffice."
                     ),
-                    "detected_but_unusable": True,
+                    "detected_but_unusable": False,
+                    "blocked_by_host_access": True,
+                    "host_access_required": True,
+                    "host_access_guidance": (
+                        "Switch Codex to `Full access`, then continue the same task."
+                    ),
                     "probe_contract": LIBREOFFICE_PROBE_CONTRACT,
                     "detail": (
                         "LibreOffice `soffice` is required to render PowerPoint, Word, and "
-                        "Excel sources, but the detected candidate "
-                        "`/Applications/LibreOffice.app/Contents/MacOS/soffice` is not "
-                        "currently usable."
+                        "Excel sources. DocMason is currently running in Codex `Default "
+                        "permissions` on macOS, so it needs `Full access` before it can "
+                        "continue Office rendering through LibreOffice."
                     ),
                 },
             ),
@@ -2664,10 +2687,13 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             "host-access-upgrade-required",
         )
         self.assertTrue(
+            report.payload["environment"]["machine_baseline"]["libreoffice_blocked_by_host_access"]
+        )
+        self.assertFalse(
             report.payload["environment"]["machine_baseline"]["libreoffice_detected_but_unusable"]
         )
         self.assertIn(
-            "not currently usable",
+            "Full access",
             report.payload["environment"]["machine_baseline"]["detail"],
         )
 
@@ -2773,11 +2799,21 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.assertTrue(target.exists())
 
     def test_workspace_probe_soffice_timeout_returns_structured_detail(self) -> None:
-        with mock.patch(
-            "docmason.libreoffice_runtime.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(
-                cmd=[sys.executable, "--version"],
-                timeout=15.0,
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "full-access",
+                },
+                clear=False,
+            ),
+            mock.patch(
+                "docmason.libreoffice_runtime.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(
+                    cmd=[sys.executable, "--version"],
+                    timeout=15.0,
+                ),
             ),
         ):
             validation = validate_probe_soffice_binary(sys.executable)

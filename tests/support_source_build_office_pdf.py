@@ -642,6 +642,54 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertEqual(report.payload["required_capabilities"], ["office-rendering"])
         self.assertIn("LibreOffice-backed rendering", report.payload["detail"])
 
+    def test_sync_reports_full_access_blocker_when_office_rendering_hits_host_access(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.create_pptx(workspace.source_dir / "deck.pptx")
+
+        with (
+            mock.patch(
+                "docmason.commands.cached_bootstrap_readiness",
+                return_value={
+                    "ready": False,
+                    "reason": "host-access-upgrade-required",
+                    "detail": "Switch Codex to `Full access`, then continue the same task.",
+                },
+            ),
+            mock.patch(
+                "docmason.commands.environment_snapshot",
+                return_value={
+                    "host_access_required": True,
+                    "host_access_guidance": (
+                        "Switch Codex to `Full access`, then continue the same task."
+                    ),
+                    "machine_baseline": {
+                        "status": "host-access-upgrade-required",
+                        "detail": (
+                            "Native Codex machine baseline detected LibreOffice at "
+                            "`/Applications/LibreOffice.app/Contents/MacOS/soffice`, but this "
+                            "thread still needs `Full access` before DocMason can continue "
+                            "Office rendering for the current Office corpus."
+                        ),
+                        "libreoffice_required": True,
+                    },
+                },
+            ),
+        ):
+            report = sync_workspace(workspace)
+
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(report.payload["status"], ACTION_REQUIRED)
+        self.assertEqual(report.payload["sync_status"], "action-required")
+        self.assertEqual(report.payload["required_capabilities"], ["office-rendering"])
+        self.assertIn("Full access", report.payload["detail"])
+        self.assertIn("Office rendering", report.payload["detail"])
+        self.assertEqual(
+            report.payload["next_steps"],
+            ["Switch Codex to `Full access`, then continue the same task."],
+        )
+
     def test_build_single_source_artifacts_routes_legacy_office_by_document_type(self) -> None:
         workspace = self.make_workspace()
         source_dir = workspace.knowledge_base_staging_dir / "sources" / "source-legacy"
@@ -826,11 +874,21 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertFalse((source_dir / "artifact_renders" / "page-001" / "artifact-1.png").exists())
 
     def test_validate_soffice_binary_times_out_gracefully(self) -> None:
-        with mock.patch(
-            "docmason.libreoffice_runtime.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(
-                cmd=[sys.executable, "--version"],
-                timeout=15.0,
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "full-access",
+                },
+                clear=False,
+            ),
+            mock.patch(
+                "docmason.libreoffice_runtime.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(
+                    cmd=[sys.executable, "--version"],
+                    timeout=15.0,
+                ),
             ),
         ):
             validation = validate_soffice_binary(sys.executable)
@@ -863,9 +921,19 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
                     )
                 return subprocess.CompletedProcess(command, 134, stdout="", stderr="Abort trap: 6")
 
-            with mock.patch(
-                "docmason.libreoffice_runtime.subprocess.run",
-                side_effect=fake_run,
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "DOCMASON_AGENT_SURFACE": "codex",
+                        "DOCMASON_PERMISSION_MODE": "full-access",
+                    },
+                    clear=False,
+                ),
+                mock.patch(
+                    "docmason.libreoffice_runtime.subprocess.run",
+                    side_effect=fake_run,
+                ),
             ):
                 validation = validate_soffice_binary(str(candidate))
 
@@ -913,6 +981,11 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
             with (
+                mock.patch.dict(
+                    os.environ,
+                    {"DOCMASON_AGENT_SURFACE": "unknown-agent"},
+                    clear=False,
+                ),
                 mock.patch("docmason.libreoffice_runtime.sys.platform", "linux"),
                 mock.patch(
                     "docmason.libreoffice_runtime.shutil.which",
@@ -938,66 +1011,43 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
             [str(first_candidate)],
         )
 
-    def test_validate_soffice_binary_uses_launchservices_fallback_after_macos_abort(self) -> None:
+    def test_validate_soffice_binary_blocks_codex_default_permissions_without_spawning_libreoffice(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:
             tempdir = Path(tempdir_name)
             candidate = tempdir / "soffice"
             candidate.write_text("#!/bin/sh\n", encoding="utf-8")
             candidate.chmod(0o755)
-            source_path = tempdir / "sample.docx"
-            source_path.write_bytes(b"docx")
-            output_dir = tempdir / "out"
-
-            def fake_run(
-                command: list[str],
-                *,
-                capture_output: bool,
-                text: bool,
-                check: bool,
-                timeout: float | None = None,
-                env: dict[str, str] | None = None,
-            ) -> subprocess.CompletedProcess[str]:
-                del capture_output, text, check, timeout, env
-                if command[-1] == "--version":
-                    return subprocess.CompletedProcess(
-                        command,
-                        0,
-                        stdout="LibreOffice 25.8.3.2\n",
-                        stderr="",
-                    )
-                outdir = Path(command[command.index("--outdir") + 1])
-                input_path = Path(command[-1])
-                if command[0] == "/usr/bin/open":
-                    (outdir / f"{input_path.stem}.pdf").write_bytes(b"%PDF-1.4\n")
-                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-                return subprocess.CompletedProcess(command, 134, stdout="", stderr="Abort trap: 6")
 
             with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "DOCMASON_AGENT_SURFACE": "codex",
+                        "DOCMASON_PERMISSION_MODE": "default-permissions",
+                    },
+                    clear=False,
+                ),
                 mock.patch("docmason.libreoffice_runtime.sys.platform", "darwin"),
                 mock.patch(
-                    "docmason.libreoffice_runtime._launchservices_app_path",
-                    return_value=Path("/Applications/LibreOffice.app"),
-                ),
-                mock.patch(
                     "docmason.libreoffice_runtime.subprocess.run",
-                    side_effect=fake_run,
+                    side_effect=AssertionError("subprocess.run should not be called"),
                 ),
             ):
                 validation = validate_soffice_binary(str(candidate))
-                conversion = run_office_conversion(
-                    source_path,
-                    output_dir,
-                    str(candidate),
-                    target_format="pdf",
-                )
 
-        self.assertTrue(validation["ready"])
-        self.assertEqual(validation["launcher"], "launchservices")
-        self.assertTrue(conversion["success"])
-        self.assertEqual(conversion["launcher"], "launchservices")
-        self.assertEqual(conversion["output_path"], output_dir / "sample.pdf")
+        self.assertFalse(validation["ready"])
+        self.assertIsNone(validation["binary"])
+        self.assertEqual(validation["candidate_binary"], str(candidate))
+        self.assertTrue(validation["blocked_by_host_access"])
+        self.assertTrue(validation["host_access_required"])
+        self.assertIn("Default permissions", validation["detail"])
+        self.assertIn("Full access", validation["detail"])
 
-    def test_run_office_conversion_keeps_honest_detail_when_direct_and_fallback_fail(self) -> None:
+    def test_run_office_conversion_blocks_codex_default_permissions_without_spawning_libreoffice(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:
             tempdir = Path(tempdir_name)
             candidate = tempdir / "soffice"
@@ -1007,34 +1057,19 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
             source_path.write_bytes(b"docx")
             output_dir = tempdir / "out"
 
-            def fake_run(
-                command: list[str],
-                *,
-                capture_output: bool,
-                text: bool,
-                check: bool,
-                timeout: float | None = None,
-                env: dict[str, str] | None = None,
-            ) -> subprocess.CompletedProcess[str]:
-                del capture_output, text, check, timeout, env
-                if command[0] == "/usr/bin/open":
-                    return subprocess.CompletedProcess(
-                        command,
-                        1,
-                        stdout="",
-                        stderr="launch failed",
-                    )
-                return subprocess.CompletedProcess(command, 134, stdout="", stderr="Abort trap: 6")
-
             with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "DOCMASON_AGENT_SURFACE": "codex",
+                        "DOCMASON_PERMISSION_MODE": "default-permissions",
+                    },
+                    clear=False,
+                ),
                 mock.patch("docmason.libreoffice_runtime.sys.platform", "darwin"),
                 mock.patch(
-                    "docmason.libreoffice_runtime._launchservices_app_path",
-                    return_value=Path("/Applications/LibreOffice.app"),
-                ),
-                mock.patch(
                     "docmason.libreoffice_runtime.subprocess.run",
-                    side_effect=fake_run,
+                    side_effect=AssertionError("subprocess.run should not be called"),
                 ),
             ):
                 conversion = run_office_conversion(
@@ -1045,8 +1080,66 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
                 )
 
         self.assertFalse(conversion["success"])
-        self.assertIn("direct start failed with terminated by signal 6", conversion["cause"])
-        self.assertIn("LaunchServices fallback failed with launch failed", conversion["cause"])
+        self.assertIsNone(conversion["launcher"])
+        self.assertEqual(conversion["attempts"], [])
+        self.assertTrue(conversion["blocked_by_host_access"])
+        self.assertTrue(conversion["host_access_required"])
+        self.assertIn("Default permissions", conversion["cause"])
+        self.assertIn("Full access", conversion["cause"])
+
+    def test_validate_soffice_binary_reports_direct_headless_failure_without_launchservices(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            tempdir = Path(tempdir_name)
+            candidate = tempdir / "soffice"
+            candidate.write_text("#!/bin/sh\n", encoding="utf-8")
+            candidate.chmod(0o755)
+            commands_seen: list[list[str]] = []
+
+            def fake_run(
+                command: list[str],
+                *,
+                capture_output: bool,
+                text: bool,
+                check: bool,
+                timeout: float | None = None,
+                env: dict[str, str] | None = None,
+            ) -> subprocess.CompletedProcess[str]:
+                del capture_output, text, check, timeout, env
+                commands_seen.append(command)
+                if command[-1] == "--version":
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout="LibreOffice 25.8.3.2\n",
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(command, 134, stdout="", stderr="Abort trap: 6")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "DOCMASON_AGENT_SURFACE": "codex",
+                        "DOCMASON_PERMISSION_MODE": "full-access",
+                    },
+                    clear=False,
+                ),
+                mock.patch("docmason.libreoffice_runtime.sys.platform", "darwin"),
+                mock.patch(
+                    "docmason.libreoffice_runtime.subprocess.run",
+                    side_effect=fake_run,
+                ),
+            ):
+                validation = validate_soffice_binary(str(candidate))
+
+        self.assertFalse(validation["ready"])
+        self.assertIsNone(validation["launcher"])
+        self.assertIn("terminated by signal 6", validation["detail"])
+        self.assertNotIn("LaunchServices", validation["detail"])
+        self.assertTrue(commands_seen)
+        self.assertTrue(all(command[0] != "/usr/bin/open" for command in commands_seen))
 
     def test_legacy_ppt_reuses_pptx_builder_via_libreoffice_normalization(self) -> None:
         workspace = self.make_workspace()

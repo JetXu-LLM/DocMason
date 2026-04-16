@@ -1581,6 +1581,7 @@ def _machine_baseline_snapshot(
     libreoffice_validation_detail = office.get("validation_detail")
     libreoffice_probe_contract = office.get("probe_contract")
     libreoffice_detected_but_unusable = bool(office.get("detected_but_unusable"))
+    libreoffice_blocked_by_host_access = bool(office.get("blocked_by_host_access"))
     provider = str(host_execution.get("host_provider") or "unknown-agent")
     applicable = sys.platform == "darwin" and provider == "codex"
     if not applicable:
@@ -1598,6 +1599,7 @@ def _machine_baseline_snapshot(
             "libreoffice_validation_detail": libreoffice_validation_detail,
             "libreoffice_probe_contract": libreoffice_probe_contract,
             "libreoffice_detected_but_unusable": libreoffice_detected_but_unusable,
+            "libreoffice_blocked_by_host_access": libreoffice_blocked_by_host_access,
             "host_access_required": False,
             "host_access_guidance": None,
             "host_access_reasons": [],
@@ -1633,6 +1635,7 @@ def _machine_baseline_snapshot(
             "libreoffice_validation_detail": libreoffice_validation_detail,
             "libreoffice_probe_contract": libreoffice_probe_contract,
             "libreoffice_detected_but_unusable": libreoffice_detected_but_unusable,
+            "libreoffice_blocked_by_host_access": False,
             "host_access_required": False,
             "host_access_guidance": None,
             "host_access_reasons": [],
@@ -1640,7 +1643,25 @@ def _machine_baseline_snapshot(
         }
 
     missing_detail = ", ".join(missing_components)
-    if libreoffice_detected_but_unusable:
+    if libreoffice_blocked_by_host_access:
+        candidate_detail = (
+            f" at `{libreoffice_candidate_binary}`"
+            if isinstance(libreoffice_candidate_binary, str) and libreoffice_candidate_binary
+            else ""
+        )
+        validation_suffix = (
+            f" Validation detail: {libreoffice_validation_detail}"
+            if isinstance(libreoffice_validation_detail, str) and libreoffice_validation_detail
+            else ""
+        )
+        baseline_gap_detail = (
+            "Native Codex machine baseline detected LibreOffice"
+            f"{candidate_detail}, but this thread still needs `Full access` before "
+            "DocMason can continue Office rendering for the current Office corpus."
+            f"{validation_suffix}"
+        )
+        host_access_reason = baseline_gap_detail
+    elif libreoffice_detected_but_unusable:
         candidate_detail = (
             f" at `{libreoffice_candidate_binary}`"
             if isinstance(libreoffice_candidate_binary, str) and libreoffice_candidate_binary
@@ -1704,6 +1725,7 @@ def _machine_baseline_snapshot(
         "libreoffice_validation_detail": libreoffice_validation_detail,
         "libreoffice_probe_contract": libreoffice_probe_contract,
         "libreoffice_detected_but_unusable": libreoffice_detected_but_unusable,
+        "libreoffice_blocked_by_host_access": libreoffice_blocked_by_host_access,
         "host_access_required": host_access_required,
         "host_access_guidance": guidance,
         "host_access_reasons": host_access_reasons,
@@ -1805,12 +1827,16 @@ def write_bootstrap_ready_marker(
         "host_access_required": bool(machine_baseline.get("host_access_required")),
         "host_access_guidance": machine_baseline.get("host_access_guidance"),
         "host_access_reasons": list(machine_baseline.get("host_access_reasons") or []),
+        "machine_baseline_detail": machine_baseline.get("detail"),
         "libreoffice_executable": office_snapshot.get("binary"),
         "office_probe_contract": office_snapshot.get("probe_contract"),
         "libreoffice_candidate_binary": office_snapshot.get("candidate_binary"),
         "libreoffice_validation_detail": office_snapshot.get("validation_detail"),
         "libreoffice_detected_but_unusable": bool(
             office_snapshot.get("detected_but_unusable")
+        ),
+        "libreoffice_blocked_by_host_access": bool(
+            office_snapshot.get("blocked_by_host_access")
         ),
         "libreoffice_validation_launcher": office_snapshot.get("validation_launcher"),
         "libreoffice_origin": (
@@ -3130,7 +3156,12 @@ def doctor_workspace(
     office_snapshot = office_renderer_snapshot(workspace)
     office_action = None
     if office_snapshot["required"] and not office_snapshot["ready"]:
-        office_action = office_renderer_next_step()
+        if office_snapshot.get("host_access_required"):
+            office_action = str(
+                office_snapshot.get("host_access_guidance") or _codex_full_access_guidance()
+            )
+        else:
+            office_action = office_renderer_next_step()
         add_check("office-renderer", ACTION_REQUIRED, office_snapshot["detail"], office_action)
     else:
         add_check("office-renderer", READY, office_snapshot["detail"])
@@ -3581,6 +3612,19 @@ def sync_workspace(
             if reason == "office-renderer-required":
                 readiness_next_steps.append(office_renderer_next_step())
                 required_capabilities.append("office-rendering")
+            elif reason == "host-access-upgrade-required":
+                machine_baseline = (
+                    dict(environment.get("machine_baseline", {}))
+                    if isinstance(environment.get("machine_baseline"), dict)
+                    else {}
+                )
+                if bool(machine_baseline.get("libreoffice_required")):
+                    required_capabilities.append("office-rendering")
+                else:
+                    required_capabilities.append("host-access-upgrade")
+                readiness_next_steps.append(
+                    str(environment.get("host_access_guidance") or _codex_full_access_guidance())
+                )
             elif reason == "pdf-renderer-required":
                 readiness_next_steps.append(pdf_renderer_next_step())
                 required_capabilities.append("pdf-rendering")
@@ -3589,6 +3633,18 @@ def sync_workspace(
                     "Run `docmason prepare` before retrying `docmason sync`."
                 )
             detail = str(sync_readiness.get("detail") or "The workspace is not ready for sync.")
+            if reason == "host-access-upgrade-required":
+                machine_baseline = (
+                    dict(environment.get("machine_baseline", {}))
+                    if isinstance(environment.get("machine_baseline"), dict)
+                    else {}
+                )
+                detail = str(
+                    machine_baseline.get("detail")
+                    or detail
+                    or environment.get("host_access_guidance")
+                    or "The current workspace still needs `Full access` before sync can continue."
+                )
             payload = {
                 "status": ACTION_REQUIRED,
                 "sync_status": ACTION_REQUIRED,

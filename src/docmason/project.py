@@ -1281,7 +1281,9 @@ def cached_bootstrap_readiness(
             "ready": False,
             "reason": machine_baseline_status,
             "detail": (
-                str(state.get("host_access_guidance") or "")
+                str(state.get("machine_baseline_detail") or "")
+                or str(state.get("host_access_guidance") or "")
+                or str(state.get("libreoffice_validation_detail") or "")
                 or str(state.get("machine_baseline_status") or "")
                 or "The native machine baseline is not ready yet."
             ),
@@ -1381,6 +1383,7 @@ def bootstrap_state_summary(
             if state and isinstance(state.get("host_access_reasons"), list)
             else []
         ),
+        "machine_baseline_detail": state.get("machine_baseline_detail") if state else None,
         "libreoffice_candidate_binary": (
             state.get("libreoffice_candidate_binary") if state else None
         ),
@@ -1389,6 +1392,11 @@ def bootstrap_state_summary(
         ),
         "libreoffice_detected_but_unusable": bool(
             state.get("libreoffice_detected_but_unusable")
+        )
+        if state
+        else False,
+        "libreoffice_blocked_by_host_access": bool(
+            state.get("libreoffice_blocked_by_host_access")
         )
         if state
         else False,

@@ -598,6 +598,54 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
         self.assertFalse(turn["auto_prepare_triggered"])
         self.assertFalse(turn["auto_sync_triggered"])
 
+    def test_prepare_ask_turn_keeps_published_office_kb_answerable_under_default_permissions(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        (workspace.source_dir / "brief.docx").write_text("docx placeholder\n", encoding="utf-8")
+        seed_self_contained_bootstrap_state(
+            workspace,
+            prepared_at="2026-03-21T00:00:00Z",
+        )
+        self.seed_published_kb_stub(workspace)
+
+        with (
+            mock.patch(
+                "docmason.ask.prepare_workspace",
+                side_effect=AssertionError("prepare should not run"),
+            ),
+            mock.patch(
+                "docmason.ask.bootstrap_workspace_with_launcher",
+                side_effect=AssertionError("launcher should not run"),
+            ),
+            mock.patch(
+                "docmason.ask.run_sync_command",
+                side_effect=AssertionError("sync should not run"),
+            ),
+            mock.patch.dict(
+                os.environ,
+                {
+                    "DOCMASON_AGENT_SURFACE": "codex",
+                    "DOCMASON_PERMISSION_MODE": "default-permissions",
+                    "CODEX_THREAD_ID": "thread-office-kb-default",
+                },
+                clear=False,
+            ),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        self.assertEqual(turn["status"], "prepared")
+        self.assertEqual(turn["inner_workflow_id"], "grounded-answer")
+        self.assertFalse(turn["auto_prepare_triggered"])
+        self.assertFalse(turn["auto_sync_triggered"])
+
     def test_prepare_ask_turn_reuses_healthy_schema4_marker_without_auto_prepare(self) -> None:
         workspace = self.make_workspace()
         self.create_pdf(workspace.source_dir / "example.pdf")

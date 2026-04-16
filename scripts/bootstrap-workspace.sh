@@ -357,6 +357,7 @@ probe_libreoffice_validation() {
   LIBREOFFICE_VALIDATION_DETAIL=""
   LIBREOFFICE_PROBE_CONTRACT=""
   LIBREOFFICE_DETECTED_BUT_UNUSABLE="0"
+  LIBREOFFICE_BLOCKED_BY_HOST_ACCESS="0"
   LIBREOFFICE_VALIDATION_UNAVAILABLE="0"
 
   probe_python="$(find_host_context_helper_python || true)"
@@ -413,10 +414,14 @@ def emit(name: str, value: object) -> None:
 binary = payload.get("binary")
 ready = bool(payload.get("ready"))
 emit("LIBREOFFICE_BINARY", binary if ready else "")
-emit("LIBREOFFICE_CANDIDATE_BINARY", binary or "")
+emit("LIBREOFFICE_CANDIDATE_BINARY", payload.get("candidate_binary") or binary or "")
 emit("LIBREOFFICE_VALIDATION_DETAIL", payload.get("detail") or "")
 emit("LIBREOFFICE_PROBE_CONTRACT", payload.get("probe_contract") or "")
 emit("LIBREOFFICE_DETECTED_BUT_UNUSABLE", "1" if (not ready and binary) else "0")
+emit(
+    "LIBREOFFICE_BLOCKED_BY_HOST_ACCESS",
+    "1" if payload.get("blocked_by_host_access") else "0",
+)
 PY
   )
 }
@@ -461,6 +466,7 @@ probe_machine_baseline() {
   LIBREOFFICE_VALIDATION_DETAIL=""
   LIBREOFFICE_PROBE_CONTRACT=""
   LIBREOFFICE_DETECTED_BUT_UNUSABLE="0"
+  LIBREOFFICE_BLOCKED_BY_HOST_ACCESS="0"
   LIBREOFFICE_VALIDATION_UNAVAILABLE="0"
   OFFICE_RENDERER_REQUIRED=0
   MACHINE_BASELINE_MISSING_COMPONENTS=()
@@ -479,6 +485,8 @@ probe_machine_baseline() {
 
   if [[ "$OFFICE_RENDERER_REQUIRED" == "1" && -z "$LIBREOFFICE_BINARY" ]]; then
     if [[ "$LIBREOFFICE_VALIDATION_UNAVAILABLE" == "1" ]]; then
+      missing+=("LibreOffice")
+    elif [[ "$LIBREOFFICE_BLOCKED_BY_HOST_ACCESS" == "1" ]]; then
       missing+=("LibreOffice")
     elif [[ "$LIBREOFFICE_DETECTED_BUT_UNUSABLE" == "1" ]]; then
       missing+=("LibreOffice (detected but unusable)")
@@ -512,6 +520,16 @@ probe_machine_baseline() {
       baseline_gap_detail="$baseline_gap_detail Validation detail: $LIBREOFFICE_VALIDATION_DETAIL"
     fi
     MACHINE_BASELINE_HOST_ACCESS_REASON="Native Codex machine baseline cannot yet validate LibreOffice for the current Office corpus because no supported helper Python or bootstrap runtime is available."
+  elif [[ "$LIBREOFFICE_BLOCKED_BY_HOST_ACCESS" == "1" ]]; then
+    baseline_gap_detail="Native Codex machine baseline detected LibreOffice"
+    if [[ -n "$LIBREOFFICE_CANDIDATE_BINARY" ]]; then
+      baseline_gap_detail="$baseline_gap_detail at \`$LIBREOFFICE_CANDIDATE_BINARY\`"
+    fi
+    baseline_gap_detail="$baseline_gap_detail, but this thread still needs \`Full access\` before DocMason can continue Office rendering for the current Office corpus."
+    if [[ -n "$LIBREOFFICE_VALIDATION_DETAIL" ]]; then
+      baseline_gap_detail="$baseline_gap_detail Validation detail: $LIBREOFFICE_VALIDATION_DETAIL"
+    fi
+    MACHINE_BASELINE_HOST_ACCESS_REASON="$baseline_gap_detail"
   elif [[ "$LIBREOFFICE_DETECTED_BUT_UNUSABLE" == "1" ]]; then
     baseline_gap_detail="Native Codex machine baseline detected LibreOffice"
     if [[ -n "$LIBREOFFICE_CANDIDATE_BINARY" ]]; then
@@ -578,6 +596,11 @@ emit_host_access_upgrade() {
     printf '  "libreoffice_probe_contract": '
     json_string_or_null "$LIBREOFFICE_PROBE_CONTRACT"
     printf ',\n'
+    if [[ "$LIBREOFFICE_BLOCKED_BY_HOST_ACCESS" == "1" ]]; then
+      printf '  "libreoffice_blocked_by_host_access": true,\n'
+    else
+      printf '  "libreoffice_blocked_by_host_access": false,\n'
+    fi
     if [[ "$LIBREOFFICE_DETECTED_BUT_UNUSABLE" == "1" ]]; then
       printf '  "libreoffice_detected_but_unusable": true,\n'
     else
