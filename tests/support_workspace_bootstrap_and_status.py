@@ -1461,6 +1461,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.rewrite_workspace_libreoffice_runtime(
             workspace,
             app_bundle_path=fake_soffice_path.parent.parent.parent,
+            platform_override="darwin",
         )
         (workspace.source_dir / "deck.docx").write_text("docx placeholder\n", encoding="utf-8")
 
