@@ -70,7 +70,7 @@ def current_host_execution_context() -> dict[str, Any]:
         return {
             "host_provider": host_provider,
             "permission_mode": permission_mode,
-            "full_machine_access": permission_mode == "full-access",
+            "full_machine_access": False,
         }
     try:
         context = conversation_host_context()
@@ -78,7 +78,7 @@ def current_host_execution_context() -> dict[str, Any]:
         return {
             "host_provider": host_provider,
             "permission_mode": permission_mode,
-            "full_machine_access": permission_mode == "full-access",
+            "full_machine_access": False,
         }
     return context if isinstance(context, dict) else {}
 
