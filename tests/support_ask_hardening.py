@@ -35,6 +35,7 @@ from docmason.control_plane import ensure_shared_job, lane_c_job_key, load_share
 from docmason.conversation import load_turn_record, update_conversation_turn
 from docmason.front_controller import write_hybrid_refresh_work
 from docmason.host_integration import handle_hidden_ask_request, run_hidden_ask_cli
+from docmason.interaction import _persist_interaction_entry, refresh_interaction_overlay
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import (
     _recommended_hybrid_targets,
@@ -286,6 +287,58 @@ class AskHardeningTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def seed_pending_interaction_entry(
+        self,
+        workspace: WorkspacePaths,
+        *,
+        native_ledger_id: str,
+        conversation_id: str,
+        turn_id: str,
+        native_turn_id: str,
+        recorded_at: str,
+        user_text: str,
+        assistant_excerpt: str,
+        related_source_ids: list[str],
+        semantic_analysis: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        entry = _persist_interaction_entry(
+            workspace,
+            native_ledger_id=native_ledger_id,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            native_turn_id=native_turn_id,
+            recorded_at=recorded_at,
+            user_text=user_text,
+            assistant_excerpt=assistant_excerpt,
+            attachment_refs=[],
+            continuation_type="follow-up",
+            related_source_ids=related_source_ids,
+            tool_use_audit={"consulted_source_ids": related_source_ids},
+            question_class="composition",
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            analysis_origin="test-fixture",
+            semantic_analysis=semantic_analysis,
+        )
+        refresh_interaction_overlay(workspace)
+        return entry
+
+    def ambiguous_reference_resolution(self) -> dict[str, object]:
+        return {
+            "detected": True,
+            "status": "unresolved",
+            "source_match_status": "unresolved",
+            "unit_match_status": "none",
+            "unresolved_reason": "ambiguous-source",
+            "hard_boundary": False,
+            "source_narrowing_allowed": False,
+            "requested_source_text": "Regional Process Overview",
+            "notice_text": (
+                "Multiple published sources match `Regional Process Overview`; keep the "
+                "reference unresolved and explicit."
+            ),
+        }
+
     def publish_seeded_corpus(self, workspace: WorkspacePaths) -> list[str]:
         pending = sync_workspace(workspace, autonomous=False)
         self.assertEqual(pending.payload["sync_status"], "pending-synthesis")
@@ -309,6 +362,194 @@ class AskHardeningTests(unittest.TestCase):
         published = sync_workspace(workspace)
         self.assertEqual(published.payload["sync_status"], "valid")
         return source_ids
+
+    def test_prepare_ask_turn_ignores_current_self_hit_pending_interaction_backlog(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        question = (
+            "Draft the Regional Process Overview office review response with the new "
+            "deadline language and required reference style."
+        )
+        semantic_analysis = self.semantic_analysis(
+            question_class="composition",
+            question_domain="workspace-corpus",
+            needs_latest_workspace_state=True,
+            memory_mode="strong",
+            relevant_memory_kinds=[
+                "constraint",
+                "clarification",
+                "preference",
+                "working-note",
+            ],
+        )
+        current_entry = self.seed_pending_interaction_entry(
+            workspace,
+            native_ledger_id="a" * 64,
+            conversation_id="native-thread-self-hit",
+            turn_id="native-turn-self-hit",
+            native_turn_id="native-turn-self-hit",
+            recorded_at="2026-04-17T00:00:00Z",
+            user_text=question,
+            assistant_excerpt="The review response should emphasize the deadline language.",
+            related_source_ids=[source_ids[0]],
+            semantic_analysis=semantic_analysis,
+        )
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-self-hit"}, clear=False),
+            mock.patch(
+                "docmason.ask.maybe_reconcile_active_thread",
+                return_value={
+                    "status": "reconciled",
+                    "captured_interaction_ids": [current_entry["interaction_id"]],
+                },
+            ),
+            mock.patch(
+                "docmason.ask.resolve_workspace_reference",
+                return_value=self.ambiguous_reference_resolution(),
+            ),
+            mock.patch(
+                "docmason.ask.run_sync_command",
+                side_effect=AssertionError("self-hit backlog should not trigger sync"),
+            ),
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question=question,
+                semantic_analysis=semantic_analysis,
+            )
+
+        self.assertEqual(turn["status"], "prepared")
+        self.assertNotEqual(turn["inner_workflow_id"], "knowledge-base-sync")
+        self.assertFalse(turn["auto_sync_triggered"])
+        self.assertFalse(turn["interaction_sync_suggested"])
+        self.assertEqual(turn["reference_resolution"]["status"], "unresolved")
+        stored_turn = load_turn_record(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+        )
+        self.assertEqual(
+            stored_turn["captured_interaction_ids"],
+            [current_entry["interaction_id"]],
+        )
+
+    def test_prepare_ask_turn_keeps_older_pending_interaction_backlog_blocking(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        question = (
+            "Draft the Regional Process Overview office review response with the new "
+            "deadline language and required reference style."
+        )
+        semantic_analysis = self.semantic_analysis(
+            question_class="composition",
+            question_domain="workspace-corpus",
+            needs_latest_workspace_state=True,
+            memory_mode="strong",
+            relevant_memory_kinds=[
+                "constraint",
+                "clarification",
+                "preference",
+                "working-note",
+            ],
+        )
+        older_entry = self.seed_pending_interaction_entry(
+            workspace,
+            native_ledger_id="b" * 64,
+            conversation_id="native-thread-older-backlog",
+            turn_id="native-turn-older-backlog",
+            native_turn_id="native-turn-older-backlog",
+            recorded_at="2026-04-16T23:59:00Z",
+            user_text=(
+                "Regional Process Overview review responses must include the new deadline "
+                "language and follow the required reference style."
+            ),
+            assistant_excerpt="Keep the office review draft aligned with the new deadline note.",
+            related_source_ids=[source_ids[0]],
+            semantic_analysis=semantic_analysis,
+        )
+        current_entry = self.seed_pending_interaction_entry(
+            workspace,
+            native_ledger_id="c" * 64,
+            conversation_id="native-thread-current-self-hit",
+            turn_id="native-turn-current-self-hit",
+            native_turn_id="native-turn-current-self-hit",
+            recorded_at="2026-04-17T00:00:00Z",
+            user_text=question,
+            assistant_excerpt="The current ask restates the same office review request.",
+            related_source_ids=[source_ids[0]],
+            semantic_analysis=semantic_analysis,
+        )
+
+        sync_report = CommandReport(
+            0,
+            {
+                "status": READY,
+                "sync_status": "valid",
+                "detail": "Published interaction promotion update.",
+                "published": True,
+                "change_set": {"stats": {}},
+                "control_plane": {},
+            },
+            [],
+        )
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CODEX_THREAD_ID": "thread-older-backlog"},
+                clear=False,
+            ),
+            mock.patch(
+                "docmason.ask.maybe_reconcile_active_thread",
+                return_value={
+                    "status": "reconciled",
+                    "captured_interaction_ids": [
+                        older_entry["interaction_id"],
+                        current_entry["interaction_id"],
+                    ],
+                },
+            ),
+            mock.patch(
+                "docmason.ask.resolve_workspace_reference",
+                return_value=self.ambiguous_reference_resolution(),
+            ),
+            mock.patch("docmason.ask.run_sync_command", return_value=sync_report) as sync_mock,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question=question,
+                semantic_analysis=semantic_analysis,
+            )
+
+        self.assertTrue(turn["auto_sync_triggered"])
+        self.assertEqual(sync_mock.call_count, 1)
+        self.assertEqual(
+            turn["auto_sync_reason"],
+            (
+                "Relevant pending interaction-derived knowledge still awaits "
+                "sync-time promotion."
+            ),
+        )
+        stored_turn = load_turn_record(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+        )
+        self.assertEqual(
+            stored_turn["captured_interaction_ids"],
+            [current_entry["interaction_id"]],
+        )
 
     def test_workflow_runner_reports_pending_authoring_for_sync(self) -> None:
         workspace = self.make_workspace()

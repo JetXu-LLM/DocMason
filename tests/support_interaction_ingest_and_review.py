@@ -987,7 +987,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
             canonical["turn_id"],
         )
 
-    def test_prepare_ask_turn_recommends_sync_when_pending_interaction_is_relevant(self) -> None:
+    def test_prepare_ask_turn_ignores_current_self_hit_pending_interaction(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.create_pdf(workspace.source_dir / "a.pdf")
@@ -1024,15 +1024,9 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                 ),
             )
 
-        self.assertTrue(turn["auto_sync_triggered"])
-        self.assertEqual(turn["auto_sync_summary"]["status"], "valid")
-        self.assertEqual(
-            turn["auto_sync_reason"],
-            (
-                "Relevant pending interaction-derived knowledge still awaits "
-                "sync-time promotion."
-            ),
-        )
+        self.assertFalse(turn["auto_sync_triggered"])
+        self.assertFalse(turn["interaction_sync_suggested"])
+        self.assertEqual(turn["status"], "prepared")
 
     def test_prepare_ask_turn_keeps_exact_source_pending_interaction_advisory(self) -> None:
         workspace = self.make_workspace()

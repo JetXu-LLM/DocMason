@@ -1907,6 +1907,7 @@ def prepare_ask_turn(
         return lifecycle_violation
 
     explicit_continuation = False
+    reconciliation_result: dict[str, Any] | None = None
     confirmation_resolution = _maybe_handle_confirmation_reply(
         paths,
         question=question,
@@ -1921,7 +1922,8 @@ def prepare_ask_turn(
         if isinstance(confirmation_resolution.semantic_analysis, dict):
             semantic_analysis = confirmation_resolution.semantic_analysis
     else:
-        maybe_reconcile_active_thread(paths)
+        reconciliation_result = maybe_reconcile_active_thread(paths)
+    latest_captured_interaction_ids: list[str] = []
     opened = open_conversation_turn(paths, user_question=question, entry_workflow_id="ask")
     run_payload = ensure_run_for_turn(
         paths,
@@ -1942,6 +1944,21 @@ def prepare_ask_turn(
         run_id=run_id,
         log_origin=effective_log_origin,
     )
+    if isinstance(reconciliation_result, dict):
+        captured_interaction_ids = [
+            interaction_id
+            for interaction_id in reconciliation_result.get("captured_interaction_ids", [])
+            if isinstance(interaction_id, str) and interaction_id
+        ]
+        if captured_interaction_ids:
+            latest_captured_interaction_ids = [captured_interaction_ids[-1]]
+            update_conversation_turn(
+                paths,
+                conversation_id=opened["conversation_id"],
+                turn_id=opened["turn_id"],
+                updates={"captured_interaction_ids": latest_captured_interaction_ids},
+                refresh_workspace_snapshot=False,
+            )
     current_turn = {
         "conversation_id": opened["conversation_id"],
         "turn_id": opened["turn_id"],
@@ -2062,6 +2079,7 @@ def prepare_ask_turn(
         question,
         question_class=question_class,
         question_domain=question_domain,
+        ignored_interaction_ids=latest_captured_interaction_ids,
     )
     interaction_snapshot = interaction_ingest_snapshot(paths)
     warm_start = profile["warm_start_evidence"]
@@ -2447,6 +2465,7 @@ def prepare_ask_turn(
             "research_depth": research_depth,
             "bundle_paths": bundle_paths,
             "reused_previous_evidence": bool(warm_start.get("matched_records")),
+            "captured_interaction_ids": latest_captured_interaction_ids,
             "attached_shared_job_ids": attached_shared_job_ids,
             "confirmation_kind": confirmation_kind,
             "confirmation_prompt": confirmation_prompt,

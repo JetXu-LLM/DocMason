@@ -957,9 +957,15 @@ def interaction_overlay_relevance(
     *,
     question_class: str | None = None,
     question_domain: str | None = None,
+    ignored_interaction_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return a compact relevance summary against pending interaction entries."""
     query_terms = set(tokenize_text(question))
+    ignored_ids = {
+        interaction_id
+        for interaction_id in (ignored_interaction_ids or [])
+        if isinstance(interaction_id, str) and interaction_id
+    }
     if question_class is None:
         question_class, _workflow_id, _route_reason = infer_question_class(question)
     if question_domain is None:
@@ -982,6 +988,9 @@ def interaction_overlay_relevance(
     best_threshold = 0
     for source_record in overlay.get("source_records", []):
         if not isinstance(source_record, dict):
+            continue
+        source_id = source_record.get("source_id")
+        if isinstance(source_id, str) and source_id in ignored_ids:
             continue
         searchable_text = str(source_record.get("searchable_text", ""))
         score = len(query_terms & set(tokenize_text(searchable_text)))
@@ -1010,7 +1019,7 @@ def interaction_overlay_relevance(
             threshold += 1
         if score > best_score:
             best_score = score
-            best_source_id = source_record.get("source_id")
+            best_source_id = source_id
             best_threshold = threshold
     return {
         "best_source_id": best_source_id,
