@@ -7,15 +7,23 @@ on:
   release:
     types:
       - published
+  workflow_run:
+    workflows:
+      - Release Distributions
+    types:
+      - completed
 
 permissions:
   contents: write
 
 jobs:
   update-badge:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
