@@ -19,6 +19,15 @@ _DIRECT_LAUNCHER = "direct"
 _FULL_ACCESS_GUIDANCE = "Switch Codex to `Full access`, then continue the same task."
 
 
+def _effective_platform() -> str:
+    """Return the effective platform, honoring controlled launcher overrides."""
+    override = str(os.environ.get("DOCMASON_EFFECTIVE_PLATFORM") or "").strip().lower()
+    if override:
+        normalized = {"darwin": "darwin", "macos": "darwin", "linux": "linux"}.get(override)
+        return normalized or override
+    return sys.platform
+
+
 def _normalized_command_output(stdout: str | None, stderr: str | None) -> str:
     values: list[str] = []
     for raw in (stderr, stdout):
@@ -301,7 +310,7 @@ def _run_conversion_attempt(
 
 def _libreoffice_host_access_block(*, candidate_binary: str | None) -> dict[str, Any] | None:
     """Return a structured block when this Codex thread cannot spawn LibreOffice safely."""
-    if sys.platform != "darwin":
+    if _effective_platform() != "darwin":
         return None
 
     host_execution = current_host_execution_context()

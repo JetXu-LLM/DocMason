@@ -1045,6 +1045,41 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         self.assertIn("Default permissions", validation["detail"])
         self.assertIn("Full access", validation["detail"])
 
+    def test_validate_soffice_binary_honors_effective_platform_override_for_launcher_checks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            tempdir = Path(tempdir_name)
+            candidate = tempdir / "soffice"
+            candidate.write_text("#!/bin/sh\n", encoding="utf-8")
+            candidate.chmod(0o755)
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "DOCMASON_AGENT_SURFACE": "codex",
+                        "DOCMASON_PERMISSION_MODE": "default-permissions",
+                        "DOCMASON_EFFECTIVE_PLATFORM": "Darwin",
+                    },
+                    clear=False,
+                ),
+                mock.patch("docmason.libreoffice_runtime.sys.platform", "linux"),
+                mock.patch(
+                    "docmason.libreoffice_runtime.subprocess.run",
+                    side_effect=AssertionError("subprocess.run should not be called"),
+                ),
+            ):
+                validation = validate_soffice_binary(str(candidate))
+
+        self.assertFalse(validation["ready"])
+        self.assertIsNone(validation["binary"])
+        self.assertEqual(validation["candidate_binary"], str(candidate))
+        self.assertTrue(validation["blocked_by_host_access"])
+        self.assertTrue(validation["host_access_required"])
+        self.assertIn("Default permissions", validation["detail"])
+        self.assertIn("Full access", validation["detail"])
+
     def test_run_office_conversion_blocks_codex_default_permissions_without_spawning_libreoffice(
         self,
     ) -> None:
