@@ -351,7 +351,6 @@ probe_libreoffice_validation() {
   local probe_python=""
   local shell_line=""
   local candidate=""
-  local effective_platform=""
 
   LIBREOFFICE_BINARY=""
   LIBREOFFICE_CANDIDATE_BINARY=""
@@ -378,15 +377,11 @@ probe_libreoffice_validation() {
     LIBREOFFICE_VALIDATION_DETAIL="No supported Python runtime was available to validate LibreOffice with the current smoke-probe contract."
     return 0
   fi
-  effective_platform="$(uname -s 2>/dev/null || true)"
 
   while IFS= read -r shell_line; do
     eval "$shell_line"
   done < <(
-    ROOT="$ROOT" \
-      DOCMASON_EFFECTIVE_PLATFORM="$effective_platform" \
-      PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
-      "$probe_python" - <<'PY'
+    ROOT="$ROOT" PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" "$probe_python" - <<'PY'
 import os
 import shlex
 import sys

@@ -158,6 +158,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         workspace: WorkspacePaths,
         *,
         app_bundle_path: Path,
+        platform_override: str | None = None,
     ) -> None:
         runtime_path = workspace.root / "src" / "docmason" / "libreoffice_runtime.py"
         binary_path = app_bundle_path / "Contents" / "MacOS" / "soffice"
@@ -167,6 +168,12 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
             str(binary_path),
         )
         text = text.replace("/Applications/LibreOffice.app", str(app_bundle_path))
+        if platform_override is not None:
+            text = text.replace(
+                'if sys.platform != "darwin":',
+                f'if "{platform_override}" != "darwin":',
+                1,
+            )
         runtime_path.write_text(text, encoding="utf-8")
 
     def seed_codex_thread_context(
@@ -1380,6 +1387,7 @@ class WorkspaceBootstrapAndStatusTests(unittest.TestCase):
         self.rewrite_workspace_libreoffice_runtime(
             workspace,
             app_bundle_path=fake_soffice_path.parent.parent.parent,
+            platform_override="darwin",
         )
         (workspace.root / "runtime").mkdir(parents=True, exist_ok=True)
         marker_path = workspace.root / "runtime" / "launcher-should-not-run.txt"
