@@ -82,7 +82,7 @@ JSON
   - for an ordinary request on the native Codex path, once repo-local `.venv` is available, call hidden `open` directly with best-effort `semantic_analysis`
   - do not read other workflow skills, `workspace-status`, `workspace-bootstrap`, source search, implementation source, or tests first just to decide whether canonical ask may open, whether a named source exists, or which `semantic_analysis` fields are accepted
   - use those surfaces only after `open` returns a governed blocker, waiting state, or explicit operator route
-- After `open`, preserve the returned `conversation_id`, `turn_id`, `run_id`, `answer_file_path`, and `log_context` for the rest of the same canonical ask turn.
+- After `open`, preserve the returned `conversation_id`, `turn_id`, `run_id`, `answer_file_path`, `log_context`, and `support_contract` for the rest of the same canonical ask turn.
 - Hidden wrapper status meanings:
   - `execute` means canonical ask is open and the host should continue through the chosen inner workflow.
   - `awaiting-confirmation` means pause the same turn and wait for the user's confirmation reply.
@@ -90,13 +90,36 @@ JSON
   - `completed` means the turn is committed and a final business answer may be returned.
   - `boundary` means the turn is committed as a governed boundary and that boundary reply may be returned.
   - `blocked` means no final business answer may be returned yet.
+- Hidden wrapper `next_step` is a derived convenience field and should stay aligned with that status law:
+  - `execute -> continue-inner-workflow`
+  - `awaiting-confirmation -> wait-for-user-confirmation`
+  - `waiting-shared-job -> wait-for-shared-job`
+  - `completed -> return-final-answer`
+  - `boundary -> return-boundary-answer`
+  - `blocked -> do-not-return-final-answer`
 - In compatible-host execution, `open` or same-turn reuse already performs governed preanswer work:
   - question classification and support-strategy selection
   - workspace gating and knowledge-base freshness checks
   - initial inner-workflow routing plus any confirmation or waiting-state settlement
-- After `open`, treat the returned `status`, `question_class`, `question_domain`, `analysis_origin`, `route_reason`, `inner_workflow_id`, `support_strategy`, `reference_resolution`, `source_scope_policy`, and notices as the source of truth for the next step. Do not re-derive them from side-path probing before honoring that result.
+- After `open`, treat the returned `status`, `question_class`, `question_domain`, `analysis_origin`, `route_reason`, `inner_workflow_id`, `support_strategy`, `reference_resolution`, `source_scope_policy`, `support_contract`, and notices as the source of truth for the next step. Do not re-derive them from side-path probing before honoring that result.
 - Retrieve / trace binding rule:
   - when using public `docmason retrieve` or `docmason trace` inside the same canonical ask turn, export each returned `log_context` field as `DOCMASON_<FIELD>` and then call the public command normally
+  - in chat-host execution, prefer `--json --compact` for interactive inspection; if full nested retrieve or trace detail is genuinely needed, redirect full `--json` to a local file and inspect it selectively instead of loading the raw payload straight into the live chat context
+  - treat compact payloads as the stable host-facing inspection contract; do not rebuild alternate schemas with ad hoc `jq` assumptions such as `.matches`
+  - compact retrieve inspection should normally start from:
+    - `session_id`
+    - `results`
+    - `reference_resolution`
+    - `source_scope_policy`
+    - `recommended_hybrid_targets`
+  - compact trace inspection should normally start from:
+    - `trace_id`
+    - `session_id`
+    - `answer_state`
+    - `reference_resolution`
+    - `source_scope_policy`
+    - `issue_codes`
+    - `recommended_hybrid_targets`
   - do not switch to direct Python helpers such as `prepare_ask_turn()`, `complete_ask_turn()`, or `trace_answer_file(...)` as a substitute for the supported path
 - Example retrieve / trace binding:
 
@@ -108,8 +131,8 @@ export DOCMASON_ENTRY_WORKFLOW_ID="ask"
 export DOCMASON_INNER_WORKFLOW_ID="<inner_workflow_id>"
 export DOCMASON_FRONT_DOOR_STATE="canonical-ask"
 
-./.venv/bin/python -m docmason retrieve "<query>" --json
-./.venv/bin/python -m docmason trace --answer-file "<answer_file_path>" --json
+./.venv/bin/python -m docmason retrieve "<query>" --json --compact
+./.venv/bin/python -m docmason trace --answer-file "<answer_file_path>" --json --compact
 ```
 
 - `progress` request envelope:
@@ -124,6 +147,10 @@ export DOCMASON_FRONT_DOOR_STATE="canonical-ask"
 }
 ```
 
+- `completion_status` is optional when the caller is only re-entering a `waiting-shared-job` turn to let the hidden wrapper reconcile deterministic repo-owned shared-job truth.
+- supply `completion_status` only when the host is actively settling a still-unsettled governed multimodal refresh.
+- when a turn is paused in `waiting-shared-job`, re-enter through hidden `open` reuse, hidden `progress`, or hidden `finalize`; do not grep `runtime/control_plane/` or shared-job files manually.
+
 - `finalize` request envelope:
 
 ```json
@@ -134,15 +161,22 @@ export DOCMASON_FRONT_DOOR_STATE="canonical-ask"
   "answer_file_path": "<answer_file_path>",
   "response_excerpt": "<short excerpt>",
   "session_ids": ["<selected_session_id>"],
-  "trace_ids": ["<selected_trace_id>"]
+  "trace_ids": ["<selected_trace_id>"],
+  "workflow_outcome": {
+    "support_basis": "kb-grounded | mixed | external-source-verified | model-knowledge | governed-boundary",
+    "session_ids": ["<selected_session_id>"],
+    "trace_ids": ["<selected_trace_id>"],
+    "bundle_paths": ["<composition bundle path>"]
+  }
 }
 ```
 
 - `session_ids` and `trace_ids` are optional advanced-caller fields. Omit them when the turn has exactly one ask-owned retrieve session and one final trace candidate. Supply them only when the caller has already selected the canonical pair among multiple ask-owned candidates.
+- `workflow_outcome` is the preferred finalize-time handoff for workflow-owned facts. Supply it when the inner workflow already knows the correct `support_basis`, selected `session_ids` / `trace_ids`, support-manifest linkage, bundle linkage, or bounded degradation metadata. Older callers may keep using the compatible top-level finalize fields.
 - Legal closure handshake for one canonical ask turn:
 
 ```bash
-./.venv/bin/python -m docmason trace --answer-file "<answer_file_path>" --json
+./.venv/bin/python -m docmason trace --answer-file "<answer_file_path>" --json --compact
 
 cat <<'JSON' | ./.venv/bin/python -m docmason _ask
 {
@@ -216,6 +250,11 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - use published KB artifacts first when they already expose the needed evidence channels
    - treat published-KB answering as the ordinary ask path; governed Lane B follow-up remains sync/publication-owned and may surface as freshness or degradation notice, but it is not a separate host-driven ask step
    - treat the published KB as the primary evidence surface: inspect retrieved text, structure, notes, media, and artifact metadata first, then inspect cited `focus_render_assets` or render spans when the question is genuinely visual or layout-sensitive, and only then consider governed refresh or source fallback
+   - start execution with a short support ledger derived from `support_contract`:
+     - which source boundary must survive
+     - which comparison sources must both survive
+     - which published evidence channels are required
+     - whether a single contract-repair chance exists for this turn
    - keep approximate or unresolved reference notices explicit
    - let the routed inner workflow own retrieval, trace, render inspection, and answer or composition drafting
    - if published artifacts are still insufficient because of hard-artifact semantic gaps, let the canonical routed path enter one governed narrowed hybrid refresh instead of improvising raw source fallback
@@ -224,7 +263,9 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 7. Complete the turn through the supported completion path.
    - write only the final answer under `runtime/answers/<conversation_id>/<turn_id>.md`
    - keep scratch work under `runtime/agent-work/` when needed
-  - follow the finalize handshake in `Canonical Ask Contract`: run the final trace on the exact answer-file version, then call hidden `finalize`, passing selected artifact IDs only when the turn is ambiguous
+   - follow the finalize handshake in `Canonical Ask Contract`: run the final trace on the exact answer-file version, then call hidden `finalize`, passing selected artifact IDs only when the turn is ambiguous
+   - if the first finalize attempt returns `status = execute` with a repairable `support_fulfillment`, keep the same turn open, do one contract-aware rewrite and retrace, then finalize once more
+   - do not open a second or unbounded repair loop; the second finalize attempt must close honestly
    - let the commit barrier run only after the admissibility gate passes
    - preserve `answer_state`, `support_basis`, optional `support_manifest_path`, and linked session or trace IDs
 8. Return the result cleanly.

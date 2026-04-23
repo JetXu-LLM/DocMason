@@ -24,29 +24,32 @@ If the agent cannot inspect the local trace artifacts or source evidence, stop a
 
 1. Use `current` as the default knowledge-base target unless the task explicitly says otherwise.
 2. For citation-first tracing, run:
-   - `docmason trace --source-id <source_id> --json`
+   - `docmason trace --source-id <source_id> --json --compact`
    - optionally add `--unit-id <unit_id>` for unit-level detail
+   - if you genuinely need nested support objects or detailed render metadata, rerun full `--json` to a local file and inspect it selectively instead of pasting the raw payload into chat
    - keep DocMason workspace commands sequential inside the same workspace session; do not overlap `trace`, `retrieve`, `sync`, `status`, or `validate-kb` while a lease-owning command is still active
 3. For answer-first tracing, run:
-   - `docmason trace --answer-file <path> --json`
-   - or `docmason trace --session-id <session_id> --json`
+   - `docmason trace --answer-file <path> --json --compact`
+   - or `docmason trace --session-id <session_id> --json --compact`
    - do not invent a new freeform `--source-ref` surface in this phase; public trace remains ID-first
 4. Inspect:
+   - `payload_detail`
    - any inherited `reference_resolution` block on answer-first traces
+   - `answer_state`
    - source provenance
    - unit consumers
    - incoming and outgoing relations
-   - `answer_state`
    - grounding status for each answer segment
+   - compact `supporting_source_ids`
+   - compact `supporting_unit_ids`
    - `supporting_artifact_ids`
-   - segment `artifact_supports`
-   - segment `semantic_supports`
    - `supporting_overlay_unit_ids`
+   - segment `support_lane_counts`
+   - segment `artifact_support_count`
+   - segment `semantic_support_count`
    - artifact `focus_render_assets` when present
-   - overlay consumed inputs, covered slots, and blocked slots when present
-   - artifact render refs, `render_page_span`, `bbox`, `normalized_bbox`, and sidecar paths when present
    - render-inspection requirements
-   - compact supporting source and unit IDs
+   - if the provenance judgment depends on nested `artifact_supports`, `semantic_supports`, overlay consumed inputs, covered slots, blocked slots, render refs, `render_page_span`, `bbox`, `normalized_bbox`, or sidecar paths, inspect a file-first full trace capture instead of the raw chat payload
 5. If any segment is only partially grounded or unresolved, say so explicitly and avoid pretending stronger provenance than the trace supports.
 6. Return the final provenance or groundedness judgment to the main agent instead of treating trace output as a final user answer by itself.
 7. If you need to export a scratch trace note and the user did not specify a destination, place it under `runtime/agent-work/`.

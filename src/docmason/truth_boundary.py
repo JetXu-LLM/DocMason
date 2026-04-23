@@ -6,9 +6,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .routing import normalize_source_scope_intent, question_has_compare_scope_hint
+
 SOURCE_SCOPED_MODES = frozenset({"source-scoped-soft", "source-scoped-hard"})
 TARGETED_SCOPE_MODES = frozenset({*SOURCE_SCOPED_MODES, "compare"})
-COMPARE_HINT_PATTERN = re.compile(r"\b(compare|comparison|versus|vs\.?|difference|between)\b", re.I)
 SINGLE_SOURCE_HINT_PATTERN = re.compile(
     (
         r"\b(using only|use only|only the document|only the deck|only the file|"
@@ -75,7 +76,7 @@ def has_single_source_constraint(question: str) -> bool:
 
 def is_compare_scope(question: str) -> bool:
     """Return whether the question is explicitly comparative."""
-    return bool(isinstance(question, str) and COMPARE_HINT_PATTERN.search(question))
+    return question_has_compare_scope_hint(question)
 
 
 def build_source_scope_policy(
@@ -84,14 +85,20 @@ def build_source_scope_policy(
     question_class: str | None,
     question_domain: str | None,
     reference_resolution: dict[str, Any] | None,
+    source_scope_intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Derive the persisted source-scope policy for one turn or trace."""
     resolution = dict(reference_resolution) if isinstance(reference_resolution, dict) else {}
+    intent = normalize_source_scope_intent(source_scope_intent, question=question)
     target_source_id = _nonempty_string(resolution.get("resolved_source_id"))
     target_source_ref = _nonempty_string(resolution.get("target_source_ref"))
     hard_boundary = bool(resolution.get("hard_boundary"))
     explicit_single_source = has_single_source_constraint(question)
-    compare_scope = is_compare_scope(question)
+    compare_scope = (
+        str(resolution.get("scope_mode") or "") == "compare"
+        or intent["mode"] == "compare"
+        or is_compare_scope(question)
+    )
     source_match_status = str(resolution.get("source_match_status") or "none")
     source_narrowing_allowed = bool(resolution.get("source_narrowing_allowed"))
     compare_target_source_ids = _deduplicate_strings(
@@ -108,7 +115,7 @@ def build_source_scope_policy(
     compare_expected_source_count = (
         int(raw_compare_expected_count)
         if isinstance(raw_compare_expected_count, int)
-        else (2 if compare_scope else 0)
+        else (int(intent["expected_source_count"]) if compare_scope else 0)
     )
     raw_compare_missing_count = resolution.get("declared_compare_missing_count")
     compare_missing_source_count = (
@@ -135,7 +142,11 @@ def build_source_scope_policy(
         "target_source_id": target_source_id,
         "target_source_ref": target_source_ref,
         "hard_boundary_on_missing_source": bool(
-            hard_boundary and target_source_id is None and scope_mode == "source-scoped-hard"
+            hard_boundary
+            and (
+                (target_source_id is None and scope_mode == "source-scoped-hard")
+                or (scope_mode == "compare" and compare_missing_source_count > 0)
+            )
         ),
         "require_target_source_per_supported_segment": scope_mode in TARGETED_SCOPE_MODES,
         "require_target_source_in_final_support": scope_mode in TARGETED_SCOPE_MODES,

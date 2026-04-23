@@ -113,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include render references in the result payload.",
     )
+    retrieve_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="Emit a compact JSON projection that omits heavy nested evidence objects.",
+    )
 
     trace_parser = subparsers.add_parser(
         "trace",
@@ -145,6 +150,11 @@ def build_parser() -> argparse.ArgumentParser:
     trace_parser.add_argument(
         "--unit-id",
         help="When tracing a source ID, also inspect one evidence unit in detail.",
+    )
+    trace_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="Emit a compact JSON projection that omits heavy nested support objects.",
     )
 
     validate_parser = subparsers.add_parser(
@@ -244,6 +254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 document_types=args.document_type,
                 source_ids=args.source_id,
                 include_renders=args.include_renders,
+                compact=args.compact,
             ),
             as_json=args.json,
         )
@@ -255,6 +266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 answer_file=args.answer_file,
                 session_id=args.session_id,
                 top=args.top,
+                compact=args.compact,
             ),
             as_json=args.json,
         )

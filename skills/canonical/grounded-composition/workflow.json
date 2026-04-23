@@ -21,8 +21,8 @@
     "mutability": "workspace-write",
     "parallelism": "read-only-safe",
     "background_commands": [
-      "docmason retrieve \"<query>\" --json",
-      "docmason trace --answer-file <path> --json"
+      "docmason retrieve \"<query>\" --json --compact",
+      "docmason trace --answer-file <path> --json --compact"
     ],
     "must_return_to_main_agent": true
   },

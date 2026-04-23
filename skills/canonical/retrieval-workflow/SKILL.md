@@ -24,19 +24,19 @@ If the agent cannot run local commands or inspect the published file-only knowle
 ## Procedure
 
 1. Confirm that the published knowledge base exists with `docmason status --json` when needed.
-2. Run `docmason retrieve "<query>" --json`.
+2. Run `docmason retrieve "<query>" --json --compact` for host-visible inspection.
+   - when full nested unit or artifact detail is genuinely required, rerun full `--json` to a local file and inspect it selectively instead of streaming the raw payload into the live chat context
    - keep user-native source references inside the freeform query rather than inventing internal source IDs when the user already knows a file name, path, page, slide, sheet, or heading
    - keep DocMason workspace commands sequential inside the same workspace session; do not overlap `retrieve`, `trace`, `sync`, `status`, or `validate-kb` while a lease-owning command is still active
 3. Inspect:
    - `reference_resolution`
    - ranked source bundles
-   - matched units
-   - matched artifacts and artifact IDs
+   - compact bundle fields such as `matched_unit_ids`, `matched_artifact_ids`, `matched_overlay_unit_ids`, and collection counts
    - artifact-aware score details such as `structure_context_bonus`, `semantic_overlay_bonus`, and `compare_coverage_bonus`
-   - artifact fields such as `section_path`, `caption_text`, `continuation_group_ids`, `procedure_hints`, and `semantic_labels`
+   - when exact artifact fields such as `section_path`, `caption_text`, `continuation_group_ids`, `procedure_hints`, or `semantic_labels` matter, inspect a file-first full JSON capture or the published artifact sidecars rather than dumping the full raw payload into chat
    - `focus_render_assets` when present
    - `recommended_hybrid_targets` when the published artifact plan still reports a hard-artifact semantic gap
-   - graph expansions
+   - graph-expansion summary fields
    - render references when relevant
    - any published-evidence plan fields such as preferred channels, matched channels, and whether published artifacts already look sufficient
    - for image-only or scanned PDF questions, check whether `page-image` artifacts or unit `semantic_gap_hints` are present before assuming the KB has enough semantics already

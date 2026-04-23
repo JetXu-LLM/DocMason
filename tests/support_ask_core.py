@@ -1151,6 +1151,114 @@ class AskRoutingAndCompositionTests(unittest.TestCase):
             "Stale confirmation-only sync job settled after equivalent sync completion.",
         )
 
+    def test_workspace_state_snapshot_repairs_stale_answer_critical_lane_c_snapshot(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        job = ensure_shared_job(
+            workspace,
+            job_key="lane-c:stale-published-snapshot",
+            job_family="lane-c",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "published_snapshot_id": "snapshot-old",
+                "source_id": "source-old",
+            },
+            input_signature="lane-c:stale-published-snapshot",
+            owner={"kind": "command", "id": "lane-c-command:live", "pid": os.getpid()},
+        )
+
+        snapshot = workspace_state_snapshot(workspace)
+
+        self.assertFalse(snapshot["active_answer_critical_jobs"])
+        self.assertTrue(snapshot["repair_actions"])
+        self.assertEqual(
+            snapshot["repair_actions"][0]["kind"],
+            "blocked-stale-answer-critical-snapshot",
+        )
+        settled = read_json(
+            workspace.shared_jobs_dir / job["manifest"]["job_id"] / "result.json"
+        )
+        self.assertEqual(settled["status"], "blocked")
+        self.assertIn("older published snapshot", settled["result"]["reason"])
+
+    def test_workspace_state_snapshot_repairs_stale_lane_c_owner_run_without_progress(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        publish_manifest = read_json(workspace.current_publish_manifest_path)
+        run_dir = workspace.runs_dir / "run-lane-c-stale"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        write_json(
+            run_dir / "state.json",
+            {
+                "run_id": "run-lane-c-stale",
+                "status": "active",
+                "opened_at": "2026-03-20T00:00:00Z",
+                "updated_at": "2026-03-20T00:00:00Z",
+                "attached_shared_job_ids": [],
+                "execution_cost_profile": {},
+                "preanswer_governance_state": None,
+            },
+        )
+        (run_dir / "journal.jsonl").write_text("", encoding="utf-8")
+
+        job = ensure_shared_job(
+            workspace,
+            job_key="lane-c:stale-owner-run",
+            job_family="lane-c",
+            criticality="answer-critical",
+            scope={
+                "target": "current",
+                "published_snapshot_id": str(publish_manifest["snapshot_id"]),
+                "source_id": "source-current",
+            },
+            input_signature="lane-c:stale-owner-run",
+            owner={"kind": "run", "id": "run-lane-c-stale"},
+            run_id="run-lane-c-stale",
+        )
+        manifest_path = (
+            workspace.shared_jobs_dir / str(job["manifest"]["job_id"]) / "manifest.json"
+        )
+        stale_manifest = read_json(manifest_path)
+        stale_manifest["updated_at"] = "2026-03-20T00:00:00Z"
+        write_json(manifest_path, stale_manifest)
+        stale_run_state = read_json(run_dir / "state.json")
+        stale_run_state["updated_at"] = "2026-03-20T00:00:00Z"
+        write_json(run_dir / "state.json", stale_run_state)
+
+        snapshot = workspace_state_snapshot(workspace)
+        repaired_state = read_json(run_dir / "state.json")
+        settled = read_json(
+            workspace.shared_jobs_dir / str(job["manifest"]["job_id"]) / "result.json"
+        )
+
+        self.assertFalse(snapshot["active_answer_critical_jobs"])
+        self.assertTrue(
+            any(
+                action["kind"] == "blocked-stale-owner-run"
+                for action in snapshot["repair_actions"]
+            )
+        )
+        self.assertTrue(
+            any(
+                action["kind"] == "abandoned-stale-active-run"
+                for action in snapshot["repair_actions"]
+            )
+        )
+        self.assertEqual(settled["status"], "blocked")
+        self.assertIn("stopped making progress", settled["result"]["reason"])
+        self.assertEqual(repaired_state["status"], "abandoned")
+
     def test_workspace_state_snapshot_abandons_stale_active_run_without_commit_or_live_jobs(
         self,
     ) -> None:

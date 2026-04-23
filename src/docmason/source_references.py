@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .project import WorkspacePaths, read_json
+from .routing import normalize_source_scope_intent, question_has_compare_scope_hint
 from .truth_boundary import format_user_visible_source_ref
 
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z]+|[\u4e00-\u9fff]+")
@@ -49,10 +50,6 @@ DOCUMENT_HINT_PATTERN = re.compile(
 )
 ARTIFACT_HINT_PATTERN = re.compile(
     r"\b(diagram|figure|chart|table|kpi|metric|dashboard|architecture|flow|screenshot|ui|image|picture|photo|caption|legend)\b",
-    re.IGNORECASE,
-)
-COMPARATIVE_HINT_PATTERN = re.compile(
-    r"\b(compare|versus|vs\.?|difference|between)\b",
     re.IGNORECASE,
 )
 EXPLICIT_SOURCE_REQUEST_PATTERN = re.compile(
@@ -625,8 +622,18 @@ def extract_declared_compare_source_texts(query: str) -> list[str]:
     """Extract deterministically declared compare-source texts when the query provides them."""
     if not isinstance(query, str) or not query.strip():
         return []
-    if not COMPARATIVE_HINT_PATTERN.search(query):
+    if not question_has_compare_scope_hint(query):
         return []
+
+    quoted_candidates = _deduplicate_strings([
+        normalized
+        for match in QUOTED_TEXT_PATTERN.finditer(query)
+        if (
+            normalized := _nonempty_string(match.group("text"))
+        ) is not None
+    ])
+    if len(quoted_candidates) >= 2:
+        return quoted_candidates[:2]
 
     def _normalize_compare_clause_text(
         value: str,
@@ -729,7 +736,7 @@ def _source_narrowing_allowed(
         return False
     if chosen_source_status != "exact":
         return False
-    if COMPARATIVE_HINT_PATTERN.search(query):
+    if question_has_compare_scope_hint(query):
         return False
     if DOCUMENT_HINT_PATTERN.search(query):
         return True
@@ -1153,11 +1160,16 @@ def _declared_compare_sources(
     normalized_source_records: list[dict[str, Any]],
     units_by_source: dict[str, list[dict[str, Any]]],
     source_candidates: list[dict[str, Any]],
+    source_scope_intent: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    if not COMPARATIVE_HINT_PATTERN.search(query):
+    compare_intent = normalize_source_scope_intent(source_scope_intent, question=query)
+    compare_requested = compare_intent["mode"] == "compare" or bool(
+        question_has_compare_scope_hint(query)
+    )
+    if not compare_requested:
         return []
 
-    declared_source_texts = extract_declared_compare_source_texts(query)
+    declared_source_texts = list(compare_intent["explicit_source_texts"]) or extract_declared_compare_source_texts(query)
     if declared_source_texts:
         return [
             _resolve_declared_compare_source(
@@ -1214,17 +1226,26 @@ def _apply_compare_resolution(
     normalized_source_records: list[dict[str, Any]],
     units_by_source: dict[str, list[dict[str, Any]]],
     source_candidates: list[dict[str, Any]],
+    source_scope_intent: dict[str, Any] | None,
 ) -> None:
+    compare_intent = normalize_source_scope_intent(source_scope_intent, question=query)
+    compare_requested = compare_intent["mode"] == "compare" or bool(
+        question_has_compare_scope_hint(query)
+    )
+    explicit_compare_scope = bool(
+        compare_intent["explicit_source_texts"] or extract_declared_compare_source_texts(query)
+    )
     declared_sources = _declared_compare_sources(
         query,
         normalized_source_records=normalized_source_records,
         units_by_source=units_by_source,
         source_candidates=source_candidates,
+        source_scope_intent=compare_intent,
     )
     expected_count = (
         len(declared_sources)
         if declared_sources
-        else (2 if COMPARATIVE_HINT_PATTERN.search(query) else 0)
+        else (int(compare_intent["expected_source_count"]) if compare_requested else 0)
     )
     compare_source_ids = _deduplicate_strings([
         item["resolved_source_id"]
@@ -1253,6 +1274,14 @@ def _apply_compare_resolution(
         compare_status = "approximate"
     else:
         compare_status = "unresolved"
+
+    hard_boundary_on_missing_sources = bool(
+        compare_intent["hard_boundary_on_missing_sources"] or explicit_compare_scope
+    )
+
+    if compare_requested and hard_boundary_on_missing_sources and compare_status != "exact":
+        compare_status = "unresolved"
+
     result["declared_compare_sources"] = declared_sources
     result["declared_compare_source_ids"] = compare_source_ids
     result["declared_compare_source_refs"] = compare_source_refs
@@ -1268,12 +1297,19 @@ def _apply_compare_resolution(
             "approximate published match. I am continuing with explicit approximation truth."
         )
     elif compare_status == "unresolved":
-        result["continued_with_best_effort"] = True
+        result["continued_with_best_effort"] = not hard_boundary_on_missing_sources
         result["unresolved_reason"] = "compare-source-unresolved"
         result["notice_text"] = (
-            "I could not isolate every requested comparison source clearly. I am continuing "
-            "with explicit unresolved comparison truth instead of treating the scope as exact."
+            "I could not isolate every requested comparison source exactly, so I am stopping "
+            "at that comparison boundary."
+            if hard_boundary_on_missing_sources
+            else (
+                "I could not isolate every requested comparison source clearly. I am "
+                "continuing with explicit unresolved comparison truth instead of treating "
+                "the scope as exact."
+            )
         )
+        result["hard_boundary"] = hard_boundary_on_missing_sources
 
 
 def _pick_best_unit_candidate(
@@ -1304,6 +1340,7 @@ def resolve_reference_query(
     *,
     source_records: list[dict[str, Any]],
     unit_records: list[dict[str, Any]],
+    source_scope_intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve one user query onto source and unit references when possible."""
     normalized_source_records = [
@@ -1324,6 +1361,14 @@ def resolve_reference_query(
             units_by_source[source_id].append(unit)
 
     requested_source_text = extract_requested_source_text(query)
+    compare_intent = normalize_source_scope_intent(source_scope_intent, question=query)
+    compare_scope_requested = compare_intent["mode"] == "compare" or bool(
+        question_has_compare_scope_hint(query)
+    )
+    declared_compare_source_texts = (
+        list(compare_intent["explicit_source_texts"])
+        or extract_declared_compare_source_texts(query)
+    )
     source_query = (
         requested_source_text
         if requested_source_text is not None
@@ -1350,7 +1395,11 @@ def resolve_reference_query(
     document_ref_detected = bool(requested_source_text) or _document_ref_detected(
         query, source_candidates
     )
-    detected = document_ref_detected or parsed_locator.get("locator_type") is not None
+    detected = (
+        document_ref_detected
+        or parsed_locator.get("locator_type") is not None
+        or bool(compare_scope_requested and declared_compare_source_texts)
+    )
     result = {
         "detected": detected,
         "parsed_document_ref": (
@@ -1557,17 +1606,18 @@ def resolve_reference_query(
                 "I did not find a clear document or locator match. "
                 "I am continuing with the closest published evidence."
             )
-    if COMPARATIVE_HINT_PATTERN.search(query):
+    if compare_scope_requested:
         _apply_compare_resolution(
             result,
             query=query,
             normalized_source_records=normalized_source_records,
             units_by_source=units_by_source,
             source_candidates=source_candidates,
+            source_scope_intent=compare_intent,
         )
     result["scope_mode"] = (
         "compare"
-        if COMPARATIVE_HINT_PATTERN.search(query)
+        if compare_scope_requested
         else (
             "source-scoped-hard"
             if single_source_constraint
@@ -1587,6 +1637,7 @@ def resolve_workspace_reference(
     *,
     query: str,
     target: str = "current",
+    source_scope_intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve a query against published retrieval artifacts when they exist."""
     source_records_path = paths.retrieval_source_records_path(target)
@@ -1635,4 +1686,5 @@ def resolve_workspace_reference(
         query,
         source_records=source_records,
         unit_records=unit_records,
+        source_scope_intent=source_scope_intent,
     )

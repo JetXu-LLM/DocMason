@@ -189,6 +189,8 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["hybrid_refresh_completion_status"] = None
     if "hybrid_refresh_summary" not in turn:
         turn["hybrid_refresh_summary"] = None
+    if "shared_evidence_write_state" not in turn:
+        turn["shared_evidence_write_state"] = None
     if "selected_session_ids" not in turn:
         turn["selected_session_ids"] = []
     if "selected_trace_ids" not in turn:
@@ -223,6 +225,14 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["primary_issue_code"] = None
     if "issue_codes" not in turn:
         turn["issue_codes"] = []
+    if "support_contract" not in turn:
+        turn["support_contract"] = None
+    if "support_fulfillment" not in turn:
+        turn["support_fulfillment"] = None
+    if "workflow_outcome" not in turn:
+        turn["workflow_outcome"] = None
+    if "contract_repair_count" not in turn:
+        turn["contract_repair_count"] = 0
     if "noncanonical_answer_file_path" not in turn:
         turn["noncanonical_answer_file_path"] = None
     return turn
@@ -943,6 +953,7 @@ def base_turn_record(
         "hybrid_refresh_job_ids": [],
         "hybrid_refresh_completion_status": None,
         "hybrid_refresh_summary": None,
+        "shared_evidence_write_state": None,
         "session_ids": [],
         "trace_ids": [],
         "selected_session_ids": [],
@@ -980,6 +991,10 @@ def base_turn_record(
         "source_escalation_reason": None,
         "support_basis": None,
         "support_manifest_path": None,
+        "support_contract": None,
+        "support_fulfillment": None,
+        "workflow_outcome": None,
+        "contract_repair_count": 0,
         "canonical_support_summary": None,
         "source_scope_satisfied": None,
         "mixed_support_explainable": None,

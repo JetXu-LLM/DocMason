@@ -21,7 +21,7 @@
     "parallelism": "read-only-safe",
     "background_commands": [
       "docmason status --json",
-      "docmason retrieve \"<query>\" --json"
+      "docmason retrieve \"<query>\" --json --compact"
     ],
     "must_return_to_main_agent": true
   },

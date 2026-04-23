@@ -493,6 +493,152 @@ class ReferenceResolutionTests(unittest.TestCase):
         )
         self.assertEqual(result["declared_compare_source_ids"], ["source-001", "source-002"])
 
+    def test_structured_compare_intent_opens_compare_scope_without_keyword(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "current_path": "original_doc/a.pdf",
+                "title": "Project Planning Brief",
+                "prior_paths": [],
+                "path_history": [],
+            },
+            {
+                "source_id": "source-002",
+                "source_family": "corpus",
+                "current_path": "original_doc/b.pdf",
+                "title": "Project Outline Companion",
+                "prior_paths": [],
+                "path_history": [],
+            },
+        ]
+
+        result = resolve_reference_query(
+            "Project Planning Brief and Project Outline Companion on project outline",
+            source_records=source_records,
+            unit_records=[],
+            source_scope_intent={
+                "mode": "compare",
+                "expected_source_count": 2,
+                "explicit_source_texts": [
+                    "Project Planning Brief",
+                    "Project Outline Companion",
+                ],
+                "hard_boundary_on_missing_sources": True,
+            },
+        )
+
+        self.assertEqual(result["scope_mode"], "compare")
+        self.assertEqual(result["compare_resolution_status"], "exact")
+        self.assertEqual(result["declared_compare_expected_count"], 2)
+        self.assertEqual(result["declared_compare_source_ids"], ["source-001", "source-002"])
+
+    def test_structured_compare_intent_hard_boundaries_when_source_is_missing(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "current_path": "original_doc/a.pdf",
+                "title": "Project Planning Brief",
+                "prior_paths": [],
+                "path_history": [],
+            },
+            {
+                "source_id": "source-002",
+                "source_family": "corpus",
+                "current_path": "original_doc/b.pdf",
+                "title": "Project Outline Companion",
+                "prior_paths": [],
+                "path_history": [],
+            },
+        ]
+
+        result = resolve_reference_query(
+            "Project Planning Brief and Zebra Ledger on project outline",
+            source_records=source_records,
+            unit_records=[],
+            source_scope_intent={
+                "mode": "compare",
+                "expected_source_count": 2,
+                "explicit_source_texts": ["Project Planning Brief", "Zebra Ledger"],
+                "hard_boundary_on_missing_sources": True,
+            },
+        )
+
+        self.assertEqual(result["scope_mode"], "compare")
+        self.assertEqual(result["status"], "unresolved")
+        self.assertEqual(result["compare_resolution_status"], "unresolved")
+        self.assertEqual(result["declared_compare_missing_count"], 1)
+        self.assertEqual(result["unresolved_reason"], "compare-source-unresolved")
+        self.assertTrue(result["hard_boundary"])
+        self.assertFalse(result["continued_with_best_effort"])
+
+    def test_chinese_compare_query_extracts_quoted_sources_and_opens_compare_scope(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "current_path": "original_doc/a.pdf",
+                "title": "Project Planning Brief",
+                "prior_paths": [],
+                "path_history": [],
+            },
+            {
+                "source_id": "source-002",
+                "source_family": "corpus",
+                "current_path": "original_doc/b.pdf",
+                "title": "Project Outline Companion",
+                "prior_paths": [],
+                "path_history": [],
+            },
+        ]
+
+        result = resolve_reference_query(
+            '对比分析"Project Planning Brief"和"Project Outline Companion"这两份文件在 project outline 上的差异和联系。',
+            source_records=source_records,
+            unit_records=[],
+        )
+
+        self.assertEqual(result["scope_mode"], "compare")
+        self.assertEqual(result["compare_resolution_status"], "exact")
+        self.assertEqual(result["declared_compare_expected_count"], 2)
+        self.assertEqual(result["declared_compare_source_ids"], ["source-001", "source-002"])
+
+    def test_chinese_compare_query_with_missing_chinese_titles_stops_at_boundary(self) -> None:
+        source_records = [
+            {
+                "source_id": "source-001",
+                "source_family": "corpus",
+                "current_path": "original_doc/a.pdf",
+                "title": "Project Planning Brief",
+                "prior_paths": [],
+                "path_history": [],
+            },
+            {
+                "source_id": "source-002",
+                "source_family": "corpus",
+                "current_path": "original_doc/b.pdf",
+                "title": "Project Outline Companion",
+                "prior_paths": [],
+                "path_history": [],
+            },
+        ]
+
+        result = resolve_reference_query(
+            '对比分析"2026年Q1季度投资委员会会议议程"和"2026年CEO季度优先事项"这两份文件在治理节奏上的差异和联系。',
+            source_records=source_records,
+            unit_records=[],
+        )
+
+        self.assertTrue(result["detected"])
+        self.assertEqual(result["scope_mode"], "compare")
+        self.assertEqual(result["status"], "unresolved")
+        self.assertEqual(result["compare_resolution_status"], "unresolved")
+        self.assertEqual(result["declared_compare_expected_count"], 2)
+        self.assertEqual(result["declared_compare_missing_count"], 2)
+        self.assertTrue(result["hard_boundary"])
+        self.assertEqual(result["unresolved_reason"], "compare-source-unresolved")
+
     def test_compare_query_preserves_unresolved_declared_source_record(self) -> None:
         source_records = [
             {

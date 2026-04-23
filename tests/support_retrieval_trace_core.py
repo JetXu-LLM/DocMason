@@ -577,6 +577,37 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         usage_history = workspace.usage_history_path.read_text(encoding="utf-8")
         self.assertIn(report.payload["session_id"], usage_history)
 
+    def test_retrieve_compact_projection_preserves_summary_fields_without_nested_matches(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        report = retrieve_knowledge(
+            query="project outline",
+            top=2,
+            graph_hops=1,
+            include_renders=True,
+            compact=True,
+            paths=workspace,
+        )
+
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(report.payload["payload_detail"], "compact")
+        self.assertEqual(len(report.payload["results"]), 2)
+        first = report.payload["results"][0]
+        second = report.payload["results"][1]
+        self.assertNotIn("matched_units", first)
+        self.assertNotIn("matched_artifacts", first)
+        self.assertNotIn("graph_expansions", second)
+        self.assertTrue(first["matched_unit_ids"])
+        self.assertGreaterEqual(first["matched_unit_count"], len(first["matched_unit_ids"]))
+        self.assertIn("score", first)
+        self.assertGreater(second["graph_expansion_count"], 0)
+
     def test_pdf_artifact_query_surfaces_matched_artifacts_and_trace_supports(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -638,6 +669,63 @@ class RetrievalTraceCoreTests(unittest.TestCase):
             trace.payload["segments"][0]["artifact_supports"][0]["artifact_id"],
             trace.payload["segments"][0]["supporting_artifact_ids"][0].split(":", 1)[1],
         )
+
+    def test_trace_compact_projection_preserves_top_level_truth_without_nested_supports(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf_with_chart(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(pending.payload["sync_status"], "pending-synthesis")
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        by_path = {str(item["current_path"]): str(item["source_id"]) for item in pending_sources}
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/a.pdf"],
+            title="Operational Overview",
+            summary="A conservative seeded summary without explicit chart vocabulary.",
+            key_point="The document preserves supporting business evidence.",
+            claim="The document can support follow-up analysis.",
+        )
+        self.build_seeded_knowledge(
+            workspace.knowledge_base_staging_dir / "sources" / by_path["original_doc/b.pdf"],
+            title="Plain Companion",
+            summary="A plain companion source.",
+            key_point="This source is intentionally generic.",
+            claim="This source should rank below the chart-bearing source for chart hints.",
+        )
+
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        answer_file = workspace.root / "answer.txt"
+        answer_file.write_text(
+            "The quarterly revenue chart highlights Q4 as the strongest quarter.",
+            encoding="utf-8",
+        )
+        trace = trace_knowledge(
+            answer_file=str(answer_file),
+            top=2,
+            compact=True,
+            paths=workspace,
+        )
+
+        self.assertEqual(trace.payload["payload_detail"], "compact")
+        self.assertIn("canonical_support_summary", trace.payload)
+        self.assertTrue(trace.payload["supporting_artifact_ids"])
+        segment = trace.payload["segments"][0]
+        self.assertNotIn("support_lanes", segment)
+        self.assertNotIn("supporting_results", segment)
+        self.assertNotIn("supporting_units", segment)
+        self.assertNotIn("artifact_supports", segment)
+        self.assertNotIn("semantic_supports", segment)
+        self.assertGreater(segment["support_lane_counts"]["kb"], 0)
+        self.assertGreater(segment["artifact_support_count"], 0)
+        self.assertTrue(segment["supporting_artifact_ids"])
 
     def test_pdf_document_context_query_surfaces_section_and_caption_matches(self) -> None:
         workspace = self.make_workspace()
@@ -896,6 +984,83 @@ class RetrievalTraceCoreTests(unittest.TestCase):
             "semantic_overlay/page-001.json",
         )
 
+    def test_trace_compact_projection_preserves_overlay_ids_without_semantic_support_objects(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+
+        pending = sync_workspace(workspace, autonomous=False)
+        pending_sources = [
+            item for item in pending.payload["pending_sources"] if isinstance(item, dict)
+        ]
+        first_source = (
+            workspace.knowledge_base_staging_dir / "sources" / pending_sources[0]["source_id"]
+        )
+        second_source = (
+            workspace.knowledge_base_staging_dir / "sources" / pending_sources[1]["source_id"]
+        )
+        self.build_seeded_knowledge(
+            first_source,
+            title="Visual Review",
+            summary="A neutral seeded summary.",
+            key_point="The source preserves evidence for follow-up.",
+            claim="The source can support review work.",
+        )
+        self.build_seeded_knowledge(
+            second_source,
+            title="Control Review",
+            summary="A control seeded summary.",
+            key_point="The control source is generic.",
+            claim="The control source should rank lower for overlay-only hints.",
+        )
+        write_semantic_overlay(
+            first_source,
+            {
+                "source_id": pending_sources[0]["source_id"],
+                "unit_id": "page-001",
+                "derivation_mode": "hybrid",
+                "eligible_reason": "diagram-or-ui-page",
+                "consumed_inputs": {
+                    "render_assets": ["renders/page-001.png"],
+                    "artifact_ids": [],
+                },
+                "semantic_labels": [
+                    {
+                        "label": "diagram-summary",
+                        "text": "Review flow between request and response steps.",
+                        "confidence": "high",
+                    }
+                ],
+                "artifact_annotations": [],
+                "cross_region_relations": [],
+                "uncertainty_notes": [],
+            },
+        )
+        published = sync_workspace(workspace)
+        self.assertEqual(published.payload["sync_status"], "valid")
+
+        answer_file = workspace.root / "overlay-answer.txt"
+        answer_file.write_text(
+            "The review flow connects request and response steps.",
+            encoding="utf-8",
+        )
+        trace = trace_knowledge(
+            answer_file=str(answer_file),
+            top=2,
+            compact=True,
+            paths=workspace,
+        )
+
+        self.assertEqual(trace.payload["payload_detail"], "compact")
+        self.assertTrue(trace.payload["supporting_overlay_unit_ids"])
+        segment = trace.payload["segments"][0]
+        self.assertNotIn("semantic_supports", segment)
+        self.assertTrue(segment["supporting_overlay_unit_ids"])
+        self.assertGreater(segment["semantic_support_count"], 0)
+
     def test_write_semantic_overlay_backfills_lane_bc_contract_fields(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -1044,6 +1209,32 @@ class RetrievalTraceCoreTests(unittest.TestCase):
 
         unit_report = trace_knowledge(source_id=source_ids[0], unit_id="page-001", paths=workspace)
         self.assertEqual(unit_report.exit_code, 0)
+        self.assertEqual(unit_report.payload["unit"]["unit_id"], "page-001")
+        self.assertTrue(unit_report.payload["unit"]["consumers"])
+
+    def test_citation_first_trace_compact_projection_preserves_source_and_unit_fields(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        source_report = trace_knowledge(source_id=source_ids[0], compact=True, paths=workspace)
+        self.assertEqual(source_report.exit_code, 0)
+        self.assertEqual(source_report.payload["payload_detail"], "compact")
+        self.assertEqual(source_report.payload["trace_mode"], "citation-first")
+        self.assertEqual(source_report.payload["source"]["source_id"], source_ids[0])
+        self.assertTrue(source_report.payload["source"]["relations"]["outgoing"])
+
+        unit_report = trace_knowledge(
+            source_id=source_ids[0],
+            unit_id="page-001",
+            compact=True,
+            paths=workspace,
+        )
+        self.assertEqual(unit_report.exit_code, 0)
+        self.assertEqual(unit_report.payload["payload_detail"], "compact")
+        self.assertEqual(unit_report.payload["trace_mode"], "citation-first")
         self.assertEqual(unit_report.payload["unit"]["unit_id"], "page-001")
         self.assertTrue(unit_report.payload["unit"]["consumers"])
 

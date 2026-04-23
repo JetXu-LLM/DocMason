@@ -35,16 +35,26 @@ If the environment cannot inspect the required evidence, stop and explain the bl
 ## Procedure
 
 1. Start from the canonical `ask` turn metadata and answer-file path.
-   - honor ask-provided `reference_resolution`, `source_scope_policy`, and `semantic_analysis.evidence_requirements` as the governing first-pass plan for this turn
+   - honor ask-provided `reference_resolution`, `source_scope_policy`, `semantic_analysis.evidence_requirements`, and `support_contract` as the governing first-pass plan for this turn
+   - begin with a short support ledger:
+     - which source boundary must survive
+     - which comparison sources must both survive
+     - which published evidence channels are required
+     - whether the one allowed contract-repair chance is still unused
 2. Treat the task as KB-first escalation:
    - run retrieval and trace first
+    - for host-visible inspection, prefer `docmason retrieve ... --json --compact` and `docmason trace ... --json --compact`; if you truly need nested retrieve or trace detail, redirect full `--json` to a local file and inspect it selectively instead of loading the raw payload into the live chat context
+   - treat compact retrieve and trace payloads as the stable host-facing projection; start from `results`, `reference_resolution`, `source_scope_policy`, `answer_state`, `issue_codes`, and `recommended_hybrid_targets` before opening nested JSON
+   - do not build alternate compact schemas with ad hoc `jq` assumptions such as `.matches`
    - inspect `reference_resolution` when the user names a document or locator in user-native terms
    - inspect published text, render, structure, notes, or media artifacts first
    - treat those published artifacts as the primary working surface: draft from retrieved units and artifact sidecars first, inspect cited `focus_render_assets` when visual or tabular semantics matter, and reopen source files only after the published KB has been shown insufficient for the requested deliverable
-   - for spreadsheet, chart, table, diagram, PDF-layout, or slide-structure work, read the artifact-aware payload rather than only the unit summary:
-     - `matched_artifacts`
+    - for spreadsheet, chart, table, diagram, PDF-layout, or slide-structure work, read the compact artifact-aware payload first:
+       - `matched_artifact_ids`
+       - `matched_unit_ids`
      - `focus_render_assets`
      - `recommended_hybrid_targets`
+    - when exact artifact metadata is required, inspect the published artifact sidecars or a file-first full retrieve capture rather than dumping the full nested payload into chat:
      - `artifact_index.json`
      - `visual_layout/*.json`
      - `spreadsheet_workbook.json`
@@ -83,7 +93,8 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - add draft artifacts when needed
 9. Run final provenance tracing over the answer file when the result makes source-grounded claims.
    - do not keep retracing the same unchanged answer text; if the answer-file digest did not change and no new trace or session is needed, stop or reuse the existing final trace instead of silently looping
-   - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; hidden finalize can safely reuse the latest same-turn selected ledger for an unchanged answer file, but explicit selected IDs remain the preferred handoff, and if finalize later blocks on artifact settlement only, continue from that same file version instead of regenerating identical text
+   - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; prefer the structured `workflow_outcome` handoff when the workflow already knows the correct `support_basis`, selected IDs, bundle linkage, or other finalize-owned facts
+   - if finalize returns `status = execute` together with a repairable `support_fulfillment`, do one contract-aware rewrite and retrace on the same turn, then finalize once more
 10. Return the main result plus any relevant bundle paths, support boundary, overall support basis, and next steps to the main agent.
 
 ## Escalation Rules

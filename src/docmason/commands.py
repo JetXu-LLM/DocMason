@@ -488,6 +488,127 @@ def _trace_session(
     )
 
 
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
+
+
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _list_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _compact_retrieve_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return a host-safer retrieval-result summary without nested evidence objects."""
+    matched_units = result.get("matched_units")
+    matched_artifacts = result.get("matched_artifacts")
+    return {
+        "source_id": result.get("source_id"),
+        "document_type": result.get("document_type"),
+        "support_tier": result.get("support_tier"),
+        "source_extension": result.get("source_extension"),
+        "source_origin": result.get("source_origin"),
+        "parent_source_id": result.get("parent_source_id"),
+        "root_email_source_id": result.get("root_email_source_id"),
+        "attachment_filename": result.get("attachment_filename"),
+        "attachment_mime_type": result.get("attachment_mime_type"),
+        "attachment_depth": result.get("attachment_depth"),
+        "email_subject": result.get("email_subject"),
+        "message_id": result.get("message_id"),
+        "current_path": result.get("current_path"),
+        "source_family": result.get("source_family"),
+        "trust_tier": result.get("trust_tier"),
+        "pending_promotion": result.get("pending_promotion"),
+        "memory_kind": result.get("memory_kind"),
+        "durability": result.get("durability"),
+        "uncertainty": result.get("uncertainty"),
+        "answer_use_policy": result.get("answer_use_policy"),
+        "retrieval_rank_prior": result.get("retrieval_rank_prior"),
+        "title": result.get("title"),
+        "summary_en": result.get("summary_en"),
+        "available_channels": result.get("available_channels", []),
+        "affordance_confidence": result.get("affordance_confidence"),
+        "affordance_derivation_mode": result.get("affordance_derivation_mode"),
+        "derived_affordance_path": result.get("derived_affordance_path"),
+        "path_aliases": result.get("path_aliases", []),
+        "title_aliases": result.get("title_aliases", []),
+        "source_aliases": result.get("source_aliases", []),
+        "warnings": result.get("warnings", []),
+        "score": _mapping_or_empty(result.get("score")),
+        "field_breakdown": _mapping_or_empty(result.get("field_breakdown")),
+        "matched_terms": result.get("matched_terms", []),
+        "matched_unit_ids": [
+            item.get("unit_id")
+            for item in matched_units
+            if isinstance(item, dict) and isinstance(item.get("unit_id"), str)
+        ]
+        if isinstance(matched_units, list)
+        else [],
+        "matched_unit_count": _list_count(matched_units),
+        "matched_artifact_ids": _string_list(result.get("matched_artifact_ids")),
+        "matched_artifact_count": _list_count(matched_artifacts),
+        "matched_overlay_unit_ids": _string_list(result.get("matched_overlay_unit_ids")),
+        "graph_expansion_count": _list_count(result.get("graph_expansions")),
+        "render_references": result.get("render_references", []),
+        "focus_render_assets": result.get("focus_render_assets", []),
+    }
+
+
+def _compact_retrieve_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact retrieval payload for host-facing JSON inspection."""
+    compact_payload = dict(payload)
+    results = payload.get("results", [])
+    compact_payload["payload_detail"] = "compact"
+    compact_payload["results"] = [
+        _compact_retrieve_result(result) for result in results if isinstance(result, dict)
+    ]
+    return compact_payload
+
+
+def _compact_trace_segment(segment: dict[str, Any]) -> dict[str, Any]:
+    """Return a host-safer trace segment without recursive support payloads."""
+    support_lanes = _mapping_or_empty(segment.get("support_lanes"))
+    return {
+        "segment_index": segment.get("segment_index"),
+        "segment_text": segment.get("segment_text"),
+        "grounding_status": segment.get("grounding_status"),
+        "needs_render_inspection": segment.get("needs_render_inspection"),
+        "scope_satisfied": segment.get("scope_satisfied"),
+        "direct_support_score": segment.get("direct_support_score"),
+        "coverage_ratio": segment.get("coverage_ratio"),
+        "supporting_source_ids": _string_list(segment.get("supporting_source_ids")),
+        "supporting_unit_ids": _string_list(segment.get("supporting_unit_ids")),
+        "supporting_artifact_ids": _string_list(segment.get("supporting_artifact_ids")),
+        "supporting_overlay_unit_ids": _string_list(
+            segment.get("supporting_overlay_unit_ids")
+        ),
+        "support_lane_counts": {
+            "kb": _list_count(support_lanes.get("kb")),
+            "interaction": _list_count(support_lanes.get("interaction")),
+            "external": _list_count(support_lanes.get("external")),
+        },
+        "artifact_support_count": _list_count(segment.get("artifact_supports")),
+        "semantic_support_count": _list_count(segment.get("semantic_supports")),
+    }
+
+
+def _compact_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact trace payload for host-facing JSON inspection."""
+    compact_payload = dict(payload)
+    compact_payload["payload_detail"] = "compact"
+    if str(payload.get("trace_mode") or "") != "answer-first":
+        return compact_payload
+    segments = payload.get("segments", [])
+    compact_payload["segments"] = [
+        _compact_trace_segment(segment) for segment in segments if isinstance(segment, dict)
+    ]
+    return compact_payload
+
+
 def _run_operator_eval(paths: WorkspacePaths) -> tuple[dict[str, Any], list[str]]:
     """Run operator eval lazily."""
     from .operator_eval import run_operator_eval
@@ -4030,6 +4151,7 @@ def retrieve_knowledge(
     document_types: list[str] | None = None,
     source_ids: list[str] | None = None,
     include_renders: bool = False,
+    compact: bool = False,
     paths: WorkspacePaths | None = None,
 ) -> CommandReport:
     """Run retrieval over the published knowledge base."""
@@ -4092,6 +4214,8 @@ def retrieve_knowledge(
             if key != "log_context"
         },
     }
+    if compact:
+        payload = _compact_retrieve_payload(payload)
     lines = [
         f"Retrieve status: {status}",
         f"Query: {query}",
@@ -4209,6 +4333,7 @@ def trace_knowledge(
     answer_file: str | None = None,
     session_id: str | None = None,
     top: int = 3,
+    compact: bool = False,
     paths: WorkspacePaths | None = None,
 ) -> CommandReport:
     """Trace provenance from a source or an answer back to evidence."""
@@ -4219,8 +4344,10 @@ def trace_knowledge(
         front_door.get("warning") if isinstance(front_door.get("warning"), dict) else None
     )
     trace_log_origin = "operator-direct" if front_door_warning else None
+    source_trace_requested = source_id is not None
     try:
-        if source_id is not None:
+        if source_trace_requested:
+            assert source_id is not None
             result = _trace_source(
                 paths=workspace,
                 source_id=source_id,
@@ -4232,37 +4359,7 @@ def trace_knowledge(
                 ),
                 log_origin=trace_log_origin,
             )
-            status = READY
-            payload = {
-                "status": status,
-                **result,
-                "front_door": {
-                    key: value
-                    for key, value in front_door.items()
-                    if key != "log_context"
-                },
-            }
-            lines = [
-                f"Trace status: {status}",
-                f"Source ID: {source_id}",
-                f"Title: {result['source'].get('title') or 'unknown'}",
-                "Trace mode: citation-first",
-            ]
-            if "unit" in result:
-                lines.append(
-                    f"Unit: {result['unit'].get('unit_id')} "
-                    f"({result['unit'].get('title') or 'untitled'})"
-                )
-            if front_door_warning:
-                lines.append(f"Front-door warning: {front_door_warning['detail']}")
-            _apply_coordination_warning(
-                payload=payload,
-                lines=lines,
-                coordination=command_context["coordination"],
-            )
-            return make_report(status, payload, lines)
-
-        if answer_file is not None:
+        elif answer_file is not None:
             answer_file_path = Path(answer_file)
             if not answer_file_path.is_absolute():
                 answer_file_path = workspace.root / answer_file_path
@@ -4372,10 +4469,25 @@ def trace_knowledge(
             if key != "log_context"
         },
     }
-    lines = [
-        f"Trace status: {status}",
-        f"Trace mode: {result['trace_mode']}",
-    ]
+    if compact:
+        payload = _compact_trace_payload(payload)
+    if source_trace_requested:
+        lines = [
+            f"Trace status: {status}",
+            f"Source ID: {source_id}",
+            f"Title: {result['source'].get('title') or 'unknown'}",
+            "Trace mode: citation-first",
+        ]
+        if "unit" in result:
+            lines.append(
+                f"Unit: {result['unit'].get('unit_id')} "
+                f"({result['unit'].get('title') or 'untitled'})"
+            )
+    else:
+        lines = [
+            f"Trace status: {status}",
+            f"Trace mode: {result['trace_mode']}",
+        ]
     if result["trace_mode"] == "answer-first":
         lines.extend(
             [

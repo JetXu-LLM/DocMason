@@ -9,11 +9,17 @@ from typing import Any
 
 from .ask import (
     _commit_governed_boundary_turn,
+    _lane_c_blocked_notice,
+    _lane_c_covered_notice,
+    _lane_c_wait_notice,
+    _shared_evidence_write_state,
     complete_ask_turn,
     prepare_ask_turn,
     quarantine_noncanonical_answer_file,
     settle_lane_c_shared_refresh,
 )
+from .ask_contracts import support_fulfillment_notice
+from .control_plane import load_shared_job, load_shared_job_result
 from .conversation import (
     bind_host_identity_to_conversation,
     build_log_context,
@@ -28,6 +34,17 @@ from .retrieval import trace_answer_file
 from .runtime_log_index import discover_turn_artifact_candidates
 
 _WAITING_TURN_STATES = frozenset({"awaiting-confirmation", "waiting-shared-job"})
+_REPAIRABLE_FINALIZE_ISSUE_CODES = frozenset(
+    {"illegal-source-citation-path", "mixed-support-unexplained"}
+)
+_HOST_NEXT_STEP_BY_STATUS = {
+    "execute": "continue-inner-workflow",
+    "awaiting-confirmation": "wait-for-user-confirmation",
+    "waiting-shared-job": "wait-for-shared-job",
+    "completed": "return-final-answer",
+    "boundary": "return-boundary-answer",
+    "blocked": "do-not-return-final-answer",
+}
 
 
 def _nonempty_string(value: Any) -> str | None:
@@ -139,8 +156,11 @@ def _autotrace_finalize_ids(
     turn: dict[str, Any],
     request: dict[str, Any],
 ) -> tuple[list[str] | None, list[str] | None]:
-    requested_support_basis = _nonempty_string(request.get("support_basis")) or _nonempty_string(
-        turn.get("support_basis")
+    requested_workflow_outcome = _mapping(request.get("workflow_outcome"))
+    requested_support_basis = (
+        _nonempty_string(request.get("support_basis"))
+        or _nonempty_string(requested_workflow_outcome.get("support_basis"))
+        or _nonempty_string(turn.get("support_basis"))
     )
     if requested_support_basis in {
         "external-source-verified",
@@ -188,15 +208,117 @@ def _autotrace_finalize_ids(
 
 
 def _next_step(status: str) -> str:
-    if status == "execute":
-        return "continue-inner-workflow"
-    if status == "awaiting-confirmation":
-        return "wait-for-user-confirmation"
-    if status == "waiting-shared-job":
-        return "wait-for-shared-job"
-    if status == "boundary":
-        return "return-boundary-answer"
-    return "do-not-return-final-answer"
+    return _HOST_NEXT_STEP_BY_STATUS.get(status, "do-not-return-final-answer")
+
+
+def _settled_lane_c_job_state(
+    paths: WorkspacePaths,
+    *,
+    job_id: str,
+) -> tuple[dict[str, Any], str, dict[str, Any]] | None:
+    try:
+        manifest = load_shared_job(paths, job_id)
+    except FileNotFoundError:
+        return None
+    if str(manifest.get("status") or "") not in {"completed", "blocked"}:
+        return None
+    result_payload = load_shared_job_result(paths, job_id)
+    summary = _mapping(result_payload.get("result"))
+    completion_status = _nonempty_string(summary.get("status"))
+    if completion_status not in {"covered", "blocked"}:
+        completion_status = "blocked" if str(manifest.get("status") or "") == "blocked" else "covered"
+    if not summary:
+        summary = {"status": completion_status}
+    return manifest, completion_status, summary
+
+
+def _auto_settle_lane_c_if_deterministic(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    turn: dict[str, Any],
+) -> dict[str, Any] | None:
+    if _nonempty_string(turn.get("turn_state")) != "waiting-shared-job":
+        return None
+    hybrid_job_ids = _string_list(turn.get("hybrid_refresh_job_ids"))
+    attached_job_ids = _string_list(turn.get("attached_shared_job_ids"))
+    candidate_job_ids = list(dict.fromkeys(hybrid_job_ids or attached_job_ids))
+    if len(candidate_job_ids) != 1:
+        return None
+    settled = _settled_lane_c_job_state(paths, job_id=candidate_job_ids[0])
+    if settled is None:
+        return None
+    manifest, completion_status, summary = settled
+    scope = _mapping(manifest.get("scope"))
+    settled_snapshot_id = _nonempty_string(scope.get("published_snapshot_id"))
+    settled_source_id = _nonempty_string(scope.get("source_id"))
+    common_updates = {
+        "hybrid_refresh_triggered": True,
+        "hybrid_refresh_sources": [settled_source_id] if settled_source_id else [],
+        "hybrid_refresh_snapshot_id": settled_snapshot_id,
+        "hybrid_refresh_completion_status": completion_status,
+        "hybrid_refresh_job_ids": [candidate_job_ids[0]],
+        "hybrid_refresh_summary": summary,
+        "attached_shared_job_ids": [candidate_job_ids[0]],
+    }
+    if completion_status == "covered":
+        covered_notice = _lane_c_covered_notice()
+        updated_turn = update_conversation_turn(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            updates={
+                **common_updates,
+                "status": "prepared",
+                "turn_state": "prepared",
+                "freshness_notice": covered_notice,
+                "shared_evidence_write_state": _shared_evidence_write_state(
+                    "covered",
+                    notice=covered_notice,
+                ),
+            },
+            refresh_workspace_snapshot=False,
+        )
+        return {"conversation_id": conversation_id, "turn_id": turn_id, **updated_turn}
+
+    boundary_reason = _nonempty_string(summary.get("detail")) or _nonempty_string(
+        summary.get("reason")
+    ) or _lane_c_blocked_notice()
+    committed_turn = _commit_governed_boundary_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        reason=boundary_reason,
+        extra_turn_updates={
+            **common_updates,
+            "freshness_notice": None,
+            "shared_evidence_write_state": _shared_evidence_write_state(
+                "blocked",
+                notice=boundary_reason,
+            ),
+        },
+    )
+    return {"conversation_id": conversation_id, "turn_id": turn_id, **committed_turn}
+
+
+def _host_shared_evidence_write_state(turn: dict[str, Any]) -> dict[str, Any] | None:
+    persisted = _mapping(turn.get("shared_evidence_write_state")) or None
+    if persisted is not None:
+        return persisted
+    if not bool(turn.get("hybrid_refresh_triggered")):
+        return None
+    turn_state = _nonempty_string(turn.get("turn_state") or turn.get("status"))
+    if turn_state == "waiting-shared-job":
+        return _shared_evidence_write_state("active", notice=_lane_c_wait_notice())
+    if _nonempty_string(turn.get("hybrid_refresh_completion_status")) == "covered":
+        return _shared_evidence_write_state("covered", notice=_lane_c_covered_notice())
+    if _nonempty_string(turn.get("support_basis")) == "governed-boundary":
+        return _shared_evidence_write_state(
+            "blocked",
+            notice=_nonempty_string(turn.get("response_excerpt")) or _lane_c_blocked_notice(),
+        )
+    return None
 
 
 def _status_from_turn(turn: dict[str, Any]) -> tuple[str, bool]:
@@ -247,10 +369,18 @@ def _turn_log_context(turn: dict[str, Any]) -> dict[str, str] | None:
 
 
 def _turn_detail(turn: dict[str, Any], *, fallback: str | None = None) -> str | None:
+    shared_evidence_write_state = _host_shared_evidence_write_state(turn)
+    shared_evidence_notice = (
+        _nonempty_string(shared_evidence_write_state.get("notice"))
+        if shared_evidence_write_state is not None
+        else None
+    )
     for candidate in (
         fallback,
+        shared_evidence_notice,
         _nonempty_string(turn.get("freshness_notice")),
         _nonempty_string(turn.get("confirmation_prompt")),
+        support_fulfillment_notice(_mapping(turn.get("support_fulfillment")) or None),
         _nonempty_string(turn.get("response_excerpt")),
         _nonempty_string(turn.get("route_reason")),
         _nonempty_string(turn.get("primary_issue_code")),
@@ -258,6 +388,13 @@ def _turn_detail(turn: dict[str, Any], *, fallback: str | None = None) -> str | 
         if candidate is not None:
             return candidate
     return None
+
+
+def _is_repairable_finalize_failure(issue_codes: list[str]) -> bool:
+    normalized_issue_codes = [code for code in issue_codes if isinstance(code, str) and code]
+    return bool(normalized_issue_codes) and set(normalized_issue_codes).issubset(
+        _REPAIRABLE_FINALIZE_ISSUE_CODES
+    )
 
 
 def _hidden_ask_exception_payload(
@@ -275,6 +412,7 @@ def _hidden_ask_exception_payload(
         "detail": f"Hidden ask {normalized_action} failed: {detail}",
         "primary_issue_code": f"hidden-ask-{normalized_action}-failed",
         "issue_codes": [f"hidden-ask-{normalized_action}-failed"],
+        "next_step": _next_step("blocked"),
     }
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
@@ -302,6 +440,11 @@ def _host_turn_payload(
     include_release_entry: bool = False,
 ) -> dict[str, Any]:
     status, user_reply_allowed = _status_from_turn(turn)
+    support_contract = _mapping(turn.get("support_contract")) or None
+    support_fulfillment = _mapping(turn.get("support_fulfillment")) or None
+    workflow_outcome = _mapping(turn.get("workflow_outcome")) or None
+    shared_evidence_write_state = _host_shared_evidence_write_state(turn)
+    support_notice = support_fulfillment_notice(support_fulfillment)
     answer_text = (
         _answer_text(paths, _nonempty_string(turn.get("answer_file_path")))
         if user_reply_allowed
@@ -348,6 +491,16 @@ def _host_turn_payload(
         "source_scope_policy": _mapping(turn.get("source_scope_policy")) or None,
         "preferred_channels": _string_list(turn.get("preferred_channels")),
         "inspection_scope": _nonempty_string(turn.get("inspection_scope")),
+        "support_contract": support_contract,
+        "support_fulfillment": support_fulfillment,
+        "workflow_outcome": workflow_outcome,
+        "contract_repair_count": (
+            turn.get("contract_repair_count")
+            if isinstance(turn.get("contract_repair_count"), int)
+            else 0
+        ),
+        "shared_evidence_write_state": shared_evidence_write_state,
+        "support_notice": support_notice,
         "next_step": _next_step(status),
         "host_provider": _nonempty_string(turn.get("host_provider")),
         "host_thread_ref": _nonempty_string(turn.get("host_thread_ref")),
@@ -398,21 +551,43 @@ def open_canonical_ask(
         host_identity=host_identity,
         semantic_analysis=semantic_analysis,
     )
+    response_turn = {
+        "conversation_id": conversation_id,
+        "turn_id": turn_id,
+        **persisted_turn,
+        "active_run_id": _nonempty_string(
+            prepared.get("run_id") or persisted_turn.get("active_run_id")
+        ),
+    }
+    auto_settled_turn = _auto_settle_lane_c_if_deterministic(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        turn=response_turn,
+    )
+    if auto_settled_turn is not None:
+        response_turn = auto_settled_turn
     reference_resolution = (
         _mapping(prepared.get("reference_resolution"))
         if isinstance(prepared.get("reference_resolution"), dict)
         else {}
     )
+    unresolved_reason = str(reference_resolution.get("unresolved_reason") or "")
     if (
         str(prepared.get("status") or "") == "prepared"
         and bool(reference_resolution.get("hard_boundary"))
-        and str(reference_resolution.get("unresolved_reason") or "") == "missing-source"
+        and unresolved_reason in {"missing-source", "compare-source-unresolved"}
         and not bool(prepared.get("auto_sync_triggered"))
         and not _string_list(prepared.get("attached_shared_job_ids"))
     ):
         boundary_reason = _nonempty_string(reference_resolution.get("notice_text")) or (
-            "I could not find the requested published source, so I am stopping at that "
-            "boundary."
+            "I could not isolate every requested comparison source exactly, so I am stopping "
+            "at that comparison boundary."
+            if unresolved_reason == "compare-source-unresolved"
+            else (
+                "I could not find the requested published source, so I am stopping at that "
+                "boundary."
+            )
         )
         committed_boundary = _commit_governed_boundary_turn(
             paths,
@@ -439,14 +614,7 @@ def open_canonical_ask(
         )
     return _host_turn_payload(
         paths,
-        turn={
-            "conversation_id": conversation_id,
-            "turn_id": turn_id,
-            **persisted_turn,
-            "active_run_id": _nonempty_string(
-                prepared.get("run_id") or persisted_turn.get("active_run_id")
-            ),
-        },
+        turn=response_turn,
         detail=_nonempty_string(
             prepared.get("freshness_notice")
             or prepared.get("detail")
@@ -488,7 +656,17 @@ def finalize_canonical_ask(
             "detail": "already-committed-canonical-turn",
             "primary_issue_code": "already-committed-canonical-turn",
             "issue_codes": ["already-committed-canonical-turn"],
+            "next_step": _next_step("blocked"),
         }
+    if _nonempty_string(turn.get("turn_state")) == "waiting-shared-job":
+        auto_settled_turn = _auto_settle_lane_c_if_deterministic(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            turn={"conversation_id": conversation_id, "turn_id": turn_id, **turn},
+        )
+        if auto_settled_turn is not None:
+            return _host_turn_payload(paths, turn=auto_settled_turn)
     if _nonempty_string(turn.get("turn_state")) in _WAITING_TURN_STATES:
         return _host_turn_payload(
             paths,
@@ -508,6 +686,7 @@ def finalize_canonical_ask(
             ),
             "primary_issue_code": "illegal-finalize-override",
             "issue_codes": ["illegal-finalize-override"],
+            "next_step": _next_step("blocked"),
         }
     explicit_session_ids = (
         _string_list(request.get("session_ids")) if "session_ids" in request else None
@@ -531,6 +710,11 @@ def finalize_canonical_ask(
         else None
     )
     requested_support_manifest_notes = _nonempty_string(request.get("support_manifest_notes"))
+    requested_workflow_outcome = (
+        _mapping(request.get("workflow_outcome"))
+        if isinstance(request.get("workflow_outcome"), dict)
+        else None
+    )
 
     def _complete_turn(
         *,
@@ -551,6 +735,7 @@ def finalize_canonical_ask(
             support_manifest_sources=requested_support_manifest_sources,
             support_manifest_key_assertions=requested_support_manifest_key_assertions,
             support_manifest_notes=requested_support_manifest_notes,
+            workflow_outcome=requested_workflow_outcome,
         )
 
     def _failed_finalize_state(error: Exception) -> tuple[dict[str, Any], str | None, list[str]]:
@@ -619,6 +804,31 @@ def finalize_canonical_ask(
                         },
                         include_release_entry=True,
                     )
+        if _is_repairable_finalize_failure(issue_codes):
+            update_conversation_turn(
+                paths,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                updates={
+                    "status": "prepared",
+                    "turn_state": "prepared",
+                    "noncanonical_answer_file_path": None,
+                },
+            )
+            repair_turn = load_turn_record(
+                paths,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+            )
+            return _host_turn_payload(
+                paths,
+                turn={
+                    "conversation_id": conversation_id,
+                    "turn_id": turn_id,
+                    **repair_turn,
+                },
+                detail=blocked_detail,
+            )
         quarantined_path = quarantine_noncanonical_answer_file(
             paths,
             conversation_id=conversation_id,
@@ -636,6 +846,7 @@ def finalize_canonical_ask(
             "primary_issue_code": primary_issue_code,
             "issue_codes": issue_codes,
             "noncanonical_answer_file_path": quarantined_path,
+            "next_step": _next_step("blocked"),
         }
     completed_turn = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
     return _host_turn_payload(
@@ -665,6 +876,15 @@ def progress_canonical_ask(
         "turn_id": turn_id,
         **load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id),
     }
+    if _nonempty_string(turn.get("turn_state")) == "waiting-shared-job":
+        auto_settled_turn = _auto_settle_lane_c_if_deterministic(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            turn=turn,
+        )
+        if auto_settled_turn is not None:
+            return _host_turn_payload(paths, turn=auto_settled_turn)
     completion_status = _nonempty_string(
         request.get("hybrid_refresh_completion_status") or request.get("completion_status")
     )
@@ -680,6 +900,7 @@ def progress_canonical_ask(
             "detail": "Hidden ask progress only accepts `covered` or `blocked` settlement.",
             "primary_issue_code": "illegal-progress-settlement",
             "issue_codes": ["illegal-progress-settlement"],
+            "next_step": _next_step("blocked"),
         }
     if _nonempty_string(turn.get("turn_state")) != "waiting-shared-job":
         return _host_turn_payload(paths, turn=turn)
@@ -699,6 +920,7 @@ def progress_canonical_ask(
                 ),
                 "primary_issue_code": "missing-progress-job-id",
                 "issue_codes": ["missing-progress-job-id"],
+                "next_step": _next_step("blocked"),
             }
         job_id = hybrid_job_ids[0]
     settle_lane_c_shared_refresh(
@@ -737,6 +959,7 @@ def handle_hidden_ask_request(
                     "detail": "Hidden ask open requires a non-empty question.",
                     "primary_issue_code": "missing-question",
                     "issue_codes": ["missing-question"],
+                    "next_step": _next_step("blocked"),
                 }
             return open_canonical_ask(
                 workspace,
@@ -759,6 +982,7 @@ def handle_hidden_ask_request(
                     "detail": "Hidden ask finalize requires conversation_id and turn_id.",
                     "primary_issue_code": "missing-turn-reference",
                     "issue_codes": ["missing-turn-reference"],
+                    "next_step": _next_step("blocked"),
                 }
             return finalize_canonical_ask(
                 workspace,
@@ -774,6 +998,7 @@ def handle_hidden_ask_request(
                     "detail": "Hidden ask progress requires conversation_id and turn_id.",
                     "primary_issue_code": "missing-turn-reference",
                     "issue_codes": ["missing-turn-reference"],
+                    "next_step": _next_step("blocked"),
                 }
             return progress_canonical_ask(
                 workspace,
@@ -787,6 +1012,7 @@ def handle_hidden_ask_request(
             "detail": "Hidden ask action must be `open`, `progress`, or `finalize`.",
             "primary_issue_code": "unsupported-hidden-ask-action",
             "issue_codes": ["unsupported-hidden-ask-action"],
+            "next_step": _next_step("blocked"),
         }
     except Exception as exc:
         return _hidden_ask_exception_payload(

@@ -328,6 +328,7 @@ def question_execution_profile(
                 normalized_analysis["needs_latest_workspace_state"]
             ),
             "memory_query_profile": dict(normalized_analysis["memory_query_profile"]),
+            "source_scope_intent": dict(normalized_analysis["source_scope_intent"]),
             "evidence_requirements": evidence_requirements,
         },
         "evidence_mode": (

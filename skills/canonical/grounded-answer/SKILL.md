@@ -35,9 +35,17 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
      - `external-source-verified`
      - `model-knowledge`
      - `mixed`
-   - honor ask-provided `reference_resolution`, `source_scope_policy`, and `evidence_requirements`; when `evidence_requirements` is present, treat it as the canonical odd-question inspection contract before widening scope or changing evidence basis
+   - honor ask-provided `reference_resolution`, `source_scope_policy`, `evidence_requirements`, and `support_contract`; when `evidence_requirements` is present, treat it as the canonical odd-question inspection contract before widening scope or changing evidence basis
+   - write a short support ledger before drafting:
+     - which source boundary must survive
+     - which comparison sources must both survive
+     - which published evidence channels are required
+     - whether this turn still has the one allowed contract-repair chance
 2. Normalize the user question and decompose it only when that improves grounded retrieval.
-3. Run `docmason retrieve "<query>" --json` for the initial question or sub-question when KB evidence is part of the answer path.
+3. Run `docmason retrieve "<query>" --json --compact` for the initial question or sub-question when KB evidence is part of the answer path.
+   - if you truly need the full nested retrieve payload, redirect full `--json` to a local file and inspect it selectively instead of streaming it into the live chat context
+   - treat compact retrieve as the stable host-facing projection; inspect `results`, `reference_resolution`, `source_scope_policy`, and `recommended_hybrid_targets` before reaching for nested JSON
+   - do not build alternate compact schemas with ad hoc `jq` assumptions such as `.matches`
    - prefer published affordance sidecars and already-published evidence channels over ad hoc source inspection
    - inspect `reference_resolution` first when the user has named a document or locator in user-native terms
    - keep DocMason workspace commands sequential inside the same live answer path; do not overlap `retrieve`, `trace`, `sync`, `status`, or `validate-kb` while a lease-owning step is still running
@@ -45,13 +53,14 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
    - when `reference_resolution.status` is `exact`, preserve that narrowing and do not let neighboring documents silently dilute it
    - when `reference_resolution.status` is `approximate` but `unit_match_status` is `exact`, preserve the approximate notice but still treat the resolved source narrowing as intentional
    - when `reference_resolution.status` is `approximate` or `unresolved`, keep the inline notice and answer wording honest about that boundary
-   - when the question is artifact-sensitive, inspect artifact-aware retrieval payloads explicitly:
-     - `matched_artifacts`
-     - `matched_artifact_ids`
-     - `focus_render_assets`
-     - `recommended_hybrid_targets`
-     - artifact `section_path`, `caption_text`, `continuation_group_ids`, `procedure_hints`, and `semantic_labels`
-     - score details such as `structure_context_bonus`, `semantic_overlay_bonus`, and `compare_coverage_bonus`
+    - when the question is artifact-sensitive, inspect compact retrieval fields first:
+       - `matched_artifact_ids`
+       - `matched_unit_ids`
+       - `matched_overlay_unit_ids`
+       - `focus_render_assets`
+       - `recommended_hybrid_targets`
+       - score details such as `structure_context_bonus`, `semantic_overlay_bonus`, and `compare_coverage_bonus`
+    - when the answer boundary truly depends on exact artifact metadata such as `section_path`, `caption_text`, `continuation_group_ids`, `procedure_hints`, or `semantic_labels`, inspect a file-first full retrieve capture or the published artifact sidecars rather than pasting the nested payload into chat
    - treat those published payloads as an ordered evidence path: first decide whether retrieved text, structure, notes, or media already settle the claim, then inspect cited `focus_render_assets`, render refs, or page spans when visual confirmation would materially change the answer, and only then escalate
    - when published sufficiency fails because of hard-artifact semantic gaps, the grounded-answer path must enter the governed ask-time multimodal refresh before any raw source inspection
      - use `recommended_hybrid_targets` as the only legal query-aware narrowing entrypoint
@@ -59,9 +68,11 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
      - once the governed refresh picks a source, complete that source's current hybrid candidates, reretrieve, and retrace before treating the ask as ready to answer
      - if the governed refresh settles `blocked`, close the turn as `abstained + governed-boundary`
 5. Run provenance tracing for the strongest support when you need corroboration, contradiction checks, or answer-state clarification:
-   - `docmason trace --source-id <source_id> --json`
-   - `docmason trace --answer-file <path> --json`
-   - `docmason trace --session-id <session_id> --json`
+   - `docmason trace --source-id <source_id> --json --compact`
+   - `docmason trace --answer-file <path> --json --compact`
+   - `docmason trace --session-id <session_id> --json --compact`
+   - if you truly need nested segment support objects, redirect full `--json` to a local file and inspect it selectively instead of loading the full raw trace payload into the live chat context
+   - treat compact trace as the stable host-facing projection; inspect `answer_state`, `reference_resolution`, `source_scope_policy`, `issue_codes`, and `recommended_hybrid_targets` before reaching for nested JSON
    - when the same live turn creates more than one ask-owned retrieve session or more than one plausible final trace candidate, keep an explicit artifact ledger while you work:
      - preserve the selected ask-owned `session_ids` that support the final answer
      - preserve the selected `trace_ids` that bind the final answer-file version
@@ -78,14 +89,15 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
 7. Draft the canonical answer file under `runtime/answers/` when conversation context exists.
    - if you need auxiliary drafts or exported scratch artifacts and the user did not specify a path, place them under `runtime/agent-work/`
 8. When the answer is externally verified, persist the lightweight external support manifest before or alongside the final trace so the combined support contract stays machine-readable.
-9. Run `docmason trace --answer-file <path> --json` as the final grounding check.
-   - when the answer depends on artifact-level support, inspect:
-     - `supporting_artifact_ids`
-     - segment `artifact_supports`
-     - segment `semantic_supports`
-     - any overlay `covered_slots`, `blocked_slots`, and consumed render inputs when present
-     - render refs, page spans, and region boxes when present
-   - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; hidden finalize can safely reuse the latest same-turn selected ledger for an unchanged answer file, but explicit selected IDs remain the preferred handoff, and if finalize later blocks on artifact settlement only, continue from that same file version instead of regenerating identical text
+9. Run `docmason trace --answer-file <path> --json --compact` as the final grounding check.
+    - when the answer depends on artifact-level support, inspect compact trace fields first:
+       - `supporting_artifact_ids`
+       - segment `supporting_artifact_ids`
+       - segment `supporting_overlay_unit_ids`
+       - segment support-lane counts and compact support counts
+    - when you genuinely need nested `artifact_supports`, `semantic_supports`, render refs, page spans, or region boxes, inspect a file-first full trace capture or the published artifact surfaces rather than streaming the nested trace payload into chat
+   - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; prefer the structured `workflow_outcome` handoff when the workflow already knows the correct `support_basis`, selected IDs, or other finalize-owned facts
+   - if finalize returns `status = execute` together with a repairable `support_fulfillment`, do one contract-aware rewrite and retrace on the same turn, then finalize once more
 10. Emit one of these final answer states:
    - `grounded`
    - `partially-grounded`

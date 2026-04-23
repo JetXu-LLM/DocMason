@@ -1755,6 +1755,42 @@ def _turn_record_from_log_payload(
     return {}
 
 
+def _turn_record_from_log_context(
+    paths: WorkspacePaths,
+    log_context: dict[str, str] | None,
+) -> dict[str, Any]:
+    from .conversation import load_turn_record
+
+    if not isinstance(log_context, dict):
+        return {}
+    conversation_id = log_context.get("conversation_id")
+    turn_id = log_context.get("turn_id")
+    if (
+        isinstance(conversation_id, str)
+        and conversation_id
+        and isinstance(turn_id, str)
+        and turn_id
+    ):
+        try:
+            enriched = load_turn_record(paths, conversation_id=conversation_id, turn_id=turn_id)
+        except KeyError:
+            return {}
+        return {
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            **enriched,
+        }
+    return {}
+
+
+def _source_scope_intent_from_record(record: dict[str, Any]) -> dict[str, Any] | None:
+    semantic_analysis = record.get("semantic_analysis")
+    if not isinstance(semantic_analysis, dict):
+        return None
+    source_scope_intent = semantic_analysis.get("source_scope_intent")
+    return dict(source_scope_intent) if isinstance(source_scope_intent, dict) else None
+
+
 def combined_trace_status(
     *,
     answer_state: str,
@@ -3173,6 +3209,8 @@ def retrieve_corpus(
         if effective_log_context and effective_log_context.get("question_domain")
         else None
     )
+    turn_record = _turn_record_from_log_context(paths, effective_log_context)
+    source_scope_intent = _source_scope_intent_from_record(turn_record)
     memory_profile = infer_memory_query_profile(query, question_domain=effective_question_domain)
     retrieval_data = load_retrieval_data(paths, target=target)
     target_root = paths.knowledge_target_dir(target)
@@ -3182,12 +3220,14 @@ def retrieve_corpus(
         query,
         source_records=retrieval_data["source_records"],
         unit_records=retrieval_data["unit_records"],
+        source_scope_intent=source_scope_intent,
     )
     source_scope_policy = build_source_scope_policy(
         question=query,
         question_class=None,
         question_domain=effective_question_domain,
         reference_resolution=reference_resolution,
+        source_scope_intent=source_scope_intent,
     )
     if target == "current" and should_merge_pending_interaction(
         effective_question_domain,
@@ -3199,12 +3239,14 @@ def retrieve_corpus(
             query,
             source_records=retrieval_data["source_records"],
             unit_records=retrieval_data["unit_records"],
+            source_scope_intent=source_scope_intent,
         )
         source_scope_policy = build_source_scope_policy(
             question=query,
             question_class=None,
             question_domain=effective_question_domain,
             reference_resolution=reference_resolution,
+            source_scope_intent=source_scope_intent,
         )
     effective_source_ids = _effective_source_ids_from_reference(
         source_ids,
@@ -3864,6 +3906,7 @@ def trace_answer_text(
                 ),
                 question_domain=effective_question_domain,
                 reference_resolution=effective_reference_resolution,
+                source_scope_intent=_source_scope_intent_from_record(fallback_turn_record),
             )
         )
 
@@ -4739,6 +4782,11 @@ def trace_session(
                         session_payload.get("reference_resolution")
                         if isinstance(session_payload.get("reference_resolution"), dict)
                         else None
+                    ),
+                    source_scope_intent=(
+                        session_payload.get("semantic_analysis", {}).get("source_scope_intent")
+                        if isinstance(session_payload.get("semantic_analysis"), dict)
+                        else _source_scope_intent_from_record(fallback_turn_record)
                     ),
                 )
             )

@@ -172,6 +172,14 @@ def shared_job_inactive_owner_reason(
         return "missing-owner-run"
     if run_state.get("status") != "active":
         return "inactive-owner-run"
+    if _shared_job_stale(manifest):
+        run_updated_at = _parse_timestamp(run_state.get("updated_at")) or _parse_timestamp(
+            run_state.get("opened_at")
+        )
+        if run_updated_at is None:
+            return "stale-owner-run"
+        if datetime.now(tz=UTC) - run_updated_at > SHARED_JOB_STALE_AFTER:
+            return "stale-owner-run"
     return None
 
 
@@ -924,6 +932,13 @@ def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
     """Settle or clear active shared jobs whose owners no longer exist legally."""
     repairs: list[dict[str, Any]] = []
     index = load_shared_jobs_index(paths)
+    publish_manifest = read_json(paths.current_publish_manifest_path)
+    current_published_snapshot_id = (
+        str(publish_manifest.get("snapshot_id"))
+        if isinstance(publish_manifest.get("snapshot_id"), str)
+        and publish_manifest.get("snapshot_id")
+        else None
+    )
     for job_key, job_id in list(index["active_by_key"].items()):
         if not isinstance(job_id, str) or not job_id:
             continue
@@ -988,6 +1003,41 @@ def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
             continue
         if manifest.get("criticality") != "answer-critical":
             continue
+        raw_scope = manifest.get("scope")
+        scope: dict[str, Any] = dict(raw_scope) if isinstance(raw_scope, dict) else {}
+        job_snapshot_id = (
+            str(scope.get("published_snapshot_id"))
+            if isinstance(scope.get("published_snapshot_id"), str)
+            and scope.get("published_snapshot_id")
+            else None
+        )
+        if (
+            str(manifest.get("job_family") or "") == "lane-c"
+            and current_published_snapshot_id is not None
+            and job_snapshot_id is not None
+            and job_snapshot_id != current_published_snapshot_id
+        ):
+            block_shared_job(
+                paths,
+                job_id,
+                result={
+                    "reason": (
+                        "The shared job targeted an older published snapshot and is no longer "
+                        "legal answer-critical state for the current workspace."
+                    )
+                },
+            )
+            repairs.append(
+                {
+                    "kind": "blocked-stale-answer-critical-snapshot",
+                    "job_id": job_id,
+                    "job_key": job_key,
+                    "job_family": manifest.get("job_family"),
+                    "job_snapshot_id": job_snapshot_id,
+                    "current_published_snapshot_id": current_published_snapshot_id,
+                }
+            )
+            continue
         owner_run_id = owner.get("id") if isinstance(owner, dict) else None
         if inactive_owner_reason == "missing-owner-run":
             block_shared_job(
@@ -1020,6 +1070,32 @@ def repair_stale_shared_jobs(paths: WorkspacePaths) -> list[dict[str, Any]]:
                     "job_key": job_key,
                     "owner_run_id": owner_run_id,
                     "run_status": run_state.get("status"),
+                }
+            )
+            continue
+        if inactive_owner_reason == "stale-owner-run":
+            from .run_control import load_run_state
+
+            run_state = load_run_state(paths, str(owner_run_id))
+            block_shared_job(
+                paths,
+                job_id,
+                result={
+                    "reason": (
+                        "The shared job owner run stopped making progress and is no longer "
+                        "active."
+                    )
+                },
+            )
+            repairs.append(
+                {
+                    "kind": "blocked-stale-owner-run",
+                    "job_id": job_id,
+                    "job_key": job_key,
+                    "owner_run_id": owner_run_id,
+                    "run_status": run_state.get("status"),
+                    "run_updated_at": run_state.get("updated_at"),
+                    "job_updated_at": manifest.get("updated_at"),
                 }
             )
     return repairs

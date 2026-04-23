@@ -21,6 +21,11 @@ from docmason.ask import (
     prepare_ask_turn,
     settle_lane_c_shared_refresh,
 )
+from docmason.ask_contracts import (
+    build_support_contract,
+    build_support_fulfillment,
+    support_fulfillment_notice,
+)
 from docmason.commands import (
     ACTION_REQUIRED,
     READY,
@@ -30,6 +35,7 @@ from docmason.commands import (
     sync_workspace,
     trace_knowledge,
 )
+from docmason.control_plane import block_shared_job as block_control_plane_job
 from docmason.control_plane import complete_shared_job as complete_control_plane_job
 from docmason.control_plane import ensure_shared_job, lane_c_job_key, load_shared_job
 from docmason.conversation import load_turn_record, update_conversation_turn
@@ -2187,7 +2193,15 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(second_live_turn["status"], "prepared")
         self.assertEqual(
             second_live_turn["freshness_notice"],
-            "The governed multimodal refresh finished. Rerun retrieval and trace before committing the answer.",
+            "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
+        )
+        self.assertEqual(
+            second_live_turn["shared_evidence_write_state"],
+            {
+                "kind": "shared-evidence-truth-write",
+                "status": "covered",
+                "notice": "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
+            },
         )
 
     def test_settle_lane_c_shared_refresh_blocked_commits_boundary_for_waiters(self) -> None:
@@ -2259,7 +2273,7 @@ class AskHardeningTests(unittest.TestCase):
             self.assertEqual(live_turn["support_basis"], "governed-boundary")
             self.assertEqual(live_turn["hybrid_refresh_completion_status"], "blocked")
 
-    def test_complete_ask_turn_autogoverns_lane_c_from_trace_insufficiency(self) -> None:
+    def test_complete_ask_turn_skips_lane_c_for_answer_gap(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.create_pdf_with_full_page_image(workspace.source_dir / "scan.pdf")
@@ -2325,29 +2339,22 @@ class AskHardeningTests(unittest.TestCase):
             session_ids=[trace["session_id"]],
             trace_ids=[trace["trace_id"]],
             answer_file_path=turn["answer_file_path"],
-            response_excerpt=(
-                "The scanned workflow page needs a governed multimodal refresh before a final answer."
-            ),
+            response_excerpt="The scanned workflow page still needs more evidence for a confident answer.",
             status="answered",
         )
-        self.assertEqual(transitioned["status"], "waiting-shared-job")
-        self.assertTrue(transitioned["hybrid_refresh_triggered"])
-        self.assertTrue(transitioned["hybrid_refresh_job_ids"])
-        work_path = transitioned["hybrid_refresh_summary"]["work_path"]
-        self.assertTrue((workspace.root / work_path).exists())
-        lane_c_job = load_shared_job(workspace, transitioned["hybrid_refresh_job_ids"][0])
-        self.assertEqual(lane_c_job["job_family"], "lane-c")
-        self.assertEqual(lane_c_job["status"], "running")
+        self.assertEqual(transitioned["status"], "answered")
+        self.assertFalse(transitioned["hybrid_refresh_triggered"])
+        self.assertEqual(transitioned["hybrid_refresh_job_ids"], [])
+        self.assertIsNone(transitioned.get("shared_evidence_write_state"))
         self.assertEqual(
             self.load_conversation(
                 workspace,
                 conversation_id=turn["conversation_id"],
             )["turns"][0]["status"],
-            "waiting-shared-job",
+            "answered",
         )
         self.assertIsNone(transitioned.get("primary_issue_code"))
         self.assertEqual(transitioned.get("issue_codes"), [])
-        self.assertFalse((workspace.runs_dir / turn["run_id"] / "commit.json").exists())
 
     def test_complete_ask_turn_clears_stale_issue_codes_when_lane_c_refresh_begins(self) -> None:
         workspace = self.make_workspace()
@@ -2359,9 +2366,9 @@ class AskHardeningTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-lane-c-clear"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What does the scanned workflow page show?",
+                question="Using the scanned workflow page, draft a short working note about what it shows.",
                 semantic_analysis=self.semantic_analysis(
-                    question_class="answer",
+                    question_class="composition",
                     question_domain="workspace-corpus",
                     evidence_requirements={
                         "prefer_published_artifacts": True,
@@ -2397,15 +2404,23 @@ class AskHardeningTests(unittest.TestCase):
             workspace,
             conversation_id=turn["conversation_id"],
             turn_id=turn["turn_id"],
-            inner_workflow_id="grounded-answer",
+            inner_workflow_id="grounded-composition",
             session_ids=[trace["session_id"]],
             trace_ids=[trace["trace_id"]],
             answer_file_path=turn["answer_file_path"],
-            response_excerpt="The scanned workflow page needs a governed multimodal refresh before a final answer.",
+            response_excerpt="The draft needs a shared evidence refresh before it can finish.",
             status="answered",
         )
 
         self.assertEqual(transitioned["status"], "waiting-shared-job")
+        self.assertEqual(
+            transitioned["shared_evidence_write_state"],
+            {
+                "kind": "shared-evidence-truth-write",
+                "status": "active",
+                "notice": "This ask is refreshing shared evidence before it can finish.",
+            },
+        )
         self.assertIsNone(transitioned.get("primary_issue_code"))
         self.assertEqual(transitioned.get("issue_codes"), [])
         refreshed_turn = load_turn_record(
@@ -2413,6 +2428,7 @@ class AskHardeningTests(unittest.TestCase):
             conversation_id=turn["conversation_id"],
             turn_id=turn["turn_id"],
         )
+        self.assertEqual(refreshed_turn["status"], "waiting-shared-job")
         self.assertIsNone(refreshed_turn.get("primary_issue_code"))
         self.assertEqual(refreshed_turn.get("issue_codes"), [])
         self.assertIsNone(refreshed_turn.get("noncanonical_answer_file_path"))
@@ -3808,6 +3824,7 @@ class AskHardeningTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "boundary")
         self.assertTrue(payload["user_reply_allowed"])
+        self.assertEqual(payload["next_step"], "return-boundary-answer")
         self.assertIn("stopping at", payload["answer_text"])
         turn = load_turn_record(
             workspace,
@@ -3872,6 +3889,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(payload["status"], "blocked")
         self.assertFalse(payload["user_reply_allowed"])
         self.assertEqual(payload["primary_issue_code"], "hidden-ask-open-failed")
+        self.assertEqual(payload["next_step"], "do-not-return-final-answer")
         self.assertIn("open exploded", payload["detail"])
 
     def test_hidden_ask_progress_returns_structured_error_payload_on_internal_failure(self) -> None:
@@ -3894,6 +3912,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(payload["status"], "blocked")
         self.assertFalse(payload["user_reply_allowed"])
         self.assertEqual(payload["primary_issue_code"], "hidden-ask-progress-failed")
+        self.assertEqual(payload["next_step"], "do-not-return-final-answer")
         self.assertEqual(payload["conversation_id"], "conversation-1")
         self.assertEqual(payload["turn_id"], "turn-1")
 
@@ -3907,6 +3926,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["primary_issue_code"], "hidden-ask-open-failed")
+        self.assertEqual(payload["next_step"], "do-not-return-final-answer")
         self.assertIn("cli exploded", payload["detail"])
 
     def test_hidden_ask_finalize_snapshots_noncanonical_answer_file_without_removing_draft(
@@ -3970,6 +3990,89 @@ class AskHardeningTests(unittest.TestCase):
             turn["noncanonical_answer_file_path"],
             failed["noncanonical_answer_file_path"],
         )
+
+    def test_hidden_ask_finalize_returns_execute_for_repairable_admissibility_failure(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-hidden-repairable-admissibility"},
+            clear=False,
+        ):
+            opened = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": (
+                        'Using only the document "Project Planning Brief", summarize the '
+                        "project outline in 3 bullet points."
+                    ),
+                    "host_provider": "codex",
+                    "host_thread_ref": "thread-hidden-repairable-admissibility",
+                    "host_identity_source": "codex_thread_id",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(opened["status"], "execute")
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The project outline defines the work plan.\n",
+            encoding="utf-8",
+        )
+        update_conversation_turn(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+            updates={
+                "status": "prepared",
+                "turn_state": "prepared",
+                "primary_issue_code": "illegal-source-citation-path",
+                "issue_codes": [
+                    "illegal-source-citation-path",
+                    "mixed-support-unexplained",
+                ],
+            },
+        )
+
+        with mock.patch(
+            "docmason.host_integration.complete_ask_turn",
+            side_effect=ValueError("Canonical answer text exposes an absolute machine path."),
+        ):
+            repairable = handle_hidden_ask_request(
+                {
+                    "action": "finalize",
+                    "conversation_id": opened["conversation_id"],
+                    "turn_id": opened["turn_id"],
+                    "answer_file_path": opened["answer_file_path"],
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(repairable["status"], "execute")
+        self.assertFalse(repairable["user_reply_allowed"])
+        self.assertEqual(repairable["primary_issue_code"], "illegal-source-citation-path")
+        self.assertEqual(
+            repairable["issue_codes"],
+            ["illegal-source-citation-path", "mixed-support-unexplained"],
+        )
+        self.assertEqual(repairable["answer_file_path"], opened["answer_file_path"])
+        self.assertIn("absolute machine path", str(repairable["detail"]))
+        self.assertNotIn("noncanonical_answer_file_path", repairable)
+        self.assertTrue(answer_path.exists())
+
+        refreshed_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertEqual(refreshed_turn["turn_state"], "prepared")
+        self.assertIsNone(refreshed_turn.get("noncanonical_answer_file_path"))
 
     def test_hidden_ask_finalize_autotraces_missing_public_trace(self) -> None:
         workspace = self.make_workspace()
@@ -4094,6 +4197,40 @@ class AskHardeningTests(unittest.TestCase):
             "already-committed-canonical-turn",
         )
         self.assertFalse(failed["user_reply_allowed"])
+        self.assertEqual(failed["next_step"], "do-not-return-final-answer")
+
+    def test_hidden_ask_finalize_rejects_illegal_override_with_blocked_next_step(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the project planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-illegal-finalize-override",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        blocked = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_state": "grounded",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["primary_issue_code"], "illegal-finalize-override")
+        self.assertEqual(blocked["next_step"], "do-not-return-final-answer")
+        self.assertFalse(blocked["user_reply_allowed"])
 
     def test_hidden_ask_open_does_not_run_release_entry_check(self) -> None:
         workspace = self.make_workspace()
@@ -4402,6 +4539,64 @@ class AskHardeningTests(unittest.TestCase):
             all(result["source_id"] in set(source_ids[:2]) for result in retrieval["results"])
         )
 
+    def test_retrieve_corpus_uses_structured_compare_intent_from_turn_context(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        semantic_analysis = self.semantic_analysis(
+            question_class="answer",
+            question_domain="workspace-corpus",
+        )
+        semantic_analysis["source_scope_intent"] = {
+            "mode": "compare",
+            "expected_source_count": 2,
+            "explicit_source_texts": [
+                "Project Planning Brief",
+                "Project Timeline Notes",
+            ],
+            "hard_boundary_on_missing_sources": True,
+        }
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "Project Planning Brief and Project Timeline Notes on project outline.",
+                "semantic_analysis": semantic_analysis,
+                "host_provider": "codex",
+                "host_thread_ref": "thread-structured-compare-turn-context",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(opened["status"], "execute")
+        self.assertEqual(opened["support_contract"]["source_scope"]["scope_mode"], "compare")
+
+        retrieval = retrieve_corpus(
+            workspace,
+            query="Project Planning Brief and Project Timeline Notes on project outline.",
+            top=5,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=True,
+            log_context=opened["log_context"],
+            question_domain="workspace-corpus",
+        )
+
+        self.assertEqual(retrieval["source_scope_policy"]["scope_mode"], "compare")
+        self.assertEqual(retrieval["reference_resolution"]["compare_resolution_status"], "exact")
+        self.assertCountEqual(
+            retrieval["source_scope_policy"]["compare_target_source_ids"],
+            source_ids,
+        )
+        self.assertTrue(retrieval["results"])
+        self.assertTrue(
+            all(result["source_id"] in set(source_ids) for result in retrieval["results"])
+        )
+
     def test_trace_answer_file_marks_unresolved_compare_scope_without_fake_exactness(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -4445,6 +4640,1128 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(trace["answer_state"], "unresolved")
         self.assertIn("compare-source-unresolved", trace["issue_codes"])
 
+    def test_build_support_contract_captures_scope_and_reference_obligations(self) -> None:
+        global_contract = build_support_contract(
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            evidence_requirements={"preferred_channels": ["text"], "inspection_scope": "unit"},
+            inspection_scope="unit",
+            preferred_channels=None,
+            reference_resolution=None,
+            reference_resolution_summary=None,
+            source_scope_policy={"scope_mode": "global"},
+            prefer_published_artifacts=True,
+        )
+        self.assertEqual(global_contract["source_scope"]["scope_mode"], "global")
+        self.assertFalse(global_contract["reference_honesty"]["required"])
+
+        scoped_contract = build_support_contract(
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            evidence_requirements={"preferred_channels": ["text"], "inspection_scope": "unit"},
+            inspection_scope="unit",
+            preferred_channels=["text"],
+            reference_resolution={
+                "status": "exact",
+                "source_match_status": "exact",
+                "unit_match_status": "none",
+                "target_source_ref": "Project Planning Brief",
+            },
+            reference_resolution_summary="Requested source resolved exactly.",
+            source_scope_policy={
+                "scope_mode": "source-scoped-hard",
+                "target_source_id": "source-a",
+                "target_source_ref": "Project Planning Brief",
+                "require_target_source_in_final_support": True,
+            },
+            prefer_published_artifacts=True,
+        )
+        self.assertEqual(scoped_contract["source_scope"]["scope_mode"], "source-scoped-hard")
+        self.assertTrue(
+            scoped_contract["source_scope"]["require_target_source_in_final_support"]
+        )
+        self.assertEqual(scoped_contract["reference_honesty"]["status"], "exact")
+
+        compare_contract = build_support_contract(
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            evidence_requirements={"preferred_channels": ["text"], "inspection_scope": "unit"},
+            inspection_scope="unit",
+            preferred_channels=["text"],
+            reference_resolution={
+                "status": "exact",
+                "source_match_status": "exact",
+                "unit_match_status": "none",
+            },
+            reference_resolution_summary="Both requested sources resolved exactly.",
+            source_scope_policy={
+                "scope_mode": "compare",
+                "compare_target_source_ids": ["source-a", "source-b"],
+                "compare_target_source_refs": [
+                    "Project Planning Brief",
+                    "Project Timeline Notes",
+                ],
+                "compare_expected_source_count": 2,
+                "compare_resolution_status": "exact",
+            },
+            prefer_published_artifacts=True,
+        )
+        self.assertEqual(compare_contract["source_scope"]["scope_mode"], "compare")
+        self.assertEqual(compare_contract["source_scope"]["compare_expected_source_count"], 2)
+
+        approximate_contract = build_support_contract(
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            evidence_requirements={"preferred_channels": ["text"], "inspection_scope": "unit"},
+            inspection_scope="unit",
+            preferred_channels=["text"],
+            reference_resolution={
+                "status": "approximate",
+                "source_match_status": "approximate",
+                "unit_match_status": "exact",
+                "target_source_ref": "Planning Brief",
+            },
+            reference_resolution_summary="Requested source matched approximately.",
+            source_scope_policy={
+                "scope_mode": "source-scoped-soft",
+                "target_source_ref": "Planning Brief",
+            },
+            prefer_published_artifacts=True,
+        )
+        self.assertEqual(approximate_contract["reference_honesty"]["status"], "approximate")
+        self.assertEqual(
+            approximate_contract["reference_honesty"]["source_match_status"],
+            "approximate",
+        )
+
+        unresolved_contract = build_support_contract(
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            evidence_requirements={"preferred_channels": ["text"], "inspection_scope": "unit"},
+            inspection_scope="unit",
+            preferred_channels=["text"],
+            reference_resolution={
+                "status": "unresolved",
+                "source_match_status": "unresolved",
+                "unit_match_status": "none",
+                "target_source_ref": "Missing Source",
+                "unresolved_reason": "missing-source",
+            },
+            reference_resolution_summary="Requested source could not be resolved.",
+            source_scope_policy={
+                "scope_mode": "source-scoped-hard",
+                "target_source_ref": "Missing Source",
+                "require_target_source_in_final_support": True,
+            },
+            prefer_published_artifacts=True,
+        )
+        self.assertEqual(
+            unresolved_contract["reference_honesty"]["unresolved_reason"],
+            "missing-source",
+        )
+        self.assertEqual(
+            unresolved_contract["repair_policy"]["repairable_gap_types"],
+            [
+                "source-scoped-target-support",
+                "compare-coverage",
+                "preferred-channel-grounding",
+            ],
+        )
+
+    def test_build_support_fulfillment_classifies_satisfied_repairable_and_blocked_gaps(self) -> None:
+        scoped_contract = build_support_contract(
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            evidence_requirements={"preferred_channels": ["text"], "inspection_scope": "unit"},
+            inspection_scope="unit",
+            preferred_channels=["text"],
+            reference_resolution={
+                "status": "exact",
+                "source_match_status": "exact",
+                "unit_match_status": "none",
+                "target_source_ref": "Project Planning Brief",
+            },
+            reference_resolution_summary="Requested source resolved exactly.",
+            source_scope_policy={
+                "scope_mode": "source-scoped-hard",
+                "target_source_id": "source-a",
+                "target_source_ref": "Project Planning Brief",
+                "require_target_source_in_final_support": True,
+            },
+            prefer_published_artifacts=True,
+        )
+        satisfied = build_support_fulfillment(
+            support_contract=scoped_contract,
+            trace_payload={
+                "reference_resolution_summary": "Requested source resolved exactly.",
+                "canonical_support_summary": {"supporting_source_ids": ["source-a"]},
+                "source_scope_satisfied": True,
+                "matched_published_channels": ["text"],
+                "used_published_channels": ["text"],
+                "published_artifacts_sufficient": True,
+                "issue_codes": [],
+            },
+            answer_state="grounded",
+            support_basis="kb-grounded",
+        )
+        self.assertEqual(satisfied["status"], "satisfied")
+        self.assertIsNone(satisfied["primary_gap_type"])
+
+        external_success = build_support_fulfillment(
+            support_contract=build_support_contract(
+                question_domain="external-factual",
+                support_strategy="web-first",
+                evidence_requirements={"preferred_channels": [], "inspection_scope": "unit"},
+                inspection_scope="unit",
+                preferred_channels=[],
+                reference_resolution=None,
+                reference_resolution_summary=None,
+                source_scope_policy={"scope_mode": "global"},
+                prefer_published_artifacts=False,
+            ),
+            trace_payload={
+                "canonical_support_summary": {"supporting_source_ids": []},
+                "source_scope_satisfied": True,
+                "matched_published_channels": [],
+                "used_published_channels": [],
+                "published_artifacts_sufficient": True,
+                "issue_codes": [],
+            },
+            answer_state="grounded",
+            support_basis="external-source-verified",
+        )
+        self.assertEqual(external_success["status"], "satisfied")
+        self.assertIsNone(external_success["primary_gap_type"])
+        self.assertIsNone(external_success["blocking_reason"])
+
+        model_knowledge_success = build_support_fulfillment(
+            support_contract=build_support_contract(
+                question_domain="general-knowledge",
+                support_strategy="model-first",
+                evidence_requirements={"preferred_channels": [], "inspection_scope": "unit"},
+                inspection_scope="unit",
+                preferred_channels=[],
+                reference_resolution=None,
+                reference_resolution_summary=None,
+                source_scope_policy={"scope_mode": "global"},
+                prefer_published_artifacts=False,
+            ),
+            trace_payload={
+                "canonical_support_summary": {"supporting_source_ids": []},
+                "source_scope_satisfied": True,
+                "matched_published_channels": [],
+                "used_published_channels": [],
+                "published_artifacts_sufficient": True,
+                "issue_codes": [],
+            },
+            answer_state="grounded",
+            support_basis="model-knowledge",
+        )
+        self.assertEqual(model_knowledge_success["status"], "satisfied")
+        self.assertIsNone(model_knowledge_success["primary_gap_type"])
+        self.assertIsNone(model_knowledge_success["blocking_reason"])
+
+        compare_contract = build_support_contract(
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            evidence_requirements={"preferred_channels": ["text"], "inspection_scope": "unit"},
+            inspection_scope="unit",
+            preferred_channels=["text"],
+            reference_resolution={
+                "status": "exact",
+                "source_match_status": "exact",
+                "unit_match_status": "none",
+            },
+            reference_resolution_summary="Both requested sources resolved exactly.",
+            source_scope_policy={
+                "scope_mode": "compare",
+                "compare_target_source_ids": ["source-a", "source-b"],
+                "compare_target_source_refs": [
+                    "Project Planning Brief",
+                    "Project Timeline Notes",
+                ],
+                "compare_expected_source_count": 2,
+                "compare_resolution_status": "exact",
+            },
+            prefer_published_artifacts=True,
+        )
+        compare_gap = build_support_fulfillment(
+            support_contract=compare_contract,
+            trace_payload={
+                "reference_resolution_summary": "Both requested sources resolved exactly.",
+                "canonical_support_summary": {"supporting_source_ids": ["source-a"]},
+                "source_scope_satisfied": False,
+                "matched_published_channels": ["text"],
+                "used_published_channels": ["text"],
+                "published_artifacts_sufficient": True,
+                "issue_codes": ["compare-source-unresolved"],
+            },
+            answer_state="unresolved",
+            support_basis="kb-grounded",
+        )
+        self.assertEqual(compare_gap["status"], "repairable-gap")
+        self.assertEqual(compare_gap["primary_gap_type"], "compare-coverage")
+
+        external_compare_gap = build_support_fulfillment(
+            support_contract=compare_contract,
+            trace_payload={
+                "reference_resolution_summary": "Both requested sources resolved exactly.",
+                "canonical_support_summary": {"supporting_source_ids": ["source-a"]},
+                "source_scope_satisfied": False,
+                "matched_published_channels": ["text"],
+                "used_published_channels": ["text"],
+                "published_artifacts_sufficient": True,
+                "issue_codes": ["compare-source-unresolved"],
+            },
+            answer_state="grounded",
+            support_basis="external-source-verified",
+        )
+        self.assertEqual(external_compare_gap["status"], "repairable-gap")
+        self.assertEqual(external_compare_gap["primary_gap_type"], "compare-coverage")
+
+        channel_gap = build_support_fulfillment(
+            support_contract=build_support_contract(
+                question_domain="workspace-corpus",
+                support_strategy="kb-first",
+                evidence_requirements={
+                    "preferred_channels": ["render", "structure"],
+                    "inspection_scope": "unit",
+                },
+                inspection_scope="unit",
+                preferred_channels=["render", "structure"],
+                reference_resolution=None,
+                reference_resolution_summary=None,
+                source_scope_policy={"scope_mode": "global"},
+                prefer_published_artifacts=True,
+            ),
+            trace_payload={
+                "canonical_support_summary": {"supporting_source_ids": ["source-a"]},
+                "source_scope_satisfied": True,
+                "matched_published_channels": ["render", "structure"],
+                "used_published_channels": ["render"],
+                "published_artifacts_sufficient": True,
+                "issue_codes": [],
+            },
+            answer_state="partially-grounded",
+            support_basis="kb-grounded",
+        )
+        self.assertEqual(channel_gap["status"], "repairable-gap")
+        self.assertEqual(channel_gap["primary_gap_type"], "preferred-channel-grounding")
+
+        external_channel_gap = build_support_fulfillment(
+            support_contract=build_support_contract(
+                question_domain="workspace-corpus",
+                support_strategy="web-first",
+                evidence_requirements={
+                    "preferred_channels": ["render", "structure"],
+                    "inspection_scope": "unit",
+                },
+                inspection_scope="unit",
+                preferred_channels=["render", "structure"],
+                reference_resolution=None,
+                reference_resolution_summary=None,
+                source_scope_policy={"scope_mode": "global"},
+                prefer_published_artifacts=True,
+            ),
+            trace_payload={
+                "canonical_support_summary": {"supporting_source_ids": ["source-a"]},
+                "source_scope_satisfied": True,
+                "matched_published_channels": ["render", "structure"],
+                "used_published_channels": ["render"],
+                "published_artifacts_sufficient": True,
+                "issue_codes": [],
+            },
+            answer_state="grounded",
+            support_basis="external-source-verified",
+        )
+        self.assertEqual(external_channel_gap["status"], "repairable-gap")
+        self.assertEqual(
+            external_channel_gap["primary_gap_type"],
+            "preferred-channel-grounding",
+        )
+
+        model_source_scope_gap = build_support_fulfillment(
+            support_contract=scoped_contract,
+            trace_payload={
+                "reference_resolution_summary": "Requested source resolved exactly.",
+                "canonical_support_summary": {"supporting_source_ids": ["source-b"]},
+                "source_scope_satisfied": False,
+                "matched_published_channels": ["text"],
+                "used_published_channels": ["text"],
+                "published_artifacts_sufficient": True,
+                "issue_codes": ["source-scope-miss"],
+            },
+            answer_state="grounded",
+            support_basis="model-knowledge",
+        )
+        self.assertEqual(model_source_scope_gap["status"], "repairable-gap")
+        self.assertEqual(
+            model_source_scope_gap["primary_gap_type"],
+            "source-scoped-target-support",
+        )
+
+        unresolved_contract = build_support_contract(
+            question_domain="workspace-corpus",
+            support_strategy="kb-first",
+            evidence_requirements={"preferred_channels": ["text"], "inspection_scope": "unit"},
+            inspection_scope="unit",
+            preferred_channels=["text"],
+            reference_resolution={
+                "status": "unresolved",
+                "source_match_status": "unresolved",
+                "unit_match_status": "none",
+                "target_source_ref": "Missing Source",
+                "unresolved_reason": "missing-source",
+            },
+            reference_resolution_summary="Requested source could not be resolved.",
+            source_scope_policy={
+                "scope_mode": "source-scoped-hard",
+                "target_source_ref": "Missing Source",
+                "require_target_source_in_final_support": True,
+            },
+            prefer_published_artifacts=True,
+        )
+        blocked = build_support_fulfillment(
+            support_contract=unresolved_contract,
+            trace_payload={
+                "reference_resolution_summary": "Requested source could not be resolved.",
+                "canonical_support_summary": {"supporting_source_ids": []},
+                "source_scope_satisfied": False,
+                "matched_published_channels": [],
+                "used_published_channels": [],
+                "published_artifacts_sufficient": False,
+                "issue_codes": ["missing-source"],
+            },
+            answer_state="abstained",
+            support_basis="governed-boundary",
+        )
+        self.assertEqual(blocked["status"], "blocked-gap")
+        self.assertEqual(blocked["primary_gap_type"], "nonrepairable-support-basis")
+        self.assertEqual(
+            unresolved_contract["reference_honesty"]["unresolved_reason"],
+            "missing-source",
+        )
+
+    def test_support_fulfillment_notice_omits_satisfied_success_noise(self) -> None:
+        self.assertIsNone(support_fulfillment_notice({"status": "satisfied"}))
+        self.assertEqual(
+            support_fulfillment_notice(
+                {
+                    "status": "repairable-gap",
+                    "primary_gap_type": "compare-coverage",
+                }
+            ),
+            "Final support still collapsed onto fewer comparison sources than required.",
+        )
+
+    def test_complete_ask_turn_uses_workflow_outcome_for_ambiguous_artifact_selection(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-workflow-outcome"},
+            clear=False,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the project planning brief say about project outline?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / str(turn["answer_file_path"])
+        answer_path.write_text(
+            "The project planning brief connects the project outline to implementation.\n",
+            encoding="utf-8",
+        )
+
+        selected_trace: dict[str, object] | None = None
+        for _ in range(2):
+            retrieve_corpus(
+                workspace,
+                query="project planning brief project outline",
+                top=2,
+                graph_hops=0,
+                document_types=None,
+                source_ids=None,
+                include_renders=False,
+                log_context=turn["log_context"],
+                question_domain=str(turn["question_domain"]),
+                evidence_requirements=turn["evidence_requirements"],
+            )
+            selected_trace = trace_answer_file(
+                workspace,
+                answer_file=answer_path,
+                top=2,
+                log_context=turn["log_context"],
+            )
+
+        assert selected_trace is not None
+        update_conversation_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            updates={"selected_session_ids": [], "selected_trace_ids": []},
+        )
+
+        with self.assertRaisesRegex(ValueError, "ask-owned trace"):
+            complete_ask_turn(
+                workspace,
+                conversation_id=str(turn["conversation_id"]),
+                turn_id=str(turn["turn_id"]),
+                inner_workflow_id="grounded-answer",
+                answer_file_path=str(turn["answer_file_path"]),
+                response_excerpt="The planning brief connects the project outline to implementation.",
+                status="answered",
+            )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            inner_workflow_id="grounded-answer",
+            answer_file_path=str(turn["answer_file_path"]),
+            response_excerpt="The planning brief connects the project outline to implementation.",
+            workflow_outcome={
+                "support_basis": "kb-grounded",
+                "session_ids": [str(selected_trace["session_id"])],
+                "trace_ids": [str(selected_trace["trace_id"])],
+                "status": "answered",
+            },
+        )
+
+        self.assertEqual(completed["trace_ids"], [selected_trace["trace_id"]])
+        self.assertEqual(completed["workflow_outcome"]["trace_ids"], [selected_trace["trace_id"]])
+
+    def test_complete_ask_turn_repair_retry_uses_latest_trace_without_new_workflow_outcome(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-workflow-outcome-repair-retry"},
+            clear=False,
+        ):
+            turn = prepare_ask_turn(
+                workspace,
+                question='Compare "Project Planning Brief" versus "Project Timeline Notes" on project outline.',
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / str(turn["answer_file_path"])
+        answer_path.write_text(
+            "Project Planning Brief connects the project outline to implementation.\n",
+            encoding="utf-8",
+        )
+        first_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=3,
+            log_context=turn["log_context"],
+        )
+
+        first_completion = complete_ask_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            inner_workflow_id="grounded-answer",
+            answer_file_path=str(turn["answer_file_path"]),
+            response_excerpt="Project Planning Brief connects the project outline to implementation.",
+            workflow_outcome={
+                "support_basis": "kb-grounded",
+                "session_ids": [str(first_trace["session_id"])],
+                "trace_ids": [str(first_trace["trace_id"])],
+                "status": "answered",
+            },
+        )
+
+        self.assertEqual(first_completion["status"], "prepared")
+        self.assertEqual(
+            first_completion["support_fulfillment"]["primary_gap_type"],
+            "compare-coverage",
+        )
+
+        answer_path.write_text(
+            (
+                "Project Planning Brief says the outline defines a practical work plan, "
+                "while Project Timeline Notes explains the complementary milestones.\n"
+            ),
+            encoding="utf-8",
+        )
+        second_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=3,
+            log_context=turn["log_context"],
+        )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            inner_workflow_id="grounded-answer",
+            answer_file_path=str(turn["answer_file_path"]),
+            response_excerpt=(
+                "Project Planning Brief says the outline defines a practical work plan, "
+                "while Project Timeline Notes explains the complementary milestones."
+            ),
+            status="answered",
+        )
+
+        self.assertEqual(completed["session_ids"], [second_trace["session_id"]])
+        self.assertEqual(completed["trace_ids"], [second_trace["trace_id"]])
+        self.assertEqual(completed["support_fulfillment"]["status"], "satisfied")
+        self.assertCountEqual(
+            completed["canonical_support_summary"]["supporting_source_ids"],
+            source_ids,
+        )
+
+    def test_complete_ask_turn_keeps_legacy_fallback_without_workflow_outcome(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-workflow-fallback"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question="What does the project planning brief say?",
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / str(turn["answer_file_path"])
+        answer_path.write_text(
+            "The project planning brief defines a practical work plan.\n",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=turn["log_context"],
+        )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            inner_workflow_id="grounded-answer",
+            session_ids=[str(trace["session_id"])],
+            trace_ids=[str(trace["trace_id"])],
+            answer_file_path=str(turn["answer_file_path"]),
+            response_excerpt="The planning brief defines a practical work plan.",
+            status="answered",
+        )
+
+        self.assertEqual(completed["trace_ids"], [trace["trace_id"]])
+        self.assertIsNone(completed["workflow_outcome"])
+
+    def test_complete_ask_turn_requests_one_contract_repair_then_closes_after_rewrite(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-contract-repair"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question='Compare "Project Planning Brief" versus "Project Timeline Notes" on project outline.',
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / str(turn["answer_file_path"])
+        answer_path.write_text(
+            "Project Planning Brief connects the project outline to implementation.\n",
+            encoding="utf-8",
+        )
+        first_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=3,
+            log_context=turn["log_context"],
+        )
+
+        first_completion = complete_ask_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            inner_workflow_id="grounded-answer",
+            session_ids=[str(first_trace["session_id"])],
+            trace_ids=[str(first_trace["trace_id"])],
+            answer_file_path=str(turn["answer_file_path"]),
+            response_excerpt="Project Planning Brief connects the project outline to implementation.",
+            status="answered",
+        )
+
+        self.assertEqual(first_completion["status"], "prepared")
+        self.assertEqual(first_completion["contract_repair_count"], 1)
+        self.assertEqual(
+            first_completion["support_fulfillment"]["primary_gap_type"],
+            "compare-coverage",
+        )
+
+        answer_path.write_text(
+            (
+                "Project Planning Brief says the outline defines a practical work plan, "
+                "while Project Timeline Notes says the timeline explains the key milestones "
+                "that complement that plan.\n"
+            ),
+            encoding="utf-8",
+        )
+        second_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=3,
+            log_context=turn["log_context"],
+        )
+
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            inner_workflow_id="grounded-answer",
+            session_ids=[str(second_trace["session_id"])],
+            trace_ids=[str(second_trace["trace_id"])],
+            answer_file_path=str(turn["answer_file_path"]),
+            response_excerpt=(
+                "Project Planning Brief says the outline defines a practical work plan, "
+                "while Project Timeline Notes explains the complementary milestones."
+            ),
+            status="answered",
+        )
+
+        self.assertEqual(completed["support_fulfillment"]["status"], "satisfied")
+        self.assertEqual(completed["contract_repair_count"], 1)
+        self.assertCountEqual(
+            completed["canonical_support_summary"]["supporting_source_ids"],
+            source_ids,
+        )
+
+    def test_complete_ask_turn_does_not_open_second_contract_repair_loop(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-contract-close"}, clear=False):
+            turn = prepare_ask_turn(
+                workspace,
+                question='Compare "Project Planning Brief" versus "Project Timeline Notes" on project outline.',
+                semantic_analysis=self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+            )
+
+        answer_path = workspace.root / str(turn["answer_file_path"])
+        answer_path.write_text(
+            "Project Planning Brief connects the project outline to implementation.\n",
+            encoding="utf-8",
+        )
+        first_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=3,
+            log_context=turn["log_context"],
+        )
+        complete_ask_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            inner_workflow_id="grounded-answer",
+            session_ids=[str(first_trace["session_id"])],
+            trace_ids=[str(first_trace["trace_id"])],
+            answer_file_path=str(turn["answer_file_path"]),
+            response_excerpt="Project Planning Brief connects the project outline to implementation.",
+            status="answered",
+        )
+
+        second_trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=3,
+            log_context=turn["log_context"],
+        )
+        completed = complete_ask_turn(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+            turn_id=str(turn["turn_id"]),
+            inner_workflow_id="grounded-answer",
+            session_ids=[str(second_trace["session_id"])],
+            trace_ids=[str(second_trace["trace_id"])],
+            answer_file_path=str(turn["answer_file_path"]),
+            response_excerpt="Project Planning Brief connects the project outline to implementation.",
+            status="answered",
+        )
+
+        self.assertEqual(completed["status"], "answered")
+        self.assertEqual(completed["support_fulfillment"]["status"], "honest-close-required")
+        self.assertEqual(completed["contract_repair_count"], 1)
+
+    def test_hidden_ask_payload_exposes_support_contract_and_repair_notice(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": 'Compare "Project Planning Brief" versus "Project Timeline Notes" on project outline.',
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-support-contract",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        self.assertEqual(opened["status"], "execute")
+        self.assertEqual(opened["support_contract"]["source_scope"]["scope_mode"], "compare")
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "Project Planning Brief connects the project outline to implementation.\n",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=3,
+            log_context=opened["log_context"],
+        )
+
+        waiting_rewrite = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "Project Planning Brief connects the project outline to implementation.",
+                "session_ids": [str(trace["session_id"])],
+                "trace_ids": [str(trace["trace_id"])],
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(waiting_rewrite["status"], "execute")
+        self.assertEqual(
+            waiting_rewrite["support_fulfillment"]["primary_gap_type"],
+            "compare-coverage",
+        )
+        self.assertEqual(waiting_rewrite["contract_repair_count"], 1)
+        self.assertIn("collapsed", str(waiting_rewrite["support_notice"]))
+        repair_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertIsNone(repair_turn["freshness_notice"])
+
+    def test_hidden_ask_open_commits_boundary_for_structured_compare_gap(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        semantic_analysis = self.semantic_analysis(
+            question_class="answer",
+            question_domain="workspace-corpus",
+        )
+        semantic_analysis["source_scope_intent"] = {
+            "mode": "compare",
+            "expected_source_count": 2,
+            "explicit_source_texts": ["Project Planning Brief", "Zebra Ledger"],
+            "hard_boundary_on_missing_sources": True,
+        }
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "Project Planning Brief and Zebra Ledger on project outline.",
+                "semantic_analysis": semantic_analysis,
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-structured-compare-boundary",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(opened["status"], "boundary")
+        self.assertTrue(opened["user_reply_allowed"])
+        self.assertIn("comparison boundary", str(opened["detail"]))
+        boundary_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertEqual(boundary_turn["status"], "completed")
+        self.assertEqual(
+            boundary_turn["reference_resolution"]["unresolved_reason"],
+            "compare-source-unresolved",
+        )
+
+    def test_hidden_ask_open_commits_boundary_for_chinese_compare_gap(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": '对比分析"Project Planning Brief"和"Zebra Ledger"这两份文件在 project outline 上的差异和联系。',
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-chinese-compare-boundary",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(opened["status"], "boundary")
+        self.assertTrue(opened["user_reply_allowed"])
+        self.assertIn("comparison boundary", str(opened["detail"]))
+        self.assertEqual(opened["source_scope_policy"]["scope_mode"], "compare")
+        boundary_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertEqual(
+            boundary_turn["reference_resolution"]["unresolved_reason"],
+            "compare-source-unresolved",
+        )
+
+    def test_hidden_ask_open_reuses_existing_boundary_for_same_captured_interaction(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+        interaction_id = "interaction-ledger-turn-001"
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CODEX_THREAD_ID": "thread-hidden-reuse-boundary"},
+                clear=False,
+            ),
+            mock.patch(
+                "docmason.ask.maybe_reconcile_active_thread",
+                return_value={
+                    "status": "reconciled",
+                    "captured_interaction_ids": [interaction_id],
+                },
+            ),
+        ):
+            opened = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": '对比分析"Project Planning Brief"和"Zebra Ledger"这两份文件在 project outline 上的差异和联系。',
+                    "host_provider": "codex",
+                    "host_thread_ref": "thread-hidden-reuse-boundary",
+                    "host_identity_source": "codex_thread_id",
+                },
+                paths=workspace,
+            )
+            reopened = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": "基于原文 FY2024 Digital CapEx Portfolio Review 和 CEO Weekly Priorities，对比分析两者在 investment priorities 上的差异和联系。",
+                    "host_provider": "codex",
+                    "host_thread_ref": "thread-hidden-reuse-boundary",
+                    "host_identity_source": "codex_thread_id",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(opened["status"], "boundary")
+        self.assertEqual(reopened["status"], "boundary")
+        self.assertEqual(reopened["conversation_id"], opened["conversation_id"])
+        self.assertEqual(reopened["turn_id"], opened["turn_id"])
+
+        conversation = read_json(
+            workspace.conversations_dir / f"{opened['conversation_id']}.json"
+        )
+        self.assertEqual(len(conversation["turns"]), 1)
+        self.assertEqual(
+            conversation["turns"][0]["captured_interaction_ids"],
+            [interaction_id],
+        )
+
+    def test_hidden_ask_finalize_keeps_response_excerpt_as_detail_when_support_is_satisfied(
+        self,
+    ) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the project planning brief say about project outline?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-satisfied-detail",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects the project outline to implementation.\n",
+            encoding="utf-8",
+        )
+        trace = trace_answer_file(
+            workspace,
+            answer_file=answer_path,
+            top=2,
+            log_context=opened["log_context"],
+        )
+
+        completed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The planning brief connects the project outline to implementation.",
+                "session_ids": [str(trace["session_id"])],
+                "trace_ids": [str(trace["trace_id"])],
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["next_step"], "return-final-answer")
+        self.assertEqual(
+            completed["detail"],
+            "The planning brief connects the project outline to implementation.",
+        )
+        self.assertIsNone(completed["support_notice"])
+
+    def test_hidden_ask_finalize_external_verified_success_omits_support_notice(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "Does Example Alerts support HTTPS API?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-external-support-success",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "Yes. Example Alerts supports HTTPS API access.\n",
+            encoding="utf-8",
+        )
+
+        completed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "Supports HTTPS API access.",
+                "support_basis": "external-source-verified",
+                "support_manifest_sources": [
+                    {
+                        "url": "https://example.com/example-alerts-api",
+                        "title": "Example Alerts API",
+                        "source_type": "official-doc",
+                        "support_snippet": "HTTPS access is documented explicitly.",
+                    }
+                ],
+                "support_manifest_key_assertions": [
+                    "Example Alerts supports HTTPS API access."
+                ],
+                "support_manifest_notes": "Verified from official documentation.",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["support_basis"], "external-source-verified")
+        self.assertEqual(completed["next_step"], "return-final-answer")
+        self.assertEqual(completed["detail"], "Supports HTTPS API access.")
+        self.assertIsNone(completed["support_notice"])
+        self.assertEqual(completed["support_fulfillment"]["status"], "satisfied")
+        self.assertIsNone(completed["support_fulfillment"]["primary_gap_type"])
+
+    def test_hidden_ask_finalize_model_knowledge_success_omits_support_notice(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What is the capital of France?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-model-knowledge-success",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text("Paris is the capital of France.\n", encoding="utf-8")
+
+        completed = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "Paris is the capital of France.",
+                "workflow_outcome": {
+                    "support_basis": "model-knowledge",
+                    "status": "answered",
+                },
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["support_basis"], "model-knowledge")
+        self.assertEqual(completed["next_step"], "return-final-answer")
+        self.assertEqual(completed["detail"], "Paris is the capital of France.")
+        self.assertIsNone(completed["support_notice"])
+        self.assertEqual(completed["support_fulfillment"]["status"], "satisfied")
+        self.assertIsNone(completed["support_fulfillment"]["primary_gap_type"])
+
     def test_hidden_ask_finalize_returns_waiting_state_without_release_entry(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -4476,11 +5793,16 @@ class AskHardeningTests(unittest.TestCase):
                 updates={
                     "status": "waiting-shared-job",
                     "turn_state": "waiting-shared-job",
-                    "freshness_notice": "The ask is waiting on a governed multimodal refresh.",
+                    "freshness_notice": "This ask is refreshing shared evidence before it can finish.",
                     "hybrid_refresh_triggered": True,
                     "hybrid_refresh_job_ids": ["job-hidden-wait"],
                     "attached_shared_job_ids": ["job-hidden-wait"],
                     "hybrid_refresh_summary": {"mode": "ask-hybrid"},
+                    "shared_evidence_write_state": {
+                        "kind": "shared-evidence-truth-write",
+                        "status": "active",
+                        "notice": "This ask is refreshing shared evidence before it can finish.",
+                    },
                 },
             )
             return {"status": "waiting-shared-job"}
@@ -4498,7 +5820,7 @@ class AskHardeningTests(unittest.TestCase):
                         "conversation_id": opened["conversation_id"],
                         "turn_id": opened["turn_id"],
                         "answer_file_path": opened["answer_file_path"],
-                        "response_excerpt": "The ask is waiting on a governed multimodal refresh.",
+                        "response_excerpt": "This ask is refreshing shared evidence before it can finish.",
                     },
                     paths=workspace,
                 )
@@ -4510,6 +5832,18 @@ class AskHardeningTests(unittest.TestCase):
         self.assertIsNone(waiting["answer_text"])
         self.assertEqual(waiting["next_step"], "wait-for-shared-job")
         self.assertEqual(waiting["canonical_turn_state"], "waiting-shared-job")
+        self.assertEqual(
+            waiting["detail"],
+            "This ask is refreshing shared evidence before it can finish.",
+        )
+        self.assertEqual(
+            waiting["shared_evidence_write_state"],
+            {
+                "kind": "shared-evidence-truth-write",
+                "status": "active",
+                "notice": "This ask is refreshing shared evidence before it can finish.",
+            },
+        )
         self.assertEqual(waiting["log_context"]["conversation_id"], opened["conversation_id"])
 
     def test_hidden_ask_progress_settles_waiting_turn_and_restores_execute_state(self) -> None:
@@ -4569,6 +5903,216 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(live_turn["status"], "prepared")
         self.assertEqual(live_turn["hybrid_refresh_completion_status"], "covered")
 
+    def test_hidden_ask_progress_auto_settles_waiting_turn_from_shared_job_truth(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the project planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-progress-auto-settle",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        begin_lane_c_shared_refresh(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+            run_id=str(opened["run_id"]),
+            query="What does the project planning brief say?",
+            recommended_targets=[
+                {
+                    "source_id": source_ids[0],
+                    "required_overlay_slots": ["diagram-summary"],
+                    "target_artifact_ids": [],
+                }
+            ],
+        )
+        waiting_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        job_id = str(waiting_turn["hybrid_refresh_job_ids"][0])
+        complete_control_plane_job(
+            workspace,
+            job_id,
+            result={"status": "covered", "covered_source_count": 1},
+        )
+
+        progressed = handle_hidden_ask_request(
+            {
+                "action": "progress",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(progressed["status"], "execute")
+        self.assertEqual(progressed["canonical_turn_state"], "prepared")
+        self.assertEqual(
+            progressed["detail"],
+            "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
+        )
+        self.assertEqual(
+            progressed["shared_evidence_write_state"],
+            {
+                "kind": "shared-evidence-truth-write",
+                "status": "covered",
+                "notice": "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
+            },
+        )
+        live_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        self.assertEqual(live_turn["hybrid_refresh_completion_status"], "covered")
+        self.assertEqual(live_turn["status"], "prepared")
+
+    def test_hidden_ask_finalize_auto_settles_waiting_turn_before_returning(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the project planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-finalize-auto-settle",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        begin_lane_c_shared_refresh(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+            run_id=str(opened["run_id"]),
+            query="What does the project planning brief say?",
+            recommended_targets=[
+                {
+                    "source_id": source_ids[0],
+                    "required_overlay_slots": ["diagram-summary"],
+                    "target_artifact_ids": [],
+                }
+            ],
+        )
+        waiting_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        job_id = str(waiting_turn["hybrid_refresh_job_ids"][0])
+        complete_control_plane_job(
+            workspace,
+            job_id,
+            result={"status": "covered", "covered_source_count": 1},
+        )
+
+        finalized = handle_hidden_ask_request(
+            {
+                "action": "finalize",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+                "answer_file_path": opened["answer_file_path"],
+                "response_excerpt": "The shared evidence refresh finished.",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(finalized["status"], "execute")
+        self.assertEqual(finalized["canonical_turn_state"], "prepared")
+        self.assertEqual(finalized["next_step"], "continue-inner-workflow")
+        self.assertEqual(
+            finalized["detail"],
+            "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
+        )
+        self.assertEqual(
+            finalized["shared_evidence_write_state"],
+            {
+                "kind": "shared-evidence-truth-write",
+                "status": "covered",
+                "notice": "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
+            },
+        )
+
+    def test_hidden_ask_progress_auto_commits_boundary_from_blocked_shared_job_truth(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the project planning brief say?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-progress-auto-boundary",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        begin_lane_c_shared_refresh(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+            run_id=str(opened["run_id"]),
+            query="What does the project planning brief say?",
+            recommended_targets=[
+                {
+                    "source_id": source_ids[0],
+                    "required_overlay_slots": ["diagram-summary"],
+                    "target_artifact_ids": [],
+                }
+            ],
+        )
+        waiting_turn = load_turn_record(
+            workspace,
+            conversation_id=str(opened["conversation_id"]),
+            turn_id=str(opened["turn_id"]),
+        )
+        job_id = str(waiting_turn["hybrid_refresh_job_ids"][0])
+        block_control_plane_job(
+            workspace,
+            job_id,
+            result={
+                "status": "blocked",
+                "detail": "The required multimodal source refresh could not continue safely.",
+            },
+        )
+
+        progressed = handle_hidden_ask_request(
+            {
+                "action": "progress",
+                "conversation_id": opened["conversation_id"],
+                "turn_id": opened["turn_id"],
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(progressed["status"], "boundary")
+        self.assertTrue(progressed["user_reply_allowed"])
+        self.assertEqual(progressed["next_step"], "return-boundary-answer")
+        self.assertEqual(
+            progressed["detail"],
+            "The required multimodal source refresh could not continue safely.",
+        )
+
     def test_hidden_ask_finalize_closes_with_public_trace_path(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -4625,6 +6169,7 @@ class AskHardeningTests(unittest.TestCase):
         )
 
         self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["next_step"], "return-final-answer")
         self.assertEqual(completed["trace_ids"], [trace_report.payload["trace_id"]])
         self.assertEqual(completed["canonical_turn_state"], "committed")
 
@@ -5115,6 +6660,77 @@ class AskHardeningTests(unittest.TestCase):
             completed["bundle_notice"],
             f"Bundle artifacts available at {bundle_path}.",
         )
+
+    def test_hidden_ask_finalize_forwards_workflow_outcome_and_exposes_it(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "What does the project planning brief say about project outline?",
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-workflow-outcome",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+        answer_path = workspace.root / str(opened["answer_file_path"])
+        answer_path.write_text(
+            "The planning brief connects the project outline to implementation.\n",
+            encoding="utf-8",
+        )
+        workflow_outcome = {
+            "support_basis": "kb-grounded",
+            "session_ids": ["session-workflow-outcome"],
+            "trace_ids": ["trace-workflow-outcome"],
+            "bundle_paths": [
+                f"runtime/agent-work/{opened['conversation_id']}/{opened['turn_id']}/bundle-manifest.json"
+            ],
+            "status": "answered",
+        }
+
+        def fake_complete(*args: object, **kwargs: object) -> dict[str, object]:
+            del args
+            update_conversation_turn(
+                workspace,
+                conversation_id=str(kwargs["conversation_id"]),
+                turn_id=str(kwargs["turn_id"]),
+                updates={
+                    "committed_run_id": str(opened["run_id"]),
+                    "answer_file_path": str(opened["answer_file_path"]),
+                    "answer_state": "grounded",
+                    "support_basis": "kb-grounded",
+                    "response_excerpt": "The planning brief connects the project outline to implementation.",
+                    "session_ids": ["session-workflow-outcome"],
+                    "trace_ids": ["trace-workflow-outcome"],
+                    "workflow_outcome": dict(kwargs["workflow_outcome"]),
+                    "support_fulfillment": {"status": "satisfied"},
+                },
+            )
+            return {"committed_run_id": str(opened["run_id"])}
+
+        with mock.patch(
+            "docmason.host_integration.complete_ask_turn",
+            side_effect=fake_complete,
+        ) as complete_turn:
+            completed = handle_hidden_ask_request(
+                {
+                    "action": "finalize",
+                    "conversation_id": opened["conversation_id"],
+                    "turn_id": opened["turn_id"],
+                    "answer_file_path": opened["answer_file_path"],
+                    "response_excerpt": "The planning brief connects the project outline to implementation.",
+                    "workflow_outcome": workflow_outcome,
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(complete_turn.call_args.kwargs["workflow_outcome"], workflow_outcome)
+        self.assertEqual(completed["workflow_outcome"]["trace_ids"], ["trace-workflow-outcome"])
 
 
 if __name__ == "__main__":

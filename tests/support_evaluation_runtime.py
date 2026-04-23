@@ -1017,6 +1017,184 @@ class EvaluationRuntimeTests(unittest.TestCase):
         self.assertIn("answer_history_index", ready_case["artifact_paths"])
         self.assertIn("projection_state", ready_case["artifact_paths"])
 
+    def test_run_suite_replays_compare_and_source_scoped_contract_cases(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        suite_path, rubric_path, judge_path = self.write_ask_turn_specs(
+            workspace,
+            source_ids=source_ids,
+            cases=[
+                self.ask_turn_case(
+                    case_id="ask-compare-contract",
+                    family="ask-compare",
+                    question='Compare "Project Planning Brief" versus "Project Timeline Notes" on project outline.',
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="workspace-corpus",
+                    ),
+                    expected_status="degraded",
+                    expected_answer_state="partially-grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=source_ids,
+                    required_sources_or_units=source_ids,
+                    minimum_support_overlap=2,
+                    reference_facts=["The replay should preserve both comparison sources."],
+                    answer_plan={
+                        "answer_text": (
+                            "Project Planning Brief says the outline defines a practical work "
+                            "plan, while Project Timeline Notes says the timeline explains the "
+                            "key milestones that complement that plan."
+                        ),
+                        "trace_top": 3,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                    },
+                ),
+                self.ask_turn_case(
+                    case_id="ask-source-scoped-composition-contract",
+                    family="ask-source-scoped-composition",
+                    question=(
+                        'Using only the document "Project Planning Brief", draft a short '
+                        "research note about the project outline."
+                    ),
+                    semantic_analysis=self.semantic_analysis(
+                        question_class="composition",
+                        question_domain="workspace-corpus",
+                    ),
+                    expected_status="ready",
+                    expected_answer_state="grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=[source_ids[0]],
+                    required_sources_or_units=[source_ids[0]],
+                    minimum_support_overlap=1,
+                    reference_facts=["The replay should preserve the requested source boundary."],
+                    answer_plan={
+                        "answer_text": (
+                            "Research note: Project Planning Brief says the outline defines a "
+                            "practical work plan and connects planning to implementation."
+                        ),
+                        "trace_top": 2,
+                        "completion_overrides": {"inner_workflow_id": "grounded-composition"},
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                    },
+                ),
+                self.ask_turn_case(
+                    case_id="ask-structured-compare-contract",
+                    family="ask-compare-structured-intent",
+                    question="Project Planning Brief and Project Timeline Notes on project outline.",
+                    semantic_analysis={
+                        **self.semantic_analysis(
+                            question_class="answer",
+                            question_domain="workspace-corpus",
+                        ),
+                        "source_scope_intent": {
+                            "mode": "compare",
+                            "expected_source_count": 2,
+                            "explicit_source_texts": [
+                                "Project Planning Brief",
+                                "Project Timeline Notes",
+                            ],
+                            "hard_boundary_on_missing_sources": True,
+                        },
+                    },
+                    expected_status="degraded",
+                    expected_answer_state="partially-grounded",
+                    expected_support_basis="kb-grounded",
+                    expected_primary_sources=source_ids,
+                    required_sources_or_units=source_ids,
+                    minimum_support_overlap=2,
+                    reference_facts=[
+                        "Structured compare intent should preserve both comparison sources without raw compare keywords."
+                    ],
+                    answer_plan={
+                        "answer_text": (
+                            "Project Planning Brief says the outline defines a practical work "
+                            "plan, while Project Timeline Notes says the timeline explains the "
+                            "key milestones that complement that plan."
+                        ),
+                        "trace_top": 3,
+                    },
+                    expectations={
+                        "final_turn_status": "answered",
+                        "query_session_count": 1,
+                        "trace_count": 1,
+                    },
+                ),
+            ],
+        )
+
+        run_payload = run_evaluation_suite(
+            workspace,
+            suite_path=suite_path,
+            rubric_path=rubric_path,
+            judge_trials_path=judge_path,
+            run_label="Ask contract replay coverage",
+        )
+
+        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        cases = {case["case_id"]: case for case in run_payload["cases"]}
+
+        compare_case = cases["ask-compare-contract"]
+        self.assertEqual(compare_case["execution"]["result"]["status"], "degraded")
+        self.assertEqual(
+            compare_case["execution"]["result"]["answer_state"],
+            "partially-grounded",
+        )
+
+        compare_conversation = read_json(
+            workspace.root / compare_case["artifact_paths"]["canonical_conversation"]
+        )
+        compare_turn = compare_conversation["turns"][0]
+        self.assertEqual(compare_turn["support_contract"]["source_scope"]["scope_mode"], "compare")
+        self.assertEqual(compare_turn["support_fulfillment"]["status"], "satisfied")
+
+        structured_compare_conversation = read_json(
+            workspace.root
+            / cases["ask-structured-compare-contract"]["artifact_paths"][
+                "canonical_conversation"
+            ]
+        )
+        structured_compare_turn = structured_compare_conversation["turns"][0]
+        self.assertEqual(
+            structured_compare_turn["support_contract"]["source_scope"]["scope_mode"],
+            "compare",
+        )
+        self.assertCountEqual(
+            structured_compare_turn["support_contract"]["source_scope"][
+                "compare_target_source_ids"
+            ],
+            source_ids,
+        )
+
+        scoped_conversation = read_json(
+            workspace.root
+            / cases["ask-source-scoped-composition-contract"]["artifact_paths"][
+                "canonical_conversation"
+            ]
+        )
+        scoped_turn = scoped_conversation["turns"][0]
+        self.assertEqual(
+            scoped_turn["support_contract"]["source_scope"]["scope_mode"],
+            "source-scoped-hard",
+        )
+        self.assertEqual(
+            scoped_turn["support_fulfillment"]["obligations"]["target_source_support"][
+                "satisfied"
+            ],
+            True,
+        )
+        self.assertEqual(scoped_turn["inner_workflow_id"], "grounded-composition")
+
     def test_run_suite_can_trace_ask_turn_via_public_trace_command(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -1337,9 +1515,9 @@ class EvaluationRuntimeTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-lane-c-orphan"}, clear=False):
             turn = prepare_ask_turn(
                 workspace,
-                question="What is shown on the scanned workflow page image?",
+                question="Using the scanned workflow page, draft a short working note about what the image shows.",
                 semantic_analysis=self.semantic_analysis(
-                    question_class="answer",
+                    question_class="composition",
                     question_domain="workspace-corpus",
                     evidence_requirements={
                         "preferred_channels": ["render", "structure"],
@@ -1365,13 +1543,11 @@ class EvaluationRuntimeTests(unittest.TestCase):
             workspace,
             conversation_id=turn["conversation_id"],
             turn_id=turn["turn_id"],
-            inner_workflow_id="grounded-answer",
+            inner_workflow_id="grounded-composition",
             session_ids=[trace["session_id"]],
             trace_ids=[trace["trace_id"]],
             answer_file_path=turn["answer_file_path"],
-            response_excerpt=(
-                "The scanned workflow page needs a governed multimodal refresh before a final answer."
-            ),
+            response_excerpt="The draft needs a shared evidence refresh before it can finish.",
             status="answered",
         )
         job_id = str(transitioned["hybrid_refresh_job_ids"][0])
@@ -1948,9 +2124,9 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-lane-c-blocked",
                     family="ask-lane-c",
-                    question="What is shown on the scanned workflow page image?",
+                    question="Using the scanned workflow page, draft a short working note about what the image shows.",
                     semantic_analysis=self.semantic_analysis(
-                        question_class="answer",
+                        question_class="composition",
                         question_domain="workspace-corpus",
                         evidence_requirements={
                             "preferred_channels": ["render", "structure"],
@@ -1967,15 +2143,15 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     reference_facts=["A blocked Lane C refresh should settle the same turn honestly."],
                     answer_plan={
                         "answer_text": (
-                            "The scanned workflow page appears to show a process diagram, but the "
-                            "current published artifacts are insufficient for a reliable semantic answer."
+                            "The draft notes that the scanned workflow page appears to show a process "
+                            "diagram, but the current published artifacts are insufficient for a reliable description."
                         ),
                         "trace_top": 2,
                     },
                     hybrid_refresh={
                         "completion_status": "blocked",
                         "summary": {
-                            "detail": "The required multimodal source refresh could not continue safely."
+                            "detail": "This ask could not finish the required shared evidence refresh safely."
                         },
                     },
                     expectations={
@@ -2026,9 +2202,9 @@ class EvaluationRuntimeTests(unittest.TestCase):
                 self.ask_turn_case(
                     case_id="ask-lane-c-covered",
                     family="ask-lane-c",
-                    question="What is shown on the scanned workflow page image?",
+                    question="Using the scanned workflow page, draft a short working note about what the image shows.",
                     semantic_analysis=self.semantic_analysis(
-                        question_class="answer",
+                        question_class="composition",
                         question_domain="workspace-corpus",
                         evidence_requirements={
                             "preferred_channels": ["render", "structure"],
@@ -2045,8 +2221,8 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     reference_facts=["A covered Lane C refresh should rerun trace and then commit."],
                     answer_plan={
                         "answer_text": (
-                            "The scanned workflow page appears to show a process diagram, but the "
-                            "current published artifacts are insufficient for a reliable semantic answer."
+                            "The draft notes that the scanned workflow page appears to show a process "
+                            "diagram, but the current published artifacts are insufficient for a reliable description."
                         ),
                         "trace_top": 2,
                     },
@@ -2054,7 +2230,7 @@ class EvaluationRuntimeTests(unittest.TestCase):
                         "completion_status": "covered",
                         "summary": {
                             "covered_source_count": 1,
-                            "detail": "Governed multimodal refresh coverage was recorded for the source.",
+                            "detail": "Shared evidence refresh coverage was recorded for the source.",
                         },
                         "post_refresh_answer_text": (
                             "The scanned workflow page shows a workflow-style process layout."

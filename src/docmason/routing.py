@@ -19,6 +19,10 @@ from typing import Any
 from .affordances import normalize_evidence_requirements
 
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z]+|[\u4e00-\u9fff]+")
+COMPARE_SCOPE_HINT_PATTERN = re.compile(
+    r"\b(compare|versus|vs\.?|difference|between)\b|对比(?:分析)?|比较(?:分析)?|差异和联系|差异|区别|异同",
+    re.IGNORECASE,
+)
 
 QUESTION_CLASS_VALUES = {
     "answer",
@@ -43,6 +47,7 @@ QUESTION_ANALYSIS_ORIGIN_VALUES = {
     "agent-supplied",
     "repair-backstop",
 }
+SOURCE_SCOPE_INTENT_MODE_VALUES = {"global", "single-source", "compare"}
 MEMORY_MODE_VALUES = {"minimal", "contextual", "strong"}
 
 MEMORY_KIND_VALUES = {
@@ -116,6 +121,68 @@ def _valid_bool(value: Any) -> bool | None:
 
 def _deduplicate_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def question_has_compare_scope_hint(question: str) -> bool:
+    """Return whether the question explicitly asks for a comparison."""
+    return bool(isinstance(question, str) and COMPARE_SCOPE_HINT_PATTERN.search(question))
+
+
+def normalize_source_scope_intent(
+    value: Any,
+    *,
+    question: str,
+    fallback_hints: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate the compact source-scope intent carried through ask execution."""
+    fallback_value = (
+        fallback_hints.get("source_scope_intent")
+        if isinstance(fallback_hints, dict)
+        else None
+    )
+    raw = value if isinstance(value, dict) and value else fallback_value
+    if not isinstance(raw, dict):
+        raw = {}
+
+    mode = _valid_choice(raw.get("mode"), SOURCE_SCOPE_INTENT_MODE_VALUES)
+    explicit_source_texts = _deduplicate_strings(_string_list(raw.get("explicit_source_texts")))
+    expected_source_count = raw.get("expected_source_count")
+    if not isinstance(expected_source_count, int) or expected_source_count < 0:
+        expected_source_count = (
+            len(explicit_source_texts)
+            if explicit_source_texts
+            else (2 if mode == "compare" else 0)
+        )
+    hard_boundary_on_missing_sources = raw.get("hard_boundary_on_missing_sources")
+    if not isinstance(hard_boundary_on_missing_sources, bool):
+        hard_boundary_on_missing_sources = bool(mode == "compare" and explicit_source_texts)
+
+    if mode is None:
+        mode = "compare" if question_has_compare_scope_hint(question) else "global"
+        if mode == "compare" and expected_source_count <= 0:
+            expected_source_count = 2
+
+    if mode != "compare":
+        expected_source_count = 0 if mode == "global" else max(expected_source_count, 1)
+        explicit_source_texts = [] if mode == "global" else explicit_source_texts
+        hard_boundary_on_missing_sources = (
+            bool(hard_boundary_on_missing_sources) if mode == "single-source" else False
+        )
+    elif expected_source_count < len(explicit_source_texts):
+        expected_source_count = len(explicit_source_texts)
+
+    return {
+        "mode": mode,
+        "expected_source_count": expected_source_count,
+        "explicit_source_texts": explicit_source_texts,
+        "hard_boundary_on_missing_sources": hard_boundary_on_missing_sources,
+    }
 
 
 def corpus_hint_overlap_score(question: str, corpus_hints: list[str] | None) -> int:
@@ -297,6 +364,11 @@ def normalize_question_analysis(
         question_class=question_class,
         question_domain=question_domain,
     )
+    source_scope_intent = normalize_source_scope_intent(
+        raw.get("source_scope_intent"),
+        question=question,
+        fallback_hints=fallback_hints,
+    )
     evidence_requirements = normalize_evidence_requirements(
         raw.get("evidence_requirements"),
         question_class=question_class,
@@ -311,6 +383,7 @@ def normalize_question_analysis(
         "route_reason": route_reason,
         "needs_latest_workspace_state": needs_latest_workspace_state,
         "memory_query_profile": memory_query_profile,
+        "source_scope_intent": source_scope_intent,
         "evidence_requirements": evidence_requirements,
         "analysis_origin": "agent-supplied" if raw else "repair-backstop",
     }

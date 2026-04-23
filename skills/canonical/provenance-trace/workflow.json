@@ -20,9 +20,9 @@
     "mutability": "read-only",
     "parallelism": "read-only-safe",
     "background_commands": [
-      "docmason trace --source-id <source_id> --json",
-      "docmason trace --answer-file <path> --json",
-      "docmason trace --session-id <session_id> --json"
+      "docmason trace --source-id <source_id> --json --compact",
+      "docmason trace --answer-file <path> --json --compact",
+      "docmason trace --session-id <session_id> --json --compact"
     ],
     "must_return_to_main_agent": true
   },

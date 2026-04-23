@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .admissibility import evaluate_commit_admissibility
+from .ask_contracts import (
+    build_support_contract,
+    build_support_fulfillment,
+    normalize_workflow_outcome,
+    support_fulfillment_notice,
+)
 from .commands import ACTION_REQUIRED, bootstrap_workspace_with_launcher, prepare_workspace
 from .commands import sync_workspace as run_sync_command
 from .control_plane import (
@@ -274,12 +280,86 @@ def _resolve_mapping(
     return None
 
 
+def _resolve_int(
+    explicit: int | None,
+    trace_payload: dict[str, Any],
+    current_turn: dict[str, Any],
+    field_name: str,
+) -> int | None:
+    if isinstance(explicit, int):
+        return explicit
+    trace_value = trace_payload.get(field_name)
+    if isinstance(trace_value, int):
+        return trace_value
+    current_value = current_turn.get(field_name)
+    if isinstance(current_value, int):
+        return current_value
+    return None
+
+
 def _resolved_string_list(value: list[Any] | None) -> list[str]:
     if not isinstance(value, list):
         return []
     return list(
         dict.fromkeys(item for item in value if isinstance(item, str) and item)
     )
+
+
+def _reusable_canonical_turn_for_captured_interaction(
+    paths: WorkspacePaths,
+    *,
+    captured_interaction_ids: list[str],
+    host_identity: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    target_interaction_ids = set(_resolved_string_list(captured_interaction_ids))
+    if not target_interaction_ids:
+        return None
+    conversation = load_bound_conversation_record_for_host(
+        paths,
+        host_identity=host_identity,
+    )
+    conversation_id = conversation.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return None
+    turns = conversation.get("turns", [])
+    if not isinstance(turns, list):
+        return None
+    for candidate in reversed(turns):
+        if not isinstance(candidate, dict):
+            continue
+        if (
+            normalize_front_door_state(candidate.get("front_door_state"))
+            != FRONT_DOOR_STATE_CANONICAL_ASK
+        ):
+            continue
+        candidate_interaction_ids = set(
+            _resolved_string_list(candidate.get("captured_interaction_ids"))
+        )
+        if not candidate_interaction_ids.intersection(target_interaction_ids):
+            continue
+        turn_id = candidate.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id:
+            continue
+        stored_turn = load_turn_record(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+        )
+        run_id = None
+        committed_run_id = stored_turn.get("committed_run_id")
+        if isinstance(committed_run_id, str) and committed_run_id:
+            run_id = committed_run_id
+        else:
+            active_run_id = stored_turn.get("active_run_id")
+            if isinstance(active_run_id, str) and active_run_id:
+                run_id = active_run_id
+        return {
+            "conversation_id": conversation_id,
+            "turn_id": turn_id,
+            "run_id": run_id,
+            **stored_turn,
+        }
+    return None
 
 
 def _effective_ask_log_origin(
@@ -603,6 +683,10 @@ def _sync_turn_log_artifacts(
     hybrid_refresh_sources: list[str] | None = None,
     hybrid_refresh_completion_status: str | None = None,
     hybrid_refresh_summary: dict[str, Any] | None = None,
+    support_contract: dict[str, Any] | None = None,
+    support_fulfillment: dict[str, Any] | None = None,
+    workflow_outcome: dict[str, Any] | None = None,
+    contract_repair_count: int | None = None,
     canonical_support_summary: dict[str, Any] | None = None,
     source_scope_satisfied: bool | None = None,
     mixed_support_explainable: bool | None = None,
@@ -637,6 +721,10 @@ def _sync_turn_log_artifacts(
         "hybrid_refresh_sources": hybrid_refresh_sources or [],
         "hybrid_refresh_completion_status": hybrid_refresh_completion_status,
         "hybrid_refresh_summary": hybrid_refresh_summary,
+        "support_contract": support_contract,
+        "support_fulfillment": support_fulfillment,
+        "workflow_outcome": workflow_outcome,
+        "contract_repair_count": contract_repair_count,
         "canonical_support_summary": canonical_support_summary,
         "source_scope_satisfied": source_scope_satisfied,
         "mixed_support_explainable": mixed_support_explainable,
@@ -1277,6 +1365,34 @@ def _maybe_handle_confirmation_reply(
     )
 
 
+def _lane_c_wait_notice() -> str:
+    return "This ask is refreshing shared evidence before it can finish."
+
+
+def _lane_c_covered_notice() -> str:
+    return "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer."
+
+
+def _lane_c_blocked_notice() -> str:
+    return "This ask could not finish the required shared evidence refresh safely."
+
+
+def _shared_evidence_write_state(
+    status: str,
+    *,
+    notice: str,
+) -> dict[str, str]:
+    return {
+        "kind": "shared-evidence-truth-write",
+        "status": status,
+        "notice": notice,
+    }
+
+
+def _lane_c_stop_rule_allows_continuation(turn_snapshot: dict[str, Any]) -> bool:
+    return str(turn_snapshot.get("question_class") or "") == "composition"
+
+
 def begin_lane_c_shared_refresh(
     paths: WorkspacePaths,
     *,
@@ -1355,14 +1471,19 @@ def begin_lane_c_shared_refresh(
     )
     manifest = job_info["manifest"]
     caller_role = str(job_info.get("caller_role") or "owner")
+    wait_notice = _lane_c_wait_notice()
     updates: dict[str, Any] = {
         "turn_state": "waiting-shared-job",
         "status": "waiting-shared-job",
-        "freshness_notice": "The ask is waiting on a governed multimodal refresh.",
+        "freshness_notice": wait_notice,
         "hybrid_refresh_triggered": True,
         "hybrid_refresh_sources": [source_id],
         "hybrid_refresh_snapshot_id": published_snapshot_id,
         "hybrid_refresh_job_ids": [str(manifest["job_id"])],
+        "shared_evidence_write_state": _shared_evidence_write_state(
+            "active",
+            notice=wait_notice,
+        ),
         "hybrid_refresh_summary": {
             "mode": "ask-hybrid",
             "work_path": work_path,
@@ -1470,6 +1591,7 @@ def settle_lane_c_shared_refresh(
         "attached_shared_job_ids": [job_id],
     }
     if completion_status == "covered":
+        covered_notice = _lane_c_covered_notice()
         for attached_conversation_id, attached_turn_id, _attached_run_id in attached_turn_refs:
             settled_turns.append(
                 update_conversation_turn(
@@ -1480,9 +1602,10 @@ def settle_lane_c_shared_refresh(
                         **common_updates,
                         "status": "prepared",
                         "turn_state": "prepared",
-                        "freshness_notice": (
-                            "The governed multimodal refresh finished. Rerun "
-                            "retrieval and trace before committing the answer."
+                        "freshness_notice": covered_notice,
+                        "shared_evidence_write_state": _shared_evidence_write_state(
+                            "covered",
+                            notice=covered_notice,
                         ),
                     },
                 )
@@ -1492,7 +1615,7 @@ def settle_lane_c_shared_refresh(
     boundary_reason = str(
         (summary or {}).get("detail")
         or (summary or {}).get("reason")
-        or "The required multimodal source refresh could not continue safely."
+        or _lane_c_blocked_notice()
     )
     for attached_conversation_id, attached_turn_id, _attached_run_id in attached_turn_refs:
         settled_turns.append(
@@ -1501,7 +1624,13 @@ def settle_lane_c_shared_refresh(
                 conversation_id=attached_conversation_id,
                 turn_id=attached_turn_id,
                 reason=boundary_reason,
-                extra_turn_updates=common_updates,
+                extra_turn_updates={
+                    **common_updates,
+                    "shared_evidence_write_state": _shared_evidence_write_state(
+                        "blocked",
+                        notice=boundary_reason,
+                    ),
+                },
             )
         )
     return {"manifest": manifest, "turns": settled_turns}
@@ -1539,6 +1668,10 @@ def _effective_turn_snapshot(
     hybrid_refresh_summary: dict[str, Any] | None,
     hybrid_refresh_snapshot_id: Any,
     hybrid_refresh_job_ids: list[str],
+    support_contract: dict[str, Any] | None,
+    support_fulfillment: dict[str, Any] | None,
+    workflow_outcome: dict[str, Any] | None,
+    contract_repair_count: int,
 ) -> dict[str, Any]:
     snapshot = dict(current_turn)
     snapshot.update(
@@ -1572,6 +1705,10 @@ def _effective_turn_snapshot(
             "hybrid_refresh_summary": hybrid_refresh_summary,
             "hybrid_refresh_snapshot_id": hybrid_refresh_snapshot_id,
             "hybrid_refresh_job_ids": hybrid_refresh_job_ids,
+            "support_contract": support_contract,
+            "support_fulfillment": support_fulfillment,
+            "workflow_outcome": workflow_outcome,
+            "contract_repair_count": contract_repair_count,
         }
     )
     return snapshot
@@ -1599,6 +1736,22 @@ def _maybe_begin_lane_c_before_commit(
         "model-knowledge",
         "governed-boundary",
     }:
+        return None
+    if not _lane_c_stop_rule_allows_continuation(effective_turn_snapshot):
+        record_run_event_if_present(
+            paths,
+            run_id=run_id,
+            stage="control-plane",
+            event_type="lane-c-skipped-by-stop-rule",
+            payload={
+                "question_class": effective_turn_snapshot.get("question_class"),
+                "scope_mode": (
+                    effective_turn_snapshot.get("source_scope_policy", {}).get("scope_mode")
+                    if isinstance(effective_turn_snapshot.get("source_scope_policy"), dict)
+                    else None
+                ),
+            },
+        )
         return None
     if bool(effective_turn_snapshot.get("hybrid_refresh_triggered")):
         return None
@@ -1779,6 +1932,7 @@ def _prepared_turn_response(
     reference_resolution: dict[str, Any] | None,
     reference_resolution_summary: str | None,
     source_scope_policy: dict[str, Any] | None,
+    support_contract: dict[str, Any] | None,
     prefer_published_artifacts: bool,
     analysis_origin: str,
     normalized_semantic_analysis: dict[str, Any],
@@ -1820,6 +1974,7 @@ def _prepared_turn_response(
         "reference_resolution": reference_resolution,
         "reference_resolution_summary": reference_resolution_summary,
         "source_scope_policy": source_scope_policy,
+        "support_contract": support_contract,
         "prefer_published_artifacts": prefer_published_artifacts,
         "analysis_origin": analysis_origin,
         "semantic_analysis": normalized_semantic_analysis,
@@ -1846,6 +2001,97 @@ def _prepared_turn_response(
             support_strategy=support_strategy,
             analysis_origin=analysis_origin,
         ),
+    }
+
+
+def _request_contract_repair(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    run_id: str | None,
+    inner_workflow_id: str,
+    resolved_log_origin: str,
+    current_turn: dict[str, Any],
+    resolved_session_ids: list[str],
+    effective_trace_ids: list[str],
+    effective_support_basis: str,
+    resolved_support_manifest_path: str | None,
+    support_contract: dict[str, Any] | None,
+    support_fulfillment: dict[str, Any],
+    workflow_outcome: dict[str, Any] | None,
+    contract_repair_count: int,
+) -> dict[str, Any]:
+    """Persist one single-turn contract repair request and return the reopened turn."""
+    record_run_event_if_present(
+        paths,
+        run_id=run_id,
+        stage="repair",
+        event_type="support-contract-repair-requested",
+        payload={
+            "primary_gap_type": support_fulfillment.get("primary_gap_type"),
+            "trace_ids": effective_trace_ids,
+            "repair_attempt_count": contract_repair_count,
+        },
+    )
+    updated_turn = update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates={
+            "inner_workflow_id": inner_workflow_id,
+            "selected_session_ids": resolved_session_ids,
+            "selected_trace_ids": effective_trace_ids,
+            "support_basis": effective_support_basis,
+            "support_manifest_path": resolved_support_manifest_path,
+            "support_contract": support_contract,
+            "support_fulfillment": support_fulfillment,
+            "workflow_outcome": workflow_outcome,
+            "contract_repair_count": contract_repair_count,
+            "freshness_notice": None,
+            "turn_state": "prepared",
+            "status": "prepared",
+            "primary_issue_code": None,
+            "issue_codes": [],
+        },
+    )
+    _sync_turn_log_artifacts(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        run_id=run_id,
+        session_ids=resolved_session_ids,
+        trace_ids=effective_trace_ids,
+        inner_workflow_id=inner_workflow_id,
+        native_turn_id=updated_turn.get("native_turn_id")
+        if isinstance(updated_turn.get("native_turn_id"), str)
+        else None,
+        front_door_state=updated_turn.get("front_door_state")
+        if isinstance(updated_turn.get("front_door_state"), str)
+        else None,
+        semantic_log_context={
+            **semantic_log_context_from_record(updated_turn),
+            **semantic_log_context_fields(
+                question_domain=updated_turn.get("question_domain")
+                if isinstance(updated_turn.get("question_domain"), str)
+                else None,
+                support_basis=effective_support_basis,
+                support_manifest_path=resolved_support_manifest_path,
+            ),
+        },
+        log_origin=resolved_log_origin,
+        answer_file_path=updated_turn.get("answer_file_path")
+        if isinstance(updated_turn.get("answer_file_path"), str)
+        else None,
+        support_contract=support_contract,
+        support_fulfillment=support_fulfillment,
+        workflow_outcome=workflow_outcome,
+        contract_repair_count=contract_repair_count,
+    )
+    return {
+        "conversation_id": conversation_id,
+        "turn_id": turn_id,
+        **updated_turn,
     }
 
 
@@ -1924,6 +2170,23 @@ def prepare_ask_turn(
     else:
         reconciliation_result = maybe_reconcile_active_thread(paths)
     latest_captured_interaction_ids: list[str] = []
+    reusable_interaction_turn: dict[str, Any] | None = None
+    resolved_host_identity = current_host_identity()
+    if isinstance(reconciliation_result, dict):
+        captured_interaction_ids = [
+            interaction_id
+            for interaction_id in reconciliation_result.get("captured_interaction_ids", [])
+            if isinstance(interaction_id, str) and interaction_id
+        ]
+        if captured_interaction_ids:
+            latest_captured_interaction_ids = [captured_interaction_ids[-1]]
+            reusable_interaction_turn = _reusable_canonical_turn_for_captured_interaction(
+                paths,
+                captured_interaction_ids=latest_captured_interaction_ids,
+                host_identity=resolved_host_identity,
+            )
+    if reusable_interaction_turn is not None:
+        return reusable_interaction_turn
     opened = open_conversation_turn(paths, user_question=question, entry_workflow_id="ask")
     run_payload = ensure_run_for_turn(
         paths,
@@ -1944,21 +2207,14 @@ def prepare_ask_turn(
         run_id=run_id,
         log_origin=effective_log_origin,
     )
-    if isinstance(reconciliation_result, dict):
-        captured_interaction_ids = [
-            interaction_id
-            for interaction_id in reconciliation_result.get("captured_interaction_ids", [])
-            if isinstance(interaction_id, str) and interaction_id
-        ]
-        if captured_interaction_ids:
-            latest_captured_interaction_ids = [captured_interaction_ids[-1]]
-            update_conversation_turn(
-                paths,
-                conversation_id=opened["conversation_id"],
-                turn_id=opened["turn_id"],
-                updates={"captured_interaction_ids": latest_captured_interaction_ids},
-                refresh_workspace_snapshot=False,
-            )
+    if latest_captured_interaction_ids:
+        update_conversation_turn(
+            paths,
+            conversation_id=opened["conversation_id"],
+            turn_id=opened["turn_id"],
+            updates={"captured_interaction_ids": latest_captured_interaction_ids},
+            refresh_workspace_snapshot=False,
+        )
     current_turn = {
         "conversation_id": opened["conversation_id"],
         "turn_id": opened["turn_id"],
@@ -2085,7 +2341,13 @@ def prepare_ask_turn(
     warm_start = profile["warm_start_evidence"]
     workspace_notices_enabled = _workspace_notices_enabled(question_domain)
     reference_resolution = (
-        resolve_workspace_reference(paths, query=question) if knowledge_base["present"] else None
+        resolve_workspace_reference(
+            paths,
+            query=question,
+            source_scope_intent=normalized_semantic_analysis.get("source_scope_intent"),
+        )
+        if knowledge_base["present"]
+        else None
     )
     if isinstance(reference_resolution, dict) and not reference_resolution.get("detected"):
         reference_resolution = None
@@ -2106,10 +2368,22 @@ def prepare_ask_turn(
         question_class=question_class,
         question_domain=question_domain,
         reference_resolution=reference_resolution,
+        source_scope_intent=normalized_semantic_analysis.get("source_scope_intent"),
     )
     if isinstance(reference_resolution, dict):
         reference_resolution["scope_mode"] = source_scope_policy["scope_mode"]
     reference_resolution_summary = build_reference_resolution_summary(reference_resolution)
+    support_contract = build_support_contract(
+        question_domain=question_domain,
+        support_strategy=support_strategy,
+        evidence_requirements=evidence_requirements,
+        inspection_scope=inspection_scope,
+        preferred_channels=preferred_channels,
+        reference_resolution=reference_resolution,
+        reference_resolution_summary=reference_resolution_summary,
+        source_scope_policy=source_scope_policy,
+        prefer_published_artifacts=prefer_published_artifacts,
+    )
     normalized_semantic_analysis["question_domain"] = question_domain
     normalized_semantic_analysis["support_strategy"] = support_strategy
     normalized_semantic_analysis["analysis_guard_applied"] = bool(
@@ -2374,14 +2648,42 @@ def prepare_ask_turn(
                 sync_suggested = False
                 prefer_sync_before_answer = False
                 if knowledge_base["present"]:
-                    reference_resolution = resolve_workspace_reference(paths, query=question)
+                    reference_resolution = resolve_workspace_reference(
+                        paths,
+                        query=question,
+                        source_scope_intent=normalized_semantic_analysis.get(
+                            "source_scope_intent"
+                        ),
+                    )
                     if (
                         isinstance(reference_resolution, dict)
                         and not reference_resolution.get("detected")
                     ):
                         reference_resolution = None
+                    source_scope_policy = build_source_scope_policy(
+                        question=question,
+                        question_class=question_class,
+                        question_domain=question_domain,
+                        reference_resolution=reference_resolution,
+                        source_scope_intent=normalized_semantic_analysis.get(
+                            "source_scope_intent"
+                        ),
+                    )
+                    if isinstance(reference_resolution, dict):
+                        reference_resolution["scope_mode"] = source_scope_policy["scope_mode"]
                     reference_resolution_summary = build_reference_resolution_summary(
                         reference_resolution
+                    )
+                    support_contract = build_support_contract(
+                        question_domain=question_domain,
+                        support_strategy=support_strategy,
+                        evidence_requirements=evidence_requirements,
+                        inspection_scope=inspection_scope,
+                        preferred_channels=preferred_channels,
+                        reference_resolution=reference_resolution,
+                        reference_resolution_summary=reference_resolution_summary,
+                        source_scope_policy=source_scope_policy,
+                        prefer_published_artifacts=prefer_published_artifacts,
                     )
             else:
                 action_required = True
@@ -2456,6 +2758,7 @@ def prepare_ask_turn(
             "reference_resolution": reference_resolution,
             "reference_resolution_summary": reference_resolution_summary,
             "source_scope_policy": source_scope_policy,
+            "support_contract": support_contract,
             "analysis_origin": analysis_origin,
             "semantic_analysis": normalized_semantic_analysis,
             "analysis_guard_applied": bool(
@@ -2525,6 +2828,7 @@ def prepare_ask_turn(
         reference_resolution=reference_resolution,
         reference_resolution_summary=reference_resolution_summary,
         source_scope_policy=source_scope_policy,
+        support_contract=support_contract,
         prefer_published_artifacts=prefer_published_artifacts,
         analysis_origin=analysis_origin,
         normalized_semantic_analysis=normalized_semantic_analysis,
@@ -2579,6 +2883,7 @@ def complete_ask_turn(
     support_manifest_key_assertions: list[str] | None = None,
     support_manifest_notes: str | None = None,
     support_manifest_path: str | None = None,
+    workflow_outcome: dict[str, Any] | None = None,
     source_escalation_used: bool | None = None,
     inspection_scope: str | None = None,
     preferred_channels: list[str] | None = None,
@@ -2613,6 +2918,12 @@ def complete_ask_turn(
         "turn_id": turn_id,
         **current_turn,
     }
+    requested_workflow_outcome = normalize_workflow_outcome(workflow_outcome)
+    normalized_workflow_outcome = requested_workflow_outcome
+    if normalized_workflow_outcome is None:
+        normalized_workflow_outcome = normalize_workflow_outcome(
+            current_turn.get("workflow_outcome")
+        )
     committed_run_id = (
         str(current_turn.get("committed_run_id"))
         if isinstance(current_turn.get("committed_run_id"), str)
@@ -2651,16 +2962,110 @@ def complete_ask_turn(
         }
     resolved_front_door_state = normalize_front_door_state(current_turn.get("front_door_state"))
     provisional_answer_file_path = answer_file_path or current_turn.get("answer_file_path")
-    requested_support_basis = (
-        str(support_basis)
-        if isinstance(support_basis, str) and support_basis
-        else (
-            str(current_turn.get("support_basis"))
-            if (
-                isinstance(current_turn.get("support_basis"), str)
-                and current_turn.get("support_basis")
+    workflow_support_basis = (
+        str(normalized_workflow_outcome.get("support_basis"))
+        if (
+            isinstance(normalized_workflow_outcome, dict)
+            and isinstance(normalized_workflow_outcome.get("support_basis"), str)
+            and normalized_workflow_outcome.get("support_basis")
+        )
+        else None
+    )
+    workflow_session_ids = (
+        [
+            value
+            for value in requested_workflow_outcome.get("session_ids", [])
+            if isinstance(value, str) and value
+        ]
+        if isinstance(requested_workflow_outcome, dict)
+        else []
+    )
+    workflow_trace_ids = (
+        [
+            value
+            for value in requested_workflow_outcome.get("trace_ids", [])
+            if isinstance(value, str) and value
+        ]
+        if isinstance(requested_workflow_outcome, dict)
+        else []
+    )
+    workflow_support_manifest_path = (
+        str(normalized_workflow_outcome.get("support_manifest_path"))
+        if (
+            isinstance(normalized_workflow_outcome, dict)
+            and isinstance(normalized_workflow_outcome.get("support_manifest_path"), str)
+            and normalized_workflow_outcome.get("support_manifest_path")
+        )
+        else None
+    )
+    workflow_support_manifest_sources = (
+        normalized_workflow_outcome.get("support_manifest_sources")
+        if (
+            isinstance(normalized_workflow_outcome, dict)
+            and isinstance(normalized_workflow_outcome.get("support_manifest_sources"), list)
+        )
+        else None
+    )
+    workflow_support_manifest_key_assertions = (
+        normalized_workflow_outcome.get("support_manifest_key_assertions")
+        if (
+            isinstance(normalized_workflow_outcome, dict)
+            and isinstance(
+                normalized_workflow_outcome.get("support_manifest_key_assertions"),
+                list,
             )
-            else None
+        )
+        else None
+    )
+    workflow_support_manifest_notes = (
+        str(normalized_workflow_outcome.get("support_manifest_notes"))
+        if (
+            isinstance(normalized_workflow_outcome, dict)
+            and isinstance(normalized_workflow_outcome.get("support_manifest_notes"), str)
+            and normalized_workflow_outcome.get("support_manifest_notes")
+        )
+        else None
+    )
+    workflow_bundle_paths = (
+        [
+            value
+            for value in normalized_workflow_outcome.get("bundle_paths", [])
+            if isinstance(value, str) and value
+        ]
+        if isinstance(normalized_workflow_outcome, dict)
+        else []
+    )
+    workflow_status = (
+        str(normalized_workflow_outcome.get("status"))
+        if (
+            isinstance(normalized_workflow_outcome, dict)
+            and isinstance(normalized_workflow_outcome.get("status"), str)
+            and normalized_workflow_outcome.get("status")
+        )
+        else None
+    )
+    workflow_source_escalation_used = (
+        normalized_workflow_outcome.get("source_escalation_used")
+        if (
+            isinstance(normalized_workflow_outcome, dict)
+            and isinstance(normalized_workflow_outcome.get("source_escalation_used"), bool)
+        )
+        else None
+    )
+    requested_support_basis = (
+        workflow_support_basis
+        if workflow_support_basis is not None
+        else (
+            str(support_basis)
+            if isinstance(support_basis, str) and support_basis
+            else (
+                str(current_turn.get("support_basis"))
+                if (
+                    isinstance(current_turn.get("support_basis"), str)
+                    and current_turn.get("support_basis")
+                )
+                else None
+            )
         )
     )
     selected_session_ids, selected_trace_ids = _selected_turn_log_artifact_ids(
@@ -2686,12 +3091,20 @@ def complete_ask_turn(
         ),
     )
     resolved_session_ids = _resolved_log_artifact_ids(
-        explicit_ids=session_ids,
+        explicit_ids=(
+            session_ids
+            if session_ids is not None
+            else (workflow_session_ids if workflow_session_ids else None)
+        ),
         current_ids=selected_session_ids or current_turn.get("session_ids"),
         discovered_ids=discovered_session_ids,
     )
     effective_trace_ids = _resolved_log_artifact_ids(
-        explicit_ids=trace_ids,
+        explicit_ids=(
+            trace_ids
+            if trace_ids is not None
+            else (workflow_trace_ids if workflow_trace_ids else None)
+        ),
         current_ids=selected_trace_ids or current_turn.get("trace_ids"),
         discovered_ids=discovered_trace_ids,
     )
@@ -2704,13 +3117,17 @@ def complete_ask_turn(
     )
     resolved_answer_file_path = answer_file_path or current_turn.get("answer_file_path")
     resolved_support_basis = _resolve_scalar(
-        support_basis,
+        workflow_support_basis if workflow_support_basis is not None else support_basis,
         latest_trace_payload,
         current_turn,
         "support_basis",
     )
     resolved_support_manifest_path = _resolve_scalar(
-        support_manifest_path,
+        (
+            workflow_support_manifest_path
+            if workflow_support_manifest_path is not None
+            else support_manifest_path
+        ),
         latest_trace_payload,
         current_turn,
         "support_manifest_path",
@@ -2769,6 +3186,12 @@ def complete_ask_turn(
         current_turn,
         "source_scope_policy",
     )
+    resolved_support_contract = _resolve_mapping(
+        None,
+        latest_trace_payload,
+        current_turn,
+        "support_contract",
+    )
     resolved_canonical_support_summary = _resolve_mapping(
         None,
         latest_trace_payload,
@@ -2798,6 +3221,16 @@ def complete_ask_turn(
         latest_trace_payload,
         current_turn,
         "source_escalation_reason",
+    )
+    resolved_source_escalation_used = _resolve_scalar(
+        (
+            workflow_source_escalation_used
+            if isinstance(workflow_source_escalation_used, bool)
+            else source_escalation_used
+        ),
+        latest_trace_payload,
+        current_turn,
+        "source_escalation_used",
     )
     resolved_auto_sync_triggered = _resolve_scalar(
         None,
@@ -2853,6 +3286,25 @@ def complete_ask_turn(
         current_turn,
         "hybrid_refresh_job_ids",
     )
+    resolved_contract_repair_count = (
+        _resolve_int(
+            None,
+            latest_trace_payload,
+            current_turn,
+            "contract_repair_count",
+        )
+        or 0
+    )
+    resolved_bundle_paths = _resolve_list(
+        (
+            bundle_paths
+            if bundle_paths is not None
+            else (workflow_bundle_paths if workflow_bundle_paths else None)
+        ),
+        latest_trace_payload,
+        current_turn,
+        "bundle_paths",
+    )
     resolved_attached_job_ids = resolved_attached_shared_job_ids(
         turn=current_turn,
         run_state=run_state,
@@ -2881,8 +3333,25 @@ def complete_ask_turn(
     )
     explicit_local_manifest = support_manifest_is_local_corpus(
         None,
-        support_manifest_sources=support_manifest_sources,
+        support_manifest_sources=(
+            support_manifest_sources
+            if support_manifest_sources is not None
+            else workflow_support_manifest_sources
+        ),
     )
+    resolved_support_manifest_sources = [
+        dict(source)
+        for source in (
+            support_manifest_sources
+            if isinstance(support_manifest_sources, list)
+            else (
+                workflow_support_manifest_sources
+                if isinstance(workflow_support_manifest_sources, list)
+                else []
+            )
+        )
+        if isinstance(source, dict)
+    ]
     effective_answer_state = (
         resolved_answer_state
         if isinstance(resolved_answer_state, str)
@@ -2906,8 +3375,17 @@ def complete_ask_turn(
         effective_support_basis == "external-source-verified"
         and not resolved_support_manifest_path
         and isinstance(resolved_answer_file_path, str)
-        and isinstance(support_manifest_sources, list)
-        and support_manifest_sources
+        and isinstance(
+            support_manifest_sources
+            if support_manifest_sources is not None
+            else workflow_support_manifest_sources,
+            list,
+        )
+        and bool(
+            support_manifest_sources
+            if support_manifest_sources is not None
+            else workflow_support_manifest_sources
+        )
         and not explicit_local_manifest
     ):
         resolved_support_manifest_path = write_external_support_manifest(
@@ -2916,9 +3394,17 @@ def complete_ask_turn(
             turn_id=turn_id,
             answer_file_path=resolved_answer_file_path,
             support_basis=effective_support_basis,
-            sources=support_manifest_sources,
-            key_assertions=support_manifest_key_assertions,
-            verification_notes=support_manifest_notes,
+            sources=resolved_support_manifest_sources,
+            key_assertions=(
+                support_manifest_key_assertions
+                if support_manifest_key_assertions is not None
+                else workflow_support_manifest_key_assertions
+            ),
+            verification_notes=(
+                support_manifest_notes
+                if support_manifest_notes is not None
+                else workflow_support_manifest_notes
+            ),
         )
     support_manifest = load_support_manifest(
         paths,
@@ -2932,7 +3418,7 @@ def complete_ask_turn(
     )
     local_manifest = support_manifest_is_local_corpus(
         support_manifest,
-        support_manifest_sources=support_manifest_sources,
+        support_manifest_sources=resolved_support_manifest_sources,
     )
     if local_manifest and effective_support_basis == "external-source-verified":
         effective_support_basis = "kb-grounded"
@@ -2954,6 +3440,56 @@ def complete_ask_turn(
             effective_answer_state = "partially-grounded"
         elif effective_answer_state is None or effective_answer_state == "grounded":
             effective_answer_state = "unresolved"
+    support_fulfillment = build_support_fulfillment(
+        support_contract=resolved_support_contract,
+        trace_payload=latest_trace_payload,
+        answer_state=effective_answer_state,
+        support_basis=effective_support_basis,
+        repair_attempt_count=resolved_contract_repair_count,
+    )
+    current_turn = {
+        "conversation_id": conversation_id,
+        "turn_id": turn_id,
+        **update_conversation_turn(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            updates={
+                "support_contract": resolved_support_contract,
+                "support_fulfillment": support_fulfillment,
+                "workflow_outcome": normalized_workflow_outcome,
+                "contract_repair_count": resolved_contract_repair_count,
+            },
+            refresh_workspace_snapshot=False,
+        ),
+    }
+    if (
+        inner_workflow_id in {"grounded-answer", "grounded-composition"}
+        and bool(effective_trace_ids)
+        and bool(latest_trace_payload)
+        and support_fulfillment.get("status") == "repairable-gap"
+    ):
+        return _request_contract_repair(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            run_id=run_id,
+            inner_workflow_id=inner_workflow_id,
+            resolved_log_origin=resolved_log_origin,
+            current_turn=current_turn,
+            resolved_session_ids=resolved_session_ids,
+            effective_trace_ids=effective_trace_ids,
+            effective_support_basis=effective_support_basis,
+            resolved_support_manifest_path=(
+                resolved_support_manifest_path
+                if isinstance(resolved_support_manifest_path, str)
+                else None
+            ),
+            support_contract=resolved_support_contract,
+            support_fulfillment=support_fulfillment,
+            workflow_outcome=normalized_workflow_outcome,
+            contract_repair_count=resolved_contract_repair_count + 1,
+        )
     effective_turn_snapshot = _effective_turn_snapshot(
         current_turn,
         session_ids=resolved_session_ids,
@@ -2989,6 +3525,10 @@ def complete_ask_turn(
         hybrid_refresh_summary=resolved_hybrid_refresh_summary,
         hybrid_refresh_snapshot_id=resolved_hybrid_refresh_snapshot_id,
         hybrid_refresh_job_ids=resolved_hybrid_refresh_job_ids,
+        support_contract=resolved_support_contract,
+        support_fulfillment=support_fulfillment,
+        workflow_outcome=normalized_workflow_outcome,
+        contract_repair_count=resolved_contract_repair_count,
     )
     lane_c_transition = _maybe_begin_lane_c_before_commit(
         paths,
@@ -3056,11 +3596,12 @@ def complete_ask_turn(
         phase="commit",
         payload={"support_basis": effective_support_basis, "answer_state": effective_answer_state},
     )
+    effective_status = workflow_status if workflow_status is not None else status
     updated = commit_run(
         paths,
         conversation_id=conversation_id,
         turn_id=turn_id,
-        status=status,
+        status=effective_status,
         answer_state=effective_answer_state,
         support_basis=effective_support_basis,
         support_manifest_path=(
@@ -3086,7 +3627,7 @@ def complete_ask_turn(
             "question_domain": resolved_question_domain,
             "support_basis": effective_support_basis,
             "support_manifest_path": resolved_support_manifest_path,
-            "source_escalation_used": source_escalation_used,
+            "source_escalation_used": resolved_source_escalation_used,
             "inspection_scope": resolved_inspection_scope,
             "preferred_channels": resolved_preferred_channels,
             "used_published_channels": resolved_used_published_channels,
@@ -3113,9 +3654,13 @@ def complete_ask_turn(
             "hybrid_refresh_summary": resolved_hybrid_refresh_summary,
             "hybrid_refresh_snapshot_id": resolved_hybrid_refresh_snapshot_id,
             "hybrid_refresh_job_ids": resolved_hybrid_refresh_job_ids,
+            "support_contract": resolved_support_contract,
+            "support_fulfillment": support_fulfillment,
+            "workflow_outcome": normalized_workflow_outcome,
+            "contract_repair_count": resolved_contract_repair_count,
             "evidence_mode": evidence_mode,
             "research_depth": research_depth,
-            "bundle_paths": bundle_paths or [],
+            "bundle_paths": resolved_bundle_paths,
         },
     )
     _sync_turn_log_artifacts(
@@ -3209,6 +3754,10 @@ def complete_ask_turn(
         if isinstance(resolved_hybrid_refresh_completion_status, str)
         else None,
         hybrid_refresh_summary=resolved_hybrid_refresh_summary,
+        support_contract=resolved_support_contract,
+        support_fulfillment=support_fulfillment,
+        workflow_outcome=normalized_workflow_outcome,
+        contract_repair_count=resolved_contract_repair_count,
     )
     projection_refresh = queue_projection_refresh(
         paths,
