@@ -226,7 +226,11 @@ def _settled_lane_c_job_state(
     summary = _mapping(result_payload.get("result"))
     completion_status = _nonempty_string(summary.get("status"))
     if completion_status not in {"covered", "blocked"}:
-        completion_status = "blocked" if str(manifest.get("status") or "") == "blocked" else "covered"
+        completion_status = (
+            "blocked"
+            if str(manifest.get("status") or "") == "blocked"
+            else "covered"
+        )
     if not summary:
         summary = {"status": completion_status}
     return manifest, completion_status, summary

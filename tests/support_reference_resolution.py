@@ -593,8 +593,12 @@ class ReferenceResolutionTests(unittest.TestCase):
             },
         ]
 
+        query = (
+            '对比分析"Project Planning Brief"和"Project Outline Companion"'
+            "这两份文件在 project outline 上的差异和联系。"
+        )
         result = resolve_reference_query(
-            '对比分析"Project Planning Brief"和"Project Outline Companion"这两份文件在 project outline 上的差异和联系。',
+            query,
             source_records=source_records,
             unit_records=[],
         )

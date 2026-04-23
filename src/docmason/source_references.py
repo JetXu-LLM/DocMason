@@ -1169,7 +1169,9 @@ def _declared_compare_sources(
     if not compare_requested:
         return []
 
-    declared_source_texts = list(compare_intent["explicit_source_texts"]) or extract_declared_compare_source_texts(query)
+    declared_source_texts = list(compare_intent["explicit_source_texts"]) or (
+        extract_declared_compare_source_texts(query)
+    )
     if declared_source_texts:
         return [
             _resolve_declared_compare_source(

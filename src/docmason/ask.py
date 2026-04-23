@@ -15,7 +15,6 @@ from .ask_contracts import (
     build_support_contract,
     build_support_fulfillment,
     normalize_workflow_outcome,
-    support_fulfillment_notice,
 )
 from .commands import ACTION_REQUIRED, bootstrap_workspace_with_launcher, prepare_workspace
 from .commands import sync_workspace as run_sync_command
@@ -1370,7 +1369,10 @@ def _lane_c_wait_notice() -> str:
 
 
 def _lane_c_covered_notice() -> str:
-    return "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer."
+    return (
+        "The shared evidence refresh finished. Rerun retrieval and trace before "
+        "committing the answer."
+    )
 
 
 def _lane_c_blocked_notice() -> str:

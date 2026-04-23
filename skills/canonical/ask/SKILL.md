@@ -111,7 +111,6 @@ JSON
     - `results`
     - `reference_resolution`
     - `source_scope_policy`
-    - `recommended_hybrid_targets`
   - compact trace inspection should normally start from:
     - `trace_id`
     - `session_id`
@@ -119,7 +118,6 @@ JSON
     - `reference_resolution`
     - `source_scope_policy`
     - `issue_codes`
-    - `recommended_hybrid_targets`
   - do not switch to direct Python helpers such as `prepare_ask_turn()`, `complete_ask_turn()`, or `trace_answer_file(...)` as a substitute for the supported path
 - Example retrieve / trace binding:
 
