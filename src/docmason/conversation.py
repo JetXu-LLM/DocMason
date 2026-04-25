@@ -219,6 +219,10 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["host_thread_ref"] = None
     if "host_identity_source" not in turn:
         turn["host_identity_source"] = None
+    if "host_identity_trust" not in turn:
+        turn["host_identity_trust"] = None
+    if "host_identity_anomaly_flags" not in turn:
+        turn["host_identity_anomaly_flags"] = []
     if "analysis_guard_applied" not in turn:
         turn["analysis_guard_applied"] = None
     if "primary_issue_code" not in turn:
@@ -229,6 +233,10 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["support_contract"] = None
     if "support_fulfillment" not in turn:
         turn["support_fulfillment"] = None
+    if "result_explanation" not in turn:
+        turn["result_explanation"] = None
+    if "admissibility_repair" not in turn:
+        turn["admissibility_repair"] = None
     if "workflow_outcome" not in turn:
         turn["workflow_outcome"] = None
     if "contract_repair_count" not in turn:
@@ -978,6 +986,8 @@ def base_turn_record(
         "host_provider": None,
         "host_thread_ref": None,
         "host_identity_source": None,
+        "host_identity_trust": None,
+        "host_identity_anomaly_flags": [],
         "evidence_mode": None,
         "support_strategy": None,
         "inspection_scope": None,
@@ -993,6 +1003,8 @@ def base_turn_record(
         "support_manifest_path": None,
         "support_contract": None,
         "support_fulfillment": None,
+        "result_explanation": None,
+        "admissibility_repair": None,
         "workflow_outcome": None,
         "contract_repair_count": 0,
         "canonical_support_summary": None,

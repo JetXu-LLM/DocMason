@@ -1291,7 +1291,22 @@ def _apply_compare_resolution(
     result["declared_compare_missing_count"] = missing_count
     result["compare_resolution_status"] = compare_status
     result["status"] = compare_status
-    if compare_status == "approximate":
+    if compare_status == "exact":
+        result["continued_with_best_effort"] = False
+        result["unresolved_reason"] = None
+        result["notice_text"] = None
+        result["hard_boundary"] = False
+        if (
+            result.get("resolved_source_id") is None
+            and result.get("source_match_status") == "unresolved"
+        ):
+            result["source_match_status"] = "none"
+        if (
+            result.get("resolved_unit_id") is None
+            and result.get("unit_match_status") == "unresolved"
+        ):
+            result["unit_match_status"] = "none"
+    elif compare_status == "approximate":
         result["continued_with_best_effort"] = True
         result["unresolved_reason"] = "compare-soft-approximation"
         result["notice_text"] = (

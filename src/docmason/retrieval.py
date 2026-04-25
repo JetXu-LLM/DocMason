@@ -1791,6 +1791,119 @@ def _source_scope_intent_from_record(record: dict[str, Any]) -> dict[str, Any] |
     return dict(source_scope_intent) if isinstance(source_scope_intent, dict) else None
 
 
+def _explicit_source_ids(source_ids: list[str] | None) -> list[str]:
+    return [
+        source_id.strip()
+        for source_id in (source_ids or [])
+        if isinstance(source_id, str) and source_id.strip()
+    ]
+
+
+def _nonempty_string(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _nonempty_string_list(value: Any) -> list[str]:
+    return [
+        item.strip()
+        for item in (value if isinstance(value, list) else [])
+        if isinstance(item, str) and item.strip()
+    ]
+
+
+def _is_canonical_ask_turn_record(record: dict[str, Any]) -> bool:
+    if not isinstance(record, dict) or not record:
+        return False
+    return (
+        str(record.get("entry_workflow_id") or "ask") == "ask"
+        and normalize_front_door_state(record.get("front_door_state"))
+        == FRONT_DOOR_STATE_CANONICAL_ASK
+    )
+
+
+def _targeted_turn_scope(record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return inherited ask-owned source scope when the turn is explicitly targeted."""
+    if not _is_canonical_ask_turn_record(record):
+        return None
+    policy = record.get("source_scope_policy")
+    if not isinstance(policy, dict):
+        return None
+    scope_mode = str(policy.get("scope_mode") or "global")
+    if scope_mode not in {"source-scoped-soft", "source-scoped-hard", "compare"}:
+        return None
+    reference_resolution = record.get("reference_resolution")
+    inherited_reference = (
+        dict(reference_resolution) if isinstance(reference_resolution, dict) else {}
+    )
+    inherited_reference["scope_mode"] = scope_mode
+    if scope_mode == "compare":
+        compare_ids = _nonempty_string_list(policy.get("compare_target_source_ids", []))
+        if not compare_ids:
+            return None
+        if not _nonempty_string_list(inherited_reference.get("declared_compare_source_ids")):
+            inherited_reference["declared_compare_source_ids"] = compare_ids
+        if _nonempty_string(inherited_reference.get("compare_resolution_status")) is None:
+            inherited_reference["compare_resolution_status"] = policy.get(
+                "compare_resolution_status"
+            )
+        if inherited_reference.get("compare_resolution_status") == "exact":
+            inherited_reference["continued_with_best_effort"] = False
+            inherited_reference["notice_text"] = None
+            inherited_reference["unresolved_reason"] = None
+            inherited_reference["hard_boundary"] = False
+            if (
+                inherited_reference.get("resolved_source_id") is None
+                and inherited_reference.get("source_match_status") == "unresolved"
+            ):
+                inherited_reference["source_match_status"] = "none"
+            if (
+                inherited_reference.get("resolved_unit_id") is None
+                and inherited_reference.get("unit_match_status") == "unresolved"
+            ):
+                inherited_reference["unit_match_status"] = "none"
+    else:
+        target_source_id = policy.get("target_source_id")
+        if not isinstance(target_source_id, str) or not target_source_id:
+            return None
+        if _nonempty_string(inherited_reference.get("resolved_source_id")) is None:
+            inherited_reference["resolved_source_id"] = target_source_id
+        if _nonempty_string(inherited_reference.get("source_match_status")) is None:
+            inherited_reference["source_match_status"] = "exact"
+        if "source_narrowing_allowed" not in inherited_reference:
+            inherited_reference["source_narrowing_allowed"] = True
+    return inherited_reference, dict(policy)
+
+
+def _effective_source_ids_for_scope(
+    source_ids: list[str] | None,
+    reference_resolution: dict[str, Any] | None,
+    source_scope_policy: dict[str, Any] | None,
+) -> list[str]:
+    """Derive retrieval filters, letting explicit caller filters override turn scope."""
+    explicit_source_ids = _explicit_source_ids(source_ids)
+    if explicit_source_ids:
+        return explicit_source_ids
+    policy = dict(source_scope_policy) if isinstance(source_scope_policy, dict) else {}
+    scope_mode = str(policy.get("scope_mode") or "global")
+    if scope_mode == "compare":
+        compare_source_ids = [
+            source_id
+            for source_id in policy.get("compare_target_source_ids", [])
+            if isinstance(source_id, str) and source_id.strip()
+        ]
+        if compare_source_ids:
+            return list(dict.fromkeys(compare_source_ids))
+    if scope_mode in {"source-scoped-soft", "source-scoped-hard"}:
+        target_source_id = policy.get("target_source_id")
+        if isinstance(target_source_id, str) and target_source_id.strip():
+            return [target_source_id.strip()]
+    return _effective_source_ids_from_reference(source_ids, reference_resolution)
+
+
 def combined_trace_status(
     *,
     answer_state: str,
@@ -3229,6 +3342,11 @@ def retrieve_corpus(
         reference_resolution=reference_resolution,
         source_scope_intent=source_scope_intent,
     )
+    inherited_turn_scope = (
+        None if _explicit_source_ids(source_ids) else _targeted_turn_scope(turn_record)
+    )
+    if inherited_turn_scope is not None:
+        reference_resolution, source_scope_policy = inherited_turn_scope
     if target == "current" and should_merge_pending_interaction(
         effective_question_domain,
         memory_profile=memory_profile,
@@ -3248,9 +3366,15 @@ def retrieve_corpus(
             reference_resolution=reference_resolution,
             source_scope_intent=source_scope_intent,
         )
-    effective_source_ids = _effective_source_ids_from_reference(
+        inherited_turn_scope = (
+            None if _explicit_source_ids(source_ids) else _targeted_turn_scope(turn_record)
+        )
+        if inherited_turn_scope is not None:
+            reference_resolution, source_scope_policy = inherited_turn_scope
+    effective_source_ids = _effective_source_ids_for_scope(
         source_ids,
         reference_resolution,
+        source_scope_policy,
     )
     if bool(reference_resolution.get("hard_boundary")) and not reference_resolution.get(
         "resolved_source_id"
@@ -3571,6 +3695,24 @@ def support_term_coverage(segment_text: str, result: dict[str, Any] | None) -> f
     return len(covered_terms) / len(significant_terms)
 
 
+def support_set_term_coverage(segment_text: str, results: list[dict[str, Any]]) -> float:
+    """Measure significant vocabulary coverage across the admitted support set."""
+    significant_terms = significant_query_terms(segment_text)
+    if not significant_terms:
+        return 0.0
+    matched_terms: set[str] = set()
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        matched_terms.update(
+            term
+            for term in result.get("matched_terms", [])
+            if isinstance(term, str) and term
+        )
+    covered_terms = significant_terms & matched_terms
+    return len(covered_terms) / len(significant_terms)
+
+
 def groundedness_from_result(result: dict[str, Any] | None, *, segment_text: str) -> str:
     """Classify answer grounding from the strongest retrieval result.
 
@@ -3592,6 +3734,63 @@ def groundedness_from_result(result: dict[str, Any] | None, *, segment_text: str
     if total >= 2.5 and coverage >= 0.35:
         return "partially-grounded"
     return "unresolved"
+
+
+def groundedness_from_support_set(
+    results: list[dict[str, Any]],
+    *,
+    segment_text: str,
+    top_result_status: str,
+) -> str:
+    """Conservatively upgrade only unresolved segments to partial support.
+
+    Support-set coverage can show that several admitted results jointly cover
+    a segment better than the single strongest result. It is not strong enough
+    to certify groundedness, so this helper never returns `grounded`.
+    """
+    if top_result_status != "unresolved" or not results:
+        return top_result_status
+    coverage = support_set_term_coverage(segment_text, results)
+    direct_support_scores = [result_direct_support_score(result) for result in results]
+    if coverage >= 0.6 and max(direct_support_scores, default=0.0) >= 2.5:
+        return "partially-grounded"
+    return top_result_status
+
+
+def grounding_reason_codes(
+    *,
+    top_result: dict[str, Any] | None,
+    top_result_status: str,
+    final_status: str,
+    top_result_coverage: float,
+    support_set_coverage: float,
+    scope_satisfied: bool,
+    needs_render_inspection: bool,
+) -> list[str]:
+    """Return compact diagnostic reason codes for one trace segment."""
+    codes: list[str] = []
+    if top_result is None:
+        codes.append("no-canonical-support")
+    else:
+        score = top_result.get("score")
+        total = float(score.get("total", 0.0)) if isinstance(score, dict) else 0.0
+        if total < 2.5:
+            codes.append("low-top-result-score")
+        if top_result_coverage < 0.35:
+            codes.append("low-top-result-coverage")
+    if top_result_status == "unresolved" and final_status == "partially-grounded":
+        codes.append("support-set-partial-support")
+    if top_result_status == "partially-grounded" and final_status == "partially-grounded":
+        codes.append("top-result-partial-support")
+    if support_set_coverage < 0.6 and final_status == "unresolved":
+        codes.append("weak-support-set-coverage")
+    if not scope_satisfied:
+        codes.append("source-scope-unsatisfied")
+    if needs_render_inspection:
+        codes.append("render-inspection-required")
+    if not codes and final_status == "grounded":
+        codes.append("strong-top-result-support")
+    return list(dict.fromkeys(codes))
 
 
 def answer_state_from_segments(segment_traces: list[dict[str, Any]]) -> str:
@@ -4058,9 +4257,21 @@ def trace_answer_text(
             supporting_artifact_ids,
             supporting_overlay_unit_ids,
         ) = compact_support_ids(admitted_results[:top])
-        coverage_ratio = support_term_coverage(segment, top_result)
+        top_result_coverage_ratio = support_term_coverage(segment, top_result)
+        support_set_coverage_ratio = support_set_term_coverage(
+            segment,
+            admitted_results[:top],
+        )
         direct_support_score = result_direct_support_score(top_result) if top_result else 0.0
-        grounding_status = groundedness_from_result(top_result, segment_text=segment)
+        top_result_grounding_status = groundedness_from_result(
+            top_result,
+            segment_text=segment,
+        )
+        grounding_status = groundedness_from_support_set(
+            admitted_results[:top],
+            segment_text=segment,
+            top_result_status=top_result_grounding_status,
+        )
         scope_satisfied = segment_scope_satisfied(
             source_scope_policy=effective_source_scope_policy,
             supporting_source_ids=supporting_source_ids,
@@ -4070,6 +4281,19 @@ def trace_answer_text(
             effective_source_scope_policy.get("scope_mode") or "global"
         ) in {"source-scoped-soft", "source-scoped-hard"}:
             grounding_status = "unresolved"
+        needs_render_inspection = needs_render_inspection_from_supports(
+            supports,
+            preferred_channels=list(effective_evidence_requirements.get("preferred_channels", [])),
+        )
+        reason_codes = grounding_reason_codes(
+            top_result=top_result,
+            top_result_status=top_result_grounding_status,
+            final_status=grounding_status,
+            top_result_coverage=top_result_coverage_ratio,
+            support_set_coverage=support_set_coverage_ratio,
+            scope_satisfied=scope_satisfied,
+            needs_render_inspection=needs_render_inspection,
+        )
         interaction_lane = [
             {
                 "source_id": result.get("source_id"),
@@ -4096,12 +4320,8 @@ def trace_answer_text(
             "segment_index": index,
             "segment_text": segment,
             "grounding_status": grounding_status,
-            "needs_render_inspection": needs_render_inspection_from_supports(
-                supports,
-                preferred_channels=list(
-                    effective_evidence_requirements.get("preferred_channels", [])
-                ),
-            ),
+            "grounding_reason_codes": reason_codes,
+            "needs_render_inspection": needs_render_inspection,
             "support_lanes": {
                 "kb": supports,
                 "interaction": interaction_lane,
@@ -4109,7 +4329,9 @@ def trace_answer_text(
             },
             "scope_satisfied": scope_satisfied,
             "direct_support_score": round(float(direct_support_score), 3),
-            "coverage_ratio": round(float(coverage_ratio), 3),
+            "coverage_ratio": round(float(top_result_coverage_ratio), 3),
+            "top_result_coverage_ratio": round(float(top_result_coverage_ratio), 3),
+            "support_set_coverage_ratio": round(float(support_set_coverage_ratio), 3),
             "supporting_source_ids": supporting_source_ids,
             "supporting_unit_ids": supporting_unit_ids,
             "supporting_artifact_ids": supporting_artifact_ids,

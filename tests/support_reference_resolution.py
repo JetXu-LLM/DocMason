@@ -530,6 +530,10 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         self.assertEqual(result["scope_mode"], "compare")
         self.assertEqual(result["compare_resolution_status"], "exact")
+        self.assertEqual(result["source_match_status"], "none")
+        self.assertIsNone(result["notice_text"])
+        self.assertIsNone(result["unresolved_reason"])
+        self.assertFalse(result["continued_with_best_effort"])
         self.assertEqual(result["declared_compare_expected_count"], 2)
         self.assertEqual(result["declared_compare_source_ids"], ["source-001", "source-002"])
 
@@ -605,6 +609,10 @@ class ReferenceResolutionTests(unittest.TestCase):
 
         self.assertEqual(result["scope_mode"], "compare")
         self.assertEqual(result["compare_resolution_status"], "exact")
+        self.assertEqual(result["source_match_status"], "none")
+        self.assertIsNone(result["notice_text"])
+        self.assertIsNone(result["unresolved_reason"])
+        self.assertFalse(result["continued_with_best_effort"])
         self.assertEqual(result["declared_compare_expected_count"], 2)
         self.assertEqual(result["declared_compare_source_ids"], ["source-001", "source-002"])
 

@@ -15,7 +15,9 @@ from .ask_contracts import (
     build_support_contract,
     build_support_fulfillment,
     normalize_workflow_outcome,
+    support_fulfillment_notice,
 )
+from .ask_result_explanation import build_result_explanation
 from .commands import ACTION_REQUIRED, bootstrap_workspace_with_launcher, prepare_workspace
 from .commands import sync_workspace as run_sync_command
 from .control_plane import (
@@ -1052,6 +1054,17 @@ def _commit_governed_boundary_turn(
             "support_basis": "governed-boundary",
             "response_excerpt": reason.strip(),
         },
+    )
+    result_explanation = build_result_explanation(
+        {"conversation_id": conversation_id, "turn_id": turn_id, **updated},
+        status="boundary",
+        detail=reason.strip(),
+    )
+    updated = update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates={"result_explanation": result_explanation},
     )
     projection_refresh = queue_projection_refresh(
         paths,
@@ -3643,6 +3656,7 @@ def complete_ask_turn(
             "primary_issue_code": admissibility_gate_result.get("primary_issue_code"),
             "issue_codes": admissibility_gate_result.get("issue_codes", []),
             "noncanonical_answer_file_path": None,
+            "admissibility_repair": None,
             "source_escalation_required": resolved_source_escalation_required,
             "source_escalation_reason": resolved_source_escalation_reason,
             "auto_sync_triggered": resolved_auto_sync_triggered,
@@ -3664,6 +3678,25 @@ def complete_ask_turn(
             "research_depth": research_depth,
             "bundle_paths": resolved_bundle_paths,
         },
+    )
+    result_status = (
+        "boundary"
+        if effective_support_basis == "governed-boundary"
+        or effective_answer_state == "abstained"
+        else "completed"
+    )
+    result_explanation = build_result_explanation(
+        {"conversation_id": conversation_id, "turn_id": turn_id, **updated},
+        status=result_status,
+        detail=response_excerpt if result_status == "boundary" else None,
+        support_notice=support_fulfillment_notice(support_fulfillment),
+    )
+    updated = update_conversation_turn(
+        paths,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        updates={"result_explanation": result_explanation},
+        refresh_workspace_snapshot=False,
     )
     _sync_turn_log_artifacts(
         paths,

@@ -19,6 +19,10 @@ from .ask import (
     settle_lane_c_shared_refresh,
 )
 from .ask_contracts import support_fulfillment_notice
+from .ask_result_explanation import (
+    build_admissibility_repair,
+    build_result_explanation,
+)
 from .control_plane import load_shared_job, load_shared_job_result
 from .conversation import (
     bind_host_identity_to_conversation,
@@ -36,6 +40,9 @@ from .runtime_log_index import discover_turn_artifact_candidates
 _WAITING_TURN_STATES = frozenset({"awaiting-confirmation", "waiting-shared-job"})
 _REPAIRABLE_FINALIZE_ISSUE_CODES = frozenset(
     {"illegal-source-citation-path", "mixed-support-unexplained"}
+)
+_TRUSTED_NATIVE_IDENTITY_SOURCES = frozenset(
+    {"codex_thread_id", "claude_session_id", "claude_conversation_id"}
 )
 _HOST_NEXT_STEP_BY_STATUS = {
     "execute": "continue-inner-workflow",
@@ -67,17 +74,55 @@ def _string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item]
 
 
+def _merged_flags(existing: Any, additional: list[str]) -> list[str]:
+    values = (
+        [item for item in existing if isinstance(item, str) and item]
+        if isinstance(existing, list)
+        else []
+    )
+    return list(dict.fromkeys([*values, *additional]))
+
+
 def _resolved_host_identity(
     *,
     host_provider: str | None,
     host_thread_ref: str | None,
     host_identity_source: str | None,
 ) -> dict[str, Any]:
-    provider = _nonempty_string(host_provider) or detect_agent_surface()
-    identity = current_host_identity(agent_surface=provider)
-    identity["host_provider"] = provider
+    requested_provider = _nonempty_string(host_provider)
+    detected_provider = detect_agent_surface()
+    trusted_identity = current_host_identity(agent_surface=detected_provider)
     normalized_ref = _nonempty_string(host_thread_ref)
     normalized_source = _nonempty_string(host_identity_source)
+    trusted_ref = _nonempty_string(trusted_identity.get("host_thread_ref"))
+    trusted_source = _nonempty_string(trusted_identity.get("host_identity_source"))
+    trusted_native_identity = (
+        _nonempty_string(trusted_identity.get("host_identity_trust")) == "host-env-claimed"
+        and trusted_ref is not None
+        and trusted_source in _TRUSTED_NATIVE_IDENTITY_SOURCES
+    )
+    if trusted_native_identity:
+        ignored_conflict = any(
+            (
+                requested_provider is not None
+                and requested_provider != trusted_identity.get("host_provider"),
+                normalized_ref is not None and normalized_ref != trusted_ref,
+                normalized_source is not None and normalized_source != trusted_source,
+            )
+        )
+        if ignored_conflict:
+            trusted_identity["anomaly_flags"] = _merged_flags(
+                trusted_identity.get("anomaly_flags"),
+                [
+                    "anomalous-host-identity",
+                    "hidden-ask-host-identity-argument-ignored",
+                ],
+            )
+        return trusted_identity
+
+    provider = requested_provider or detected_provider
+    identity = current_host_identity(agent_surface=provider)
+    identity["host_provider"] = provider
     if normalized_source is None and normalized_ref is not None:
         if provider == "codex":
             normalized_source = "codex_thread_id"
@@ -106,6 +151,8 @@ def _persist_host_turn_context(
         "host_provider": _nonempty_string(host_identity.get("host_provider")),
         "host_thread_ref": _nonempty_string(host_identity.get("host_thread_ref")),
         "host_identity_source": _nonempty_string(host_identity.get("host_identity_source")),
+        "host_identity_trust": _nonempty_string(host_identity.get("host_identity_trust")),
+        "host_identity_anomaly_flags": _string_list(host_identity.get("anomaly_flags")),
     }
     if isinstance(semantic_analysis, dict):
         updates["semantic_analysis"] = dict(semantic_analysis)
@@ -410,18 +457,37 @@ def _hidden_ask_exception_payload(
 ) -> dict[str, Any]:
     normalized_action = action if action in {"open", "progress", "finalize"} else "request"
     detail = str(exc).strip() or type(exc).__name__
+    next_step = _next_step("blocked")
     payload = {
         "status": "blocked",
         "user_reply_allowed": False,
         "detail": f"Hidden ask {normalized_action} failed: {detail}",
         "primary_issue_code": f"hidden-ask-{normalized_action}-failed",
         "issue_codes": [f"hidden-ask-{normalized_action}-failed"],
-        "next_step": _next_step("blocked"),
+        "next_step": next_step,
     }
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
     if turn_id is not None:
         payload["turn_id"] = turn_id
+    payload["result_explanation"] = build_result_explanation(
+        payload,
+        status="blocked",
+        next_step=next_step,
+        detail=str(payload["detail"]),
+    )
+    return payload
+
+
+def _with_result_explanation(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach the derived result explanation to direct hidden-wrapper payloads."""
+    if "result_explanation" not in payload:
+        payload["result_explanation"] = build_result_explanation(
+            payload,
+            status=_nonempty_string(payload.get("status")),
+            next_step=_nonempty_string(payload.get("next_step")),
+            detail=_nonempty_string(payload.get("detail")),
+        )
     return payload
 
 
@@ -449,6 +515,15 @@ def _host_turn_payload(
     workflow_outcome = _mapping(turn.get("workflow_outcome")) or None
     shared_evidence_write_state = _host_shared_evidence_write_state(turn)
     support_notice = support_fulfillment_notice(support_fulfillment)
+    next_step = _next_step(status)
+    result_explanation = build_result_explanation(
+        turn,
+        status=status,
+        next_step=next_step,
+        detail=detail,
+        support_notice=support_notice,
+    )
+    admissibility_repair = _mapping(turn.get("admissibility_repair")) or None
     answer_text = (
         _answer_text(paths, _nonempty_string(turn.get("answer_file_path")))
         if user_reply_allowed
@@ -503,12 +578,18 @@ def _host_turn_payload(
             if isinstance(turn.get("contract_repair_count"), int)
             else 0
         ),
+        "result_explanation": result_explanation,
+        "admissibility_repair": admissibility_repair,
         "shared_evidence_write_state": shared_evidence_write_state,
         "support_notice": support_notice,
-        "next_step": _next_step(status),
+        "next_step": next_step,
         "host_provider": _nonempty_string(turn.get("host_provider")),
         "host_thread_ref": _nonempty_string(turn.get("host_thread_ref")),
         "host_identity_source": _nonempty_string(turn.get("host_identity_source")),
+        "host_identity_trust": _nonempty_string(turn.get("host_identity_trust")),
+        "host_identity_anomaly_flags": _string_list(
+            turn.get("host_identity_anomaly_flags")
+        ),
         "log_context": _turn_log_context(turn),
         "canonical_turn_state": _nonempty_string(turn.get("turn_state")),
         "canonical_turn_status": _nonempty_string(turn.get("status")),
@@ -608,6 +689,12 @@ def open_canonical_ask(
                 "host_thread_ref": _nonempty_string(host_identity.get("host_thread_ref")),
                 "host_identity_source": _nonempty_string(
                     host_identity.get("host_identity_source")
+                ),
+                "host_identity_trust": _nonempty_string(
+                    host_identity.get("host_identity_trust")
+                ),
+                "host_identity_anomaly_flags": _string_list(
+                    host_identity.get("anomaly_flags")
                 ),
             },
         )
@@ -809,6 +896,15 @@ def finalize_canonical_ask(
                         include_release_entry=True,
                     )
         if _is_repairable_finalize_failure(issue_codes):
+            repair_contract = build_admissibility_repair(
+                workspace_root=paths.root,
+                turn=failed_turn,
+                answer_file_path=requested_answer_file_path
+                or _nonempty_string(failed_turn.get("answer_file_path")),
+                primary_issue_code=primary_issue_code,
+                issue_codes=issue_codes,
+                detail=blocked_detail,
+            )
             update_conversation_turn(
                 paths,
                 conversation_id=conversation_id,
@@ -817,6 +913,7 @@ def finalize_canonical_ask(
                     "status": "prepared",
                     "turn_state": "prepared",
                     "noncanonical_answer_file_path": None,
+                    "admissibility_repair": repair_contract,
                 },
             )
             repair_turn = load_turn_record(
@@ -957,15 +1054,15 @@ def handle_hidden_ask_request(
         if action == "open":
             question = _nonempty_string(request.get("question"))
             if question is None:
-                return {
+                return _with_result_explanation({
                     "status": "blocked",
                     "user_reply_allowed": False,
                     "detail": "Hidden ask open requires a non-empty question.",
                     "primary_issue_code": "missing-question",
                     "issue_codes": ["missing-question"],
                     "next_step": _next_step("blocked"),
-                }
-            return open_canonical_ask(
+                })
+            return _with_result_explanation(open_canonical_ask(
                 workspace,
                 question=question,
                 semantic_analysis=(
@@ -977,47 +1074,47 @@ def handle_hidden_ask_request(
                 host_provider=_nonempty_string(request.get("host_provider")),
                 host_thread_ref=_nonempty_string(request.get("host_thread_ref")),
                 host_identity_source=_nonempty_string(request.get("host_identity_source")),
-            )
+            ))
         if action == "finalize":
             if conversation_id is None or turn_id is None:
-                return {
+                return _with_result_explanation({
                     "status": "blocked",
                     "user_reply_allowed": False,
                     "detail": "Hidden ask finalize requires conversation_id and turn_id.",
                     "primary_issue_code": "missing-turn-reference",
                     "issue_codes": ["missing-turn-reference"],
                     "next_step": _next_step("blocked"),
-                }
-            return finalize_canonical_ask(
+                })
+            return _with_result_explanation(finalize_canonical_ask(
                 workspace,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
                 request=request,
-            )
+            ))
         if action == "progress":
             if conversation_id is None or turn_id is None:
-                return {
+                return _with_result_explanation({
                     "status": "blocked",
                     "user_reply_allowed": False,
                     "detail": "Hidden ask progress requires conversation_id and turn_id.",
                     "primary_issue_code": "missing-turn-reference",
                     "issue_codes": ["missing-turn-reference"],
                     "next_step": _next_step("blocked"),
-                }
-            return progress_canonical_ask(
+                })
+            return _with_result_explanation(progress_canonical_ask(
                 workspace,
                 conversation_id=conversation_id,
                 turn_id=turn_id,
                 request=request,
-            )
-        return {
+            ))
+        return _with_result_explanation({
             "status": "blocked",
             "user_reply_allowed": False,
             "detail": "Hidden ask action must be `open`, `progress`, or `finalize`.",
             "primary_issue_code": "unsupported-hidden-ask-action",
             "issue_codes": ["unsupported-hidden-ask-action"],
             "next_step": _next_step("blocked"),
-        }
+        })
     except Exception as exc:
         return _hidden_ask_exception_payload(
             action=action,

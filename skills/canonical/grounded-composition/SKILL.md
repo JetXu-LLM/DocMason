@@ -95,6 +95,8 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - do not keep retracing the same unchanged answer text; if the answer-file digest did not change and no new trace or session is needed, stop or reuse the existing final trace instead of silently looping
    - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; prefer the structured `workflow_outcome` handoff when the workflow already knows the correct `support_basis`, selected IDs, bundle linkage, or other finalize-owned facts
    - if finalize returns `status = execute` together with a repairable `support_fulfillment`, do one contract-aware rewrite and retrace on the same turn, then finalize once more
+   - if finalize returns `status = execute` together with `admissibility_repair`, use its issue codes and suggested action to rewrite the same answer file, rerun trace, and finalize once more
+   - if terminal finalize returns `result_explanation.show_to_user = true`, keep that explanation separate from the canonical answer file and append it after the main deliverable as concise user-facing closure context, even when the user asked for an exact output shape
 10. Return the main result plus any relevant bundle paths, support boundary, overall support basis, and next steps to the main agent.
 
 ## Escalation Rules
@@ -105,6 +107,7 @@ If the environment cannot inspect the required evidence, stop and explain the bl
 - If the result still depends on unresolved design tradeoffs or weak evidence, qualify the output instead of presenting it as settled fact.
 - If source-reference resolution is only approximate or unresolved, keep that notice explicit in the composition boundary rather than pretending the cited source was matched exactly.
 - If visual or tabular claims are really artifact-level, do not cite only a loose source summary in your internal evidence notes. Carry the artifact grounding through the draft.
+- Treat trace `grounding_reason_codes` and coverage ratios as diagnostics for repair and explanation. They do not override the final `answer_state`.
 - Do not let composition become a catch-all for simple factual lookup. The user should still get the narrowest honest workflow and evidence basis.
 - Do not create a growing list of special composition subtypes for odd questions. Prefer the shared evidence-channel model and published affordance layer instead.
 

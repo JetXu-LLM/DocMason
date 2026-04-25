@@ -26,6 +26,10 @@ from docmason.ask_contracts import (
     build_support_fulfillment,
     support_fulfillment_notice,
 )
+from docmason.ask_result_explanation import (
+    build_admissibility_repair,
+    build_result_explanation,
+)
 from docmason.commands import (
     ACTION_REQUIRED,
     READY,
@@ -45,7 +49,10 @@ from docmason.interaction import _persist_interaction_entry, refresh_interaction
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import (
     _recommended_hybrid_targets,
+    groundedness_from_support_set,
+    grounding_reason_codes,
     retrieve_corpus,
+    support_set_term_coverage,
     trace_answer_file,
     trace_session,
 )
@@ -615,6 +622,9 @@ class AskHardeningTests(unittest.TestCase):
             top=2,
             log_context=turn["log_context"],
         )
+        self.assertIn("grounding_reason_codes", trace["segments"][0])
+        self.assertIn("top_result_coverage_ratio", trace["segments"][0])
+        self.assertIn("support_set_coverage_ratio", trace["segments"][0])
         complete_ask_turn(
             workspace,
             conversation_id=turn["conversation_id"],
@@ -3871,6 +3881,49 @@ class AskHardeningTests(unittest.TestCase):
             "The user wants a comparison work product grounded in the published workspace materials.",
         )
 
+    def test_hidden_ask_open_prefers_native_env_identity_over_placeholder_args(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_THREAD_ID": "thread-real-native-identity"},
+            clear=False,
+        ):
+            payload = handle_hidden_ask_request(
+                {
+                    "action": "open",
+                    "question": "What is a stable general answer?",
+                    "semantic_analysis": self.semantic_analysis(
+                        question_class="answer",
+                        question_domain="general-stable",
+                    ),
+                    "host_provider": "codex-desktop",
+                    "host_thread_ref": "codex-desktop-thread",
+                    "host_identity_source": "codex-desktop",
+                },
+                paths=workspace,
+            )
+
+        self.assertEqual(payload["status"], "execute")
+        self.assertEqual(payload["host_provider"], "codex")
+        self.assertEqual(payload["host_thread_ref"], "thread-real-native-identity")
+        self.assertEqual(payload["host_identity_source"], "codex_thread_id")
+        self.assertIn(
+            "hidden-ask-host-identity-argument-ignored",
+            payload["host_identity_anomaly_flags"],
+        )
+        turn = load_turn_record(
+            workspace,
+            conversation_id=str(payload["conversation_id"]),
+            turn_id=str(payload["turn_id"]),
+        )
+        self.assertEqual(turn["host_thread_ref"], "thread-real-native-identity")
+        self.assertIn(
+            "hidden-ask-host-identity-argument-ignored",
+            turn["host_identity_anomaly_flags"],
+        )
+
     def test_hidden_ask_open_returns_structured_error_payload_on_internal_failure(self) -> None:
         workspace = self.make_workspace()
 
@@ -4064,6 +4117,17 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(repairable["answer_file_path"], opened["answer_file_path"])
         self.assertIn("absolute machine path", str(repairable["detail"]))
         self.assertNotIn("noncanonical_answer_file_path", repairable)
+        self.assertEqual(repairable["admissibility_repair"]["status"], "repairable")
+        self.assertEqual(
+            repairable["admissibility_repair"]["suggested_action"],
+            "rewrite-answer-and-provide-or-remove-mixed-support",
+        )
+        self.assertIsInstance(
+            repairable["admissibility_repair"]["failed_answer_digest"],
+            dict,
+        )
+        self.assertFalse(repairable["admissibility_repair"]["stores_failed_answer_text"])
+        self.assertFalse(repairable["result_explanation"]["show_to_user"])
         self.assertTrue(answer_path.exists())
 
         refreshed_turn = load_turn_record(
@@ -4073,6 +4137,7 @@ class AskHardeningTests(unittest.TestCase):
         )
         self.assertEqual(refreshed_turn["turn_state"], "prepared")
         self.assertIsNone(refreshed_turn.get("noncanonical_answer_file_path"))
+        self.assertEqual(refreshed_turn["admissibility_repair"]["status"], "repairable")
 
     def test_hidden_ask_finalize_autotraces_missing_public_trace(self) -> None:
         workspace = self.make_workspace()
@@ -4597,6 +4662,150 @@ class AskHardeningTests(unittest.TestCase):
             all(result["source_id"] in set(source_ids) for result in retrieval["results"])
         )
 
+    def test_retrieve_corpus_inherits_exact_single_source_scope_from_ask_turn(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": (
+                    'Using only the document "Project Planning Brief", summarize the work '
+                    "plan. Do not use any other source."
+                ),
+                "semantic_analysis": self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+                "host_provider": "codex",
+                "host_thread_ref": "thread-single-source-inherit",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(opened["status"], "execute")
+        self.assertEqual(opened["source_scope_policy"]["scope_mode"], "source-scoped-hard")
+
+        retrieval = retrieve_corpus(
+            workspace,
+            query="What does it say about the work plan?",
+            top=5,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=True,
+            log_context=opened["log_context"],
+            question_domain="workspace-corpus",
+        )
+
+        self.assertEqual(retrieval["filters"]["source_ids"], [source_ids[0]])
+        self.assertEqual(retrieval["source_scope_policy"]["target_source_id"], source_ids[0])
+        self.assertTrue(retrieval["results"])
+        self.assertTrue(
+            all(result["source_id"] == source_ids[0] for result in retrieval["results"])
+        )
+
+    def test_retrieve_corpus_inherits_compare_scope_from_ask_turn_for_short_query(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        semantic_analysis = self.semantic_analysis(
+            question_class="answer",
+            question_domain="workspace-corpus",
+        )
+        semantic_analysis["source_scope_intent"] = {
+            "mode": "compare",
+            "expected_source_count": 2,
+            "explicit_source_texts": [
+                "Project Planning Brief",
+                "Project Timeline Notes",
+            ],
+            "hard_boundary_on_missing_sources": True,
+        }
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": "Compare the two named project sources on implementation.",
+                "semantic_analysis": semantic_analysis,
+                "host_provider": "codex",
+                "host_thread_ref": "thread-compare-inherit-short-query",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        self.assertEqual(opened["status"], "execute")
+        self.assertEqual(opened["source_scope_policy"]["scope_mode"], "compare")
+
+        retrieval = retrieve_corpus(
+            workspace,
+            query="implementation support and timeline",
+            top=5,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=True,
+            log_context=opened["log_context"],
+            question_domain="workspace-corpus",
+        )
+
+        self.assertCountEqual(retrieval["filters"]["source_ids"], source_ids)
+        self.assertEqual(retrieval["reference_resolution"]["compare_resolution_status"], "exact")
+        self.assertTrue(retrieval["results"])
+        self.assertTrue(
+            all(result["source_id"] in set(source_ids) for result in retrieval["results"])
+        )
+
+    def test_retrieve_corpus_explicit_source_ids_override_ask_scope(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": (
+                    'Using only the document "Project Planning Brief", summarize the work '
+                    "plan. Do not use any other source."
+                ),
+                "semantic_analysis": self.semantic_analysis(
+                    question_class="answer",
+                    question_domain="workspace-corpus",
+                ),
+                "host_provider": "codex",
+                "host_thread_ref": "thread-single-source-explicit-override",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
+
+        retrieval = retrieve_corpus(
+            workspace,
+            query="timeline milestones",
+            top=5,
+            graph_hops=0,
+            document_types=None,
+            source_ids=[source_ids[1]],
+            include_renders=True,
+            log_context=opened["log_context"],
+            question_domain="workspace-corpus",
+        )
+
+        self.assertEqual(retrieval["filters"]["source_ids"], [source_ids[1]])
+        self.assertTrue(retrieval["results"])
+        self.assertTrue(
+            all(result["source_id"] == source_ids[1] for result in retrieval["results"])
+        )
+
     def test_trace_answer_file_marks_unresolved_compare_scope_without_fake_exactness(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
@@ -5040,6 +5249,165 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(
             unresolved_contract["reference_honesty"]["unresolved_reason"],
             "missing-source",
+        )
+
+    def test_build_result_explanation_terminal_policy(self) -> None:
+        grounded = build_result_explanation(
+            {
+                "committed_run_id": "run-1",
+                "answer_state": "grounded",
+                "support_basis": "kb-grounded",
+                "support_fulfillment": {"status": "satisfied"},
+            },
+            status="completed",
+            next_step="return-final-answer",
+        )
+        self.assertFalse(grounded["show_to_user"])
+        self.assertEqual(grounded["next_step"], "return-final-answer")
+
+        partially_grounded = build_result_explanation(
+            {
+                "committed_run_id": "run-1",
+                "answer_state": "partially-grounded",
+                "support_basis": "kb-grounded",
+                "support_fulfillment": {"status": "satisfied"},
+            },
+            status="completed",
+            next_step="return-final-answer",
+            detail="This is answer content, not an explanation.",
+        )
+        self.assertTrue(partially_grounded["show_to_user"])
+        self.assertIn("answer-state-partially-grounded", partially_grounded["reason_codes"])
+        self.assertNotIn("answer content", partially_grounded["why"])
+
+        unresolved = build_result_explanation(
+            {
+                "committed_run_id": "run-1",
+                "answer_state": "unresolved",
+                "support_basis": "kb-grounded",
+            },
+            status="completed",
+            next_step="return-final-answer",
+        )
+        self.assertTrue(unresolved["show_to_user"])
+        self.assertIn("answer-state-unresolved", unresolved["reason_codes"])
+
+        boundary = build_result_explanation(
+            {
+                "committed_run_id": "run-1",
+                "answer_state": "abstained",
+                "support_basis": "governed-boundary",
+            },
+            status="boundary",
+            next_step="return-boundary-answer",
+            detail="Requested source could not be resolved.",
+        )
+        self.assertTrue(boundary["show_to_user"])
+        self.assertIn("governed-boundary", boundary["reason_codes"])
+        self.assertEqual(boundary["why"], "Requested source could not be resolved.")
+
+        blocked = build_result_explanation(
+            {
+                "primary_issue_code": "illegal-finalize-override",
+                "issue_codes": ["illegal-finalize-override"],
+            },
+            status="blocked",
+            next_step="do-not-return-final-answer",
+        )
+        self.assertTrue(blocked["show_to_user"])
+        self.assertIn("blocked", blocked["reason_codes"])
+
+        support_gap = build_result_explanation(
+            {
+                "committed_run_id": "run-1",
+                "answer_state": "grounded",
+                "support_basis": "kb-grounded",
+                "support_fulfillment": {
+                    "status": "honest-close-required",
+                    "primary_gap_type": "compare-coverage",
+                },
+            },
+            status="completed",
+            next_step="return-final-answer",
+        )
+        self.assertTrue(support_gap["show_to_user"])
+        self.assertIn("support-fulfillment-honest-close-required", support_gap["reason_codes"])
+
+    def test_build_admissibility_repair_records_digest_without_text(self) -> None:
+        workspace = self.make_workspace()
+        answer_path = workspace.answers_dir / "conv" / "turn-001.md"
+        answer_path.parent.mkdir(parents=True, exist_ok=True)
+        answer_path.write_text("Answer with /Users/example/private path.\n", encoding="utf-8")
+
+        repair = build_admissibility_repair(
+            workspace_root=workspace.root,
+            turn={"answer_file_path": str(answer_path.relative_to(workspace.root))},
+            answer_file_path=str(answer_path.relative_to(workspace.root)),
+            primary_issue_code="illegal-source-citation-path",
+            issue_codes=["illegal-source-citation-path", "mixed-support-unexplained"],
+            detail="Canonical answer text exposes an absolute machine path.",
+        )
+
+        self.assertEqual(repair["status"], "repairable")
+        self.assertEqual(
+            repair["suggested_action"],
+            "rewrite-answer-and-provide-or-remove-mixed-support",
+        )
+        self.assertFalse(repair["stores_failed_answer_text"])
+        self.assertIsInstance(repair["failed_answer_digest"], dict)
+        self.assertNotIn("Answer with", json.dumps(repair, sort_keys=True))
+
+    def test_support_set_grounding_can_only_upgrade_to_partial(self) -> None:
+        segment = "alpha beta gamma delta"
+        results = [
+            {
+                "matched_terms": ["alpha", "beta"],
+                "score": {
+                    "total": 2.6,
+                    "lexical_source": 0.0,
+                    "lexical_units": 2.6,
+                    "lexical_artifacts": 0.0,
+                },
+            },
+            {
+                "matched_terms": ["gamma", "delta"],
+                "score": {
+                    "total": 2.6,
+                    "lexical_source": 0.0,
+                    "lexical_units": 2.6,
+                    "lexical_artifacts": 0.0,
+                },
+            },
+        ]
+
+        self.assertEqual(support_set_term_coverage(segment, results), 1.0)
+        self.assertEqual(
+            groundedness_from_support_set(
+                results,
+                segment_text=segment,
+                top_result_status="unresolved",
+            ),
+            "partially-grounded",
+        )
+        self.assertNotEqual(
+            groundedness_from_support_set(
+                results,
+                segment_text=segment,
+                top_result_status="unresolved",
+            ),
+            "grounded",
+        )
+        self.assertIn(
+            "support-set-partial-support",
+            grounding_reason_codes(
+                top_result=results[0],
+                top_result_status="unresolved",
+                final_status="partially-grounded",
+                top_result_coverage=0.5,
+                support_set_coverage=1.0,
+                scope_satisfied=True,
+                needs_render_inspection=False,
+            ),
         )
 
     def test_support_fulfillment_notice_omits_satisfied_success_noise(self) -> None:
@@ -5513,12 +5881,15 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(opened["status"], "boundary")
         self.assertTrue(opened["user_reply_allowed"])
         self.assertIn("comparison boundary", str(opened["detail"]))
+        self.assertTrue(opened["result_explanation"]["show_to_user"])
+        self.assertIn("governed-boundary", opened["result_explanation"]["reason_codes"])
         boundary_turn = load_turn_record(
             workspace,
             conversation_id=str(opened["conversation_id"]),
             turn_id=str(opened["turn_id"]),
         )
         self.assertEqual(boundary_turn["status"], "completed")
+        self.assertTrue(boundary_turn["result_explanation"]["show_to_user"])
         self.assertEqual(
             boundary_turn["reference_resolution"]["unresolved_reason"],
             "compare-source-unresolved",
@@ -5718,6 +6089,7 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(completed["next_step"], "return-final-answer")
         self.assertEqual(completed["detail"], "Supports HTTPS API access.")
         self.assertIsNone(completed["support_notice"])
+        self.assertFalse(completed["result_explanation"]["show_to_user"])
         self.assertEqual(completed["support_fulfillment"]["status"], "satisfied")
         self.assertIsNone(completed["support_fulfillment"]["primary_gap_type"])
 

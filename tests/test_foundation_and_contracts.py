@@ -291,6 +291,9 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("## Canonical Ask Contract", ask_skill)
         self.assertIn("./.venv/bin/python -m docmason _ask", ask_skill)
         self.assertIn("`workflow.json` remains routing metadata", ask_skill)
+        self.assertIn("This closure note is mandatory", ask_skill)
+        self.assertIn("even when the user asked for an exact output shape", ask_skill)
+        self.assertIn("do not hand-fill placeholder host thread references", ask_skill)
         self.assertIn("only `completed` or `boundary` permits a final business reply", ask_skill)
         self.assertIn(
             "smallest evidence basis that can support the answer correctly and truthfully",
@@ -332,7 +335,9 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertNotIn("`docmason _ask`", composition_skill)
         self.assertIn("not a free-standing ordinary front door", answer_skill)
         self.assertIn("canonical ask runtime ownership", answer_skill)
+        self.assertIn("even when the user asked for an exact output shape", answer_skill)
         self.assertIn("never a free-standing ordinary front door", composition_skill)
+        self.assertIn("even when the user asked for an exact output shape", composition_skill)
         self.assertIn("legal operator provenance surface", trace_skill)
         self.assertIn("legal operator evidence surface", retrieval_skill)
         self.assertIn("require canonical ask ownership", review_skill)

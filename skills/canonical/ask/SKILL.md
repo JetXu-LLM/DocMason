@@ -80,6 +80,7 @@ JSON
   - `open` normalizes missing supported routing fields, derives defaults such as `support_strategy`, and may refine reference resolution or workspace notices from repository truth.
 - Native Codex fast path:
   - for an ordinary request on the native Codex path, once repo-local `.venv` is available, call hidden `open` directly with best-effort `semantic_analysis`
+  - prefer the real native `CODEX_THREAD_ID` identity from the execution environment; do not hand-fill placeholder host thread references such as `codex-desktop-thread` or `codex-native-thread`
   - do not read other workflow skills, `workspace-status`, `workspace-bootstrap`, source search, implementation source, or tests first just to decide whether canonical ask may open, whether a named source exists, or which `semantic_analysis` fields are accepted
   - use those surfaces only after `open` returns a governed blocker, waiting state, or explicit operator route
 - After `open`, preserve the returned `conversation_id`, `turn_id`, `run_id`, `answer_file_path`, `log_context`, and `support_contract` for the rest of the same canonical ask turn.
@@ -97,6 +98,13 @@ JSON
   - `completed -> return-final-answer`
   - `boundary -> return-boundary-answer`
   - `blocked -> do-not-return-final-answer`
+- Hidden wrapper `result_explanation` is a derived convenience field, not a new truth surface.
+  - When `result_explanation.show_to_user = true`, translate its `summary`, `why`, and `next_step` into one concise user-facing explanation in the user's language.
+  - This closure note is mandatory even when the user requested a strict business-answer shape such as "exactly 3 bullets"; append it after the requested answer as a separate short support-status note.
+  - When `show_to_user = false`, do not add extra result-explanation prose.
+  - Do not write `result_explanation` text into the canonical answer markdown.
+- Hidden wrapper `admissibility_repair` is present only for same-turn repairable finalize failures.
+  - Treat it as repair metadata for the next rewrite/retrace attempt, not as permission to bypass trace or admissibility.
 - In compatible-host execution, `open` or same-turn reuse already performs governed preanswer work:
   - question classification and support-strategy selection
   - workspace gating and knowledge-base freshness checks
@@ -270,6 +278,8 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - direct answer when supported
    - explicit non-answer boundary when not
    - one concise freshness or waiting note only when it materially helps the user
+   - if terminal hidden `_ask` returns `result_explanation.show_to_user = true`, append one concise explanation of what happened and the next legal action after the business answer, even when the user asked for an exact output shape
+   - keep successful grounded completions quiet; do not append explanation prose just because the field exists
 
 ## Escalation Rules
 

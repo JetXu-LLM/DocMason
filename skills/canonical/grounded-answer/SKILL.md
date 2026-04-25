@@ -98,6 +98,8 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
     - when you genuinely need nested `artifact_supports`, `semantic_supports`, render refs, page spans, or region boxes, inspect a file-first full trace capture or the published artifact surfaces rather than streaming the nested trace payload into chat
    - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; prefer the structured `workflow_outcome` handoff when the workflow already knows the correct `support_basis`, selected IDs, or other finalize-owned facts
    - if finalize returns `status = execute` together with a repairable `support_fulfillment`, do one contract-aware rewrite and retrace on the same turn, then finalize once more
+   - if finalize returns `status = execute` together with `admissibility_repair`, use its issue codes and suggested action to rewrite the same answer file, rerun trace, and finalize once more
+   - if terminal finalize returns `result_explanation.show_to_user = true`, keep that explanation separate from the canonical answer file and append it after the business answer as concise user-facing closure context, even when the user asked for an exact output shape
 10. Emit one of these final answer states:
    - `grounded`
    - `partially-grounded`
@@ -113,6 +115,7 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
 - If the evidence is contradictory, ambiguous, or insufficient, qualify the answer or abstain.
 - If source-reference resolution only succeeded approximately, do not phrase the answer as though the cited document or locator was matched exactly.
 - If the answer is comparative, do not finalize it from a support set dominated by one source when the trace or retrieval payload still shows weak comparative coverage.
+- Treat trace `grounding_reason_codes` and coverage ratios as diagnostics for repair and explanation. They do not override the final `answer_state`.
 - Do not treat retrieval alone as a complete grounded-answer workflow.
 - If published KB artifacts already satisfy the required evidence channels, do not rerender source files or rummage through `original_doc/` as a first reflex.
 
