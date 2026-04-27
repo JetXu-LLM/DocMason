@@ -312,6 +312,13 @@ class FoundationAndContractTests(unittest.TestCase):
         )
         self.assertIn("route to `knowledge-base-sync`", ask_skill)
         self.assertIn("native ledger", ask_skill)
+        self.assertIn("render_inspection_used", ask_skill)
+        self.assertIn("after a `covered` settlement, rerun retrieve and trace", ask_skill)
+        self.assertIn("after one `covered` refresh and post-refresh retrieve/trace", answer_skill)
+        self.assertIn(
+            "after one `covered` refresh and post-refresh retrieve/trace",
+            composition_skill,
+        )
         self.assertNotIn("default first-contact entry surface", ask_skill)
         self.assertNotIn(
             "route only after canonical ask runtime ownership is already open",
@@ -327,7 +334,6 @@ class FoundationAndContractTests(unittest.TestCase):
             "created it first",
             ask_skill,
         )
-        self.assertNotIn("recommended_hybrid_targets", ask_skill)
         self.assertNotIn("Lane C owner", ask_skill)
         self.assertNotIn("hidden canonical ask integration path", answer_skill)
         self.assertNotIn("hidden canonical ask integration path", composition_skill)

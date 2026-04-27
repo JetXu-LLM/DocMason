@@ -65,7 +65,9 @@ If the environment cannot inspect the required evidence, stop and explain the bl
      - use `recommended_hybrid_targets` as the only legal narrowing entrypoint
      - write the current-turn `hybrid_refresh_work.json`
      - reuse a matching shared refresh result when the turn is a waiter
-     - complete the selected source's current hybrid candidates, then rerun retrieve and trace before drafting the final synthesis
+     - complete the selected source's current hybrid candidates, inspect listed render or focus-render assets when present and relevant to the deliverable, then rerun retrieve and trace before drafting the final synthesis
+     - record lightweight settlement audit fields such as `render_inspection_used` and `inspected_render_assets` when the work packet exposes visual assets
+     - after one `covered` refresh and post-refresh retrieve/trace, close honestly with the remaining support boundary instead of starting a second same-turn refresh
      - if the governed refresh settles `blocked`, stop with `abstained + governed-boundary` instead of improvising around the gap
    - inspect direct source files or rerender only when the published-artifact plan says the knowledge base is insufficient for style, visual structure, or low-level detail
    - bring in external verification or stable model knowledge only when the composition task genuinely needs it, and keep the support basis explicit

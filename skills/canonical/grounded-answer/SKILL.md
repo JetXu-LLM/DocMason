@@ -65,7 +65,9 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
    - when published sufficiency fails because of hard-artifact semantic gaps, the grounded-answer path must enter the governed ask-time multimodal refresh before any raw source inspection
      - use `recommended_hybrid_targets` as the only legal query-aware narrowing entrypoint
      - if the turn becomes a waiter on that governed refresh, keep the same turn paused and reuse the shared result
-     - once the governed refresh picks a source, complete that source's current hybrid candidates, reretrieve, and retrace before treating the ask as ready to answer
+     - once the governed refresh picks a source, complete that source's current hybrid candidates, inspect listed render or focus-render assets when present and answer-relevant, reretrieve, and retrace before treating the ask as ready to answer
+     - record lightweight settlement audit fields such as `render_inspection_used` and `inspected_render_assets` when the work packet exposes visual assets
+     - after one `covered` refresh and post-refresh retrieve/trace, close honestly with the remaining support boundary instead of starting a second same-turn refresh
      - if the governed refresh settles `blocked`, close the turn as `abstained + governed-boundary`
 5. Run provenance tracing for the strongest support when you need corroboration, contradiction checks, or answer-state clarification:
    - `docmason trace --source-id <source_id> --json --compact`

@@ -44,7 +44,11 @@ from docmason.control_plane import complete_shared_job as complete_control_plane
 from docmason.control_plane import ensure_shared_job, lane_c_job_key, load_shared_job
 from docmason.conversation import load_turn_record, update_conversation_turn
 from docmason.front_controller import write_hybrid_refresh_work
-from docmason.host_integration import handle_hidden_ask_request, run_hidden_ask_cli
+from docmason.host_integration import (
+    _host_turn_payload,
+    handle_hidden_ask_request,
+    run_hidden_ask_cli,
+)
 from docmason.interaction import _persist_interaction_entry, refresh_interaction_overlay
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import (
@@ -975,6 +979,18 @@ class AskHardeningTests(unittest.TestCase):
         self.assertEqual(payload["selected_source_ids"], source_ids[:1])
         self.assertEqual(len(payload["sources"]), 1)
         self.assertTrue(payload["sources"][0]["units"])
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertIn(
+            "inspect_target_render_or_focus_render_assets_when_present",
+            payload["operation_checklist"],
+        )
+        self.assertTrue(
+            payload["render_inspection_guidance"]["required_when_render_assets_present"]
+        )
+        self.assertIn(
+            "render_inspection_used",
+            payload["settlement_summary_contract"]["expected_fields"],
+        )
 
     def test_complete_ask_turn_persists_hybrid_refresh_fields(self) -> None:
         workspace = self.make_workspace()
@@ -2205,14 +2221,19 @@ class AskHardeningTests(unittest.TestCase):
             second_live_turn["freshness_notice"],
             "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
         )
+        shared_state = second_live_turn["shared_evidence_write_state"]
+        self.assertEqual(shared_state["schema_version"], 1)
+        self.assertEqual(shared_state["kind"], "shared-evidence-truth-write")
+        self.assertEqual(shared_state["status"], "covered")
         self.assertEqual(
-            second_live_turn["shared_evidence_write_state"],
-            {
-                "kind": "shared-evidence-truth-write",
-                "status": "covered",
-                "notice": "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
-            },
+            shared_state["notice"],
+            "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
         )
+        self.assertEqual(
+            shared_state["next_action"],
+            "reretrieve-and-retrace-before-finalize",
+        )
+        self.assertTrue(shared_state["refresh_attempt_exhausted"])
 
     def test_settle_lane_c_shared_refresh_blocked_commits_boundary_for_waiters(self) -> None:
         workspace = self.make_workspace()
@@ -2423,14 +2444,16 @@ class AskHardeningTests(unittest.TestCase):
         )
 
         self.assertEqual(transitioned["status"], "waiting-shared-job")
+        shared_state = transitioned["shared_evidence_write_state"]
+        self.assertEqual(shared_state["schema_version"], 1)
+        self.assertEqual(shared_state["kind"], "shared-evidence-truth-write")
+        self.assertEqual(shared_state["status"], "active")
         self.assertEqual(
-            transitioned["shared_evidence_write_state"],
-            {
-                "kind": "shared-evidence-truth-write",
-                "status": "active",
-                "notice": "This ask is refreshing shared evidence before it can finish.",
-            },
+            shared_state["notice"],
+            "This ask is refreshing shared evidence before it can finish.",
         )
+        self.assertEqual(shared_state["next_action"], "complete-shared-evidence-refresh")
+        self.assertFalse(shared_state["refresh_attempt_exhausted"])
         self.assertIsNone(transitioned.get("primary_issue_code"))
         self.assertEqual(transitioned.get("issue_codes"), [])
         refreshed_turn = load_turn_record(
@@ -5421,6 +5444,73 @@ class AskHardeningTests(unittest.TestCase):
             ),
             "Final support still collapsed onto fewer comparison sources than required.",
         )
+        precommit_notice = support_fulfillment_notice(
+            {
+                "status": "blocked-gap",
+                "primary_gap_type": "source-escalation-required",
+            }
+        )
+        self.assertIn("before the ask contract can close", str(precommit_notice))
+        terminal_notice = support_fulfillment_notice(
+            {
+                "status": "blocked-gap",
+                "primary_gap_type": "source-escalation-required",
+            },
+            terminal=True,
+            hybrid_refresh_completion_status="covered",
+        )
+        self.assertIn("completed one governed evidence refresh", str(terminal_notice))
+        self.assertNotIn("before the ask contract can close", str(terminal_notice))
+
+    def test_terminal_lane_c_partial_payload_does_not_reopen_precommit_work(self) -> None:
+        workspace = self.make_workspace()
+        answer_path = workspace.answers_dir / "conv-lane-c" / "turn-001.md"
+        answer_path.parent.mkdir(parents=True, exist_ok=True)
+        answer_path.write_text("Partially supported answer.\n", encoding="utf-8")
+        old_precommit_notice = (
+            "The shared evidence refresh finished. Rerun retrieval and trace before "
+            "committing the answer."
+        )
+        turn = {
+            "conversation_id": "conv-lane-c",
+            "turn_id": "turn-001",
+            "committed_run_id": "run-lane-c",
+            "active_run_id": "run-lane-c",
+            "entry_workflow_id": "ask",
+            "inner_workflow_id": "grounded-composition",
+            "answer_file_path": str(answer_path.relative_to(workspace.root)),
+            "answer_state": "partially-grounded",
+            "support_basis": "kb-grounded",
+            "support_fulfillment": {
+                "status": "blocked-gap",
+                "primary_gap_type": "source-escalation-required",
+                "issue_codes": ["published-artifacts-gap"],
+            },
+            "hybrid_refresh_triggered": True,
+            "hybrid_refresh_completion_status": "covered",
+            "shared_evidence_write_state": {
+                "schema_version": 1,
+                "kind": "shared-evidence-truth-write",
+                "status": "covered",
+                "notice": old_precommit_notice,
+                "next_action": "reretrieve-and-retrace-before-finalize",
+                "refresh_attempt_limit": 1,
+                "refresh_attempt_exhausted": True,
+                "post_refresh_close_policy": (
+                    "post-refresh-retrieve-trace-then-close-honestly-with-remaining-boundary"
+                ),
+            },
+        }
+
+        payload = _host_turn_payload(workspace, turn=turn)
+
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["answer_state"], "partially-grounded")
+        self.assertIn("completed one governed evidence refresh", payload["detail"])
+        self.assertEqual(payload["detail"], payload["support_notice"])
+        self.assertEqual(payload["result_explanation"]["why"], payload["support_notice"])
+        self.assertNotIn("before the ask contract can close", payload["detail"])
+        self.assertNotIn("Rerun retrieval and trace", payload["detail"])
 
     def test_complete_ask_turn_uses_workflow_outcome_for_ambiguous_artifact_selection(self) -> None:
         workspace = self.make_workspace()
@@ -6334,13 +6424,17 @@ class AskHardeningTests(unittest.TestCase):
             progressed["detail"],
             "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
         )
+        shared_state = progressed["shared_evidence_write_state"]
+        self.assertEqual(shared_state["schema_version"], 1)
+        self.assertEqual(shared_state["kind"], "shared-evidence-truth-write")
+        self.assertEqual(shared_state["status"], "covered")
         self.assertEqual(
-            progressed["shared_evidence_write_state"],
-            {
-                "kind": "shared-evidence-truth-write",
-                "status": "covered",
-                "notice": "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
-            },
+            shared_state["notice"],
+            "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
+        )
+        self.assertEqual(
+            shared_state["next_action"],
+            "reretrieve-and-retrace-before-finalize",
         )
         live_turn = load_turn_record(
             workspace,
@@ -6412,13 +6506,17 @@ class AskHardeningTests(unittest.TestCase):
             finalized["detail"],
             "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
         )
+        shared_state = finalized["shared_evidence_write_state"]
+        self.assertEqual(shared_state["schema_version"], 1)
+        self.assertEqual(shared_state["kind"], "shared-evidence-truth-write")
+        self.assertEqual(shared_state["status"], "covered")
         self.assertEqual(
-            finalized["shared_evidence_write_state"],
-            {
-                "kind": "shared-evidence-truth-write",
-                "status": "covered",
-                "notice": "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
-            },
+            shared_state["notice"],
+            "The shared evidence refresh finished. Rerun retrieval and trace before committing the answer.",
+        )
+        self.assertEqual(
+            shared_state["next_action"],
+            "reretrieve-and-retrace-before-finalize",
         )
 
     def test_hidden_ask_progress_auto_commits_boundary_from_blocked_shared_job_truth(self) -> None:

@@ -462,6 +462,37 @@ def pending_interaction_entries(paths: WorkspacePaths) -> list[dict[str, Any]]:
     return entries
 
 
+def suppress_interaction_promotion(
+    paths: WorkspacePaths,
+    *,
+    interaction_ids: list[str],
+    reason: str,
+) -> dict[str, Any]:
+    """Mark captured interaction entries as audit-only without touching promoted memories."""
+    suppressed_ids: list[str] = []
+    for interaction_id in interaction_ids:
+        if not isinstance(interaction_id, str) or not interaction_id:
+            continue
+        entry_path = _interaction_entry_path(paths, interaction_id)
+        entry = read_json(entry_path)
+        if not isinstance(entry, dict) or not entry:
+            continue
+        if entry.get("status") == "promoted":
+            continue
+        entry["pending_promotion"] = False
+        entry["status"] = "operator-evidence-only"
+        entry["promotion_suppressed_reason"] = reason
+        entry["updated_at"] = utc_now()
+        entry["entry_fingerprint"] = _sha256_text(json.dumps(entry, sort_keys=True))
+        write_json(entry_path, entry)
+        suppressed_ids.append(interaction_id)
+    overlay_manifest = refresh_interaction_overlay(paths)
+    return {
+        "suppressed_interaction_ids": suppressed_ids,
+        "pending_overlay": overlay_manifest,
+    }
+
+
 def _entry_channel_descriptors(
     entry: dict[str, Any],
     *,

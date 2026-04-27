@@ -87,6 +87,7 @@ def write_hybrid_refresh_work(
     write_json(
         work_path,
         {
+            "schema_version": 1,
             "generated_at": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
             "target": target,
             "query": query,
@@ -103,6 +104,40 @@ def write_hybrid_refresh_work(
                 target=target,
                 source_ids=source_ids,
             ),
+            "operation_checklist": [
+                "inspect_target_render_or_focus_render_assets_when_present",
+                "write_additive_semantic_overlay_only",
+                "record_render_inspection_used_and_assets_in_progress_summary",
+                "settle_hidden_ask_progress_with_covered_or_blocked",
+            ],
+            "render_inspection_guidance": {
+                "required_when_render_assets_present": True,
+                "preferred_asset_fields": [
+                    "target_focus_render_assets",
+                    "focus_render_assets",
+                    "target_render_assets",
+                    "render_assets",
+                    "render_refs",
+                ],
+                "audit_summary_fields": [
+                    "render_inspection_used",
+                    "inspected_render_assets",
+                ],
+                "gate": "guidance-only",
+            },
+            "settlement_summary_contract": {
+                "expected_fields": [
+                    "mode",
+                    "work_path",
+                    "selected_source_id",
+                    "covered_unit_ids",
+                    "overlay_paths",
+                    "render_inspection_used",
+                    "inspected_render_assets",
+                    "summary",
+                ],
+                "status_values": ["covered", "blocked"],
+            },
         },
     )
     return str(work_path.relative_to(paths.root))

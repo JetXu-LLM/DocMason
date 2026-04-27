@@ -155,6 +155,7 @@ export DOCMASON_FRONT_DOOR_STATE="canonical-ask"
 
 - `completion_status` is optional when the caller is only re-entering a `waiting-shared-job` turn to let the hidden wrapper reconcile deterministic repo-owned shared-job truth.
 - supply `completion_status` only when the host is actively settling a still-unsettled governed multimodal refresh.
+- when the current-turn `hybrid_refresh_work.json` lists render or focus-render assets and the host can inspect images, inspect the relevant assets lightly and include `render_inspection_used` plus `inspected_render_assets` in `hybrid_refresh_summary`.
 - when a turn is paused in `waiting-shared-job`, re-enter through hidden `open` reuse, hidden `progress`, or hidden `finalize`; do not grep `runtime/control_plane/` or shared-job files manually.
 
 - `finalize` request envelope:
@@ -265,6 +266,7 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - let the routed inner workflow own retrieval, trace, render inspection, and answer or composition drafting
    - if published artifacts are still insufficient because of hard-artifact semantic gaps, let the canonical routed path enter one governed narrowed hybrid refresh instead of improvising raw source fallback
      - this ask-owned narrowed hybrid refresh is the Lane C path and is the only ordinary ask follow-up settled through hidden `progress`
+     - after a `covered` settlement, rerun retrieve and trace exactly on the post-refresh evidence; if the result is commit-admissible but still only partially supported, finalize honestly as `partially-grounded` instead of starting a second refresh
    - if that governed path becomes a shared wait or blocked boundary, keep the same turn paused or committed through the existing ask control-plane states rather than opening a side path
 7. Complete the turn through the supported completion path.
    - write only the final answer under `runtime/answers/<conversation_id>/<turn_id>.md`

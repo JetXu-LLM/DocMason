@@ -1027,6 +1027,23 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertFalse(turn["auto_sync_triggered"])
         self.assertFalse(turn["interaction_sync_suggested"])
         self.assertEqual(turn["status"], "prepared")
+        live_turn = self.load_conversation(
+            workspace,
+            conversation_id=str(turn["conversation_id"]),
+        )["turns"][0]
+        captured_ids = live_turn["captured_interaction_ids"]
+        self.assertEqual(len(captured_ids), 1)
+        captured_entry = read_json(
+            workspace.interaction_entries_dir / f"{captured_ids[0]}.json"
+        )
+        self.assertFalse(captured_entry["pending_promotion"])
+        self.assertEqual(captured_entry["status"], "operator-evidence-only")
+        self.assertEqual(
+            captured_entry["promotion_suppressed_reason"],
+            "canonical-ask-self-capture",
+        )
+        snapshot = interaction_ingest_snapshot(workspace)
+        self.assertEqual(snapshot["pending_promotion_count"], 1)
 
     def test_prepare_ask_turn_keeps_exact_source_pending_interaction_advisory(self) -> None:
         workspace = self.make_workspace()

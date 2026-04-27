@@ -341,6 +341,9 @@ def build_support_fulfillment(
 
 def support_fulfillment_notice(
     support_fulfillment: dict[str, Any] | None,
+    *,
+    terminal: bool = False,
+    hybrid_refresh_completion_status: str | None = None,
 ) -> str | None:
     """Return a short host-facing explanation derived from support fulfillment."""
     fulfillment = dict(support_fulfillment) if isinstance(support_fulfillment, dict) else {}
@@ -358,6 +361,12 @@ def support_fulfillment_notice(
             "preserve the required channels."
         )
     if primary_gap_type == "source-escalation-required":
+        if terminal and hybrid_refresh_completion_status == "covered":
+            return (
+                "DocMason completed one governed evidence refresh and reran retrieval "
+                "and trace; some content still remains only partially supported by "
+                "the published evidence."
+            )
         return (
             "Published artifacts still need governed source escalation before "
             "the ask contract can close."

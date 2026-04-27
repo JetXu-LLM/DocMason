@@ -419,21 +419,36 @@ def _turn_log_context(turn: dict[str, Any]) -> dict[str, str] | None:
     )
 
 
-def _turn_detail(turn: dict[str, Any], *, fallback: str | None = None) -> str | None:
+def _turn_detail(
+    turn: dict[str, Any],
+    *,
+    fallback: str | None = None,
+    status: str | None = None,
+) -> str | None:
+    terminal_completed = status == "completed"
     shared_evidence_write_state = _host_shared_evidence_write_state(turn)
     shared_evidence_notice = (
         _nonempty_string(shared_evidence_write_state.get("notice"))
-        if shared_evidence_write_state is not None
+        if shared_evidence_write_state is not None and not terminal_completed
         else None
     )
+    support_notice = support_fulfillment_notice(
+        _mapping(turn.get("support_fulfillment")) or None,
+        terminal=status in {"completed", "boundary"},
+        hybrid_refresh_completion_status=_nonempty_string(
+            turn.get("hybrid_refresh_completion_status")
+        ),
+    )
     for candidate in (
-        fallback,
+        fallback if (not terminal_completed or support_notice is None) else None,
         shared_evidence_notice,
-        _nonempty_string(turn.get("freshness_notice")),
+        _nonempty_string(turn.get("freshness_notice")) if not terminal_completed else None,
         _nonempty_string(turn.get("confirmation_prompt")),
-        support_fulfillment_notice(_mapping(turn.get("support_fulfillment")) or None),
-        _nonempty_string(turn.get("response_excerpt")),
-        _nonempty_string(turn.get("route_reason")),
+        support_notice,
+        _nonempty_string(turn.get("response_excerpt"))
+        if status in {"boundary", "blocked"} or (terminal_completed and support_notice is None)
+        else None,
+        _nonempty_string(turn.get("route_reason")) if not terminal_completed else None,
         _nonempty_string(turn.get("primary_issue_code")),
     ):
         if candidate is not None:
@@ -514,7 +529,13 @@ def _host_turn_payload(
     support_fulfillment = _mapping(turn.get("support_fulfillment")) or None
     workflow_outcome = _mapping(turn.get("workflow_outcome")) or None
     shared_evidence_write_state = _host_shared_evidence_write_state(turn)
-    support_notice = support_fulfillment_notice(support_fulfillment)
+    support_notice = support_fulfillment_notice(
+        support_fulfillment,
+        terminal=status in {"completed", "boundary"},
+        hybrid_refresh_completion_status=_nonempty_string(
+            turn.get("hybrid_refresh_completion_status")
+        ),
+    )
     next_step = _next_step(status)
     result_explanation = build_result_explanation(
         turn,
@@ -551,7 +572,7 @@ def _host_turn_payload(
         "support_basis": _nonempty_string(turn.get("support_basis")),
         "session_ids": _string_list(turn.get("session_ids")),
         "trace_ids": _string_list(turn.get("trace_ids")),
-        "detail": _turn_detail(turn, fallback=detail),
+        "detail": _turn_detail(turn, fallback=detail, status=status),
         "primary_issue_code": _nonempty_string(turn.get("primary_issue_code")),
         "issue_codes": _string_list(turn.get("issue_codes")),
         "answer_file_path": _nonempty_string(turn.get("answer_file_path")),

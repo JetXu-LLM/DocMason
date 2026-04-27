@@ -60,6 +60,7 @@ from .interaction import (
     interaction_ingest_snapshot,
     interaction_overlay_relevance,
     maybe_reconcile_active_thread,
+    suppress_interaction_promotion,
 )
 from .project import (
     WorkspacePaths,
@@ -1396,11 +1397,26 @@ def _shared_evidence_write_state(
     status: str,
     *,
     notice: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
+    next_actions = {
+        "active": "complete-shared-evidence-refresh",
+        "covered": "reretrieve-and-retrace-before-finalize",
+        "blocked": "return-governed-boundary",
+    }
+    close_policies = {
+        "active": "wait-for-single-governed-refresh",
+        "covered": "post-refresh-retrieve-trace-then-close-honestly-with-remaining-boundary",
+        "blocked": "close-governed-boundary",
+    }
     return {
+        "schema_version": 1,
         "kind": "shared-evidence-truth-write",
         "status": status,
         "notice": notice,
+        "next_action": next_actions.get(status, "inspect-shared-evidence-state"),
+        "refresh_attempt_limit": 1,
+        "refresh_attempt_exhausted": status in {"covered", "blocked"},
+        "post_refresh_close_policy": close_policies.get(status, "inspect-shared-evidence-state"),
     }
 
 
@@ -2229,6 +2245,11 @@ def prepare_ask_turn(
             turn_id=opened["turn_id"],
             updates={"captured_interaction_ids": latest_captured_interaction_ids},
             refresh_workspace_snapshot=False,
+        )
+        suppress_interaction_promotion(
+            paths,
+            interaction_ids=latest_captured_interaction_ids,
+            reason="canonical-ask-self-capture",
         )
     current_turn = {
         "conversation_id": opened["conversation_id"],
@@ -3689,7 +3710,15 @@ def complete_ask_turn(
         {"conversation_id": conversation_id, "turn_id": turn_id, **updated},
         status=result_status,
         detail=response_excerpt if result_status == "boundary" else None,
-        support_notice=support_fulfillment_notice(support_fulfillment),
+        support_notice=support_fulfillment_notice(
+            support_fulfillment,
+            terminal=result_status in {"completed", "boundary"},
+            hybrid_refresh_completion_status=(
+                resolved_hybrid_refresh_completion_status
+                if isinstance(resolved_hybrid_refresh_completion_status, str)
+                else None
+            ),
+        ),
     )
     updated = update_conversation_turn(
         paths,
