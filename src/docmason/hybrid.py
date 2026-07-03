@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tempfile
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -396,6 +397,18 @@ def evaluate_overlay_coverage(
         "coverage_status": coverage_status,
         "blocked_reasons": blocked_reasons,
     }
+
+
+# Characters NTFS rejects or misinterprets in file names. Artifact ids embed
+# `:` (`page-001:major-region-001`), which NTFS treats as an alternate-data-
+# stream separator and silently swallows the render file.
+_UNSAFE_RENDER_FILE_NAME_CHARS = re.compile(r'[<>:"|?*]')
+
+
+def artifact_render_file_name(artifact_id: str, *, suffix: str = "") -> str:
+    """Return a filesystem-safe focus-render file name for one artifact id."""
+    safe_name = _UNSAFE_RENDER_FILE_NAME_CHARS.sub("--", artifact_id)
+    return f"{safe_name}{suffix}.png"
 
 
 def focus_render_targets_for_unit(
@@ -886,10 +899,18 @@ def materialize_focus_render_assets(
             asset for asset in artifact.get("render_assets", []) if isinstance(asset, str) and asset
         ]
         unit_render_assets = _unit_render_assets(unit_lookup[unit_id])
-        hires_asset = (
-            Path("artifact_renders") / unit_id / f"{artifact_id}--x4.png"
+        hires_asset = Path("artifact_renders") / unit_id / artifact_render_file_name(
+            artifact_id, suffix="--x4"
         )
-        baseline_asset = Path("artifact_renders") / unit_id / f"{artifact_id}.png"
+        baseline_asset = Path("artifact_renders") / unit_id / artifact_render_file_name(
+            artifact_id
+        )
+        # Raw-id spellings written before file-name sanitization; excluded from
+        # the refreshed focus list so manifests converge on the safe names.
+        legacy_focus_names = {
+            str(Path("artifact_renders") / unit_id / f"{artifact_id}--x4.png"),
+            str(Path("artifact_renders") / unit_id / f"{artifact_id}.png"),
+        }
         existing_focus_assets = [
             asset
             for asset in artifact.get("focus_render_assets", [])
@@ -901,7 +922,7 @@ def materialize_focus_render_assets(
         focus_assets.extend(
             asset
             for asset in existing_focus_assets
-            if asset not in {str(hires_asset), str(baseline_asset)}
+            if asset not in ({str(hires_asset), str(baseline_asset)} | legacy_focus_names)
         )
         if artifact_type == "page-image":
             focus_assets.extend(render_assets or unit_render_assets)
@@ -1143,7 +1164,9 @@ def ensure_hires_focus_render(
             page = document[page_index]
             bitmap = page.render(scale=8)
             image = bitmap.to_pil()
-            hires_page_path = tempdir / f"{artifact_id}--page.png"
+            hires_page_path = tempdir / artifact_render_file_name(
+                artifact_id, suffix="--page"
+            )
             image.save(
                 hires_page_path,
                 format="PNG",
@@ -1153,7 +1176,9 @@ def ensure_hires_focus_render(
         finally:
             document.close()
 
-        hires_asset = Path("artifact_renders") / unit_id / f"{artifact_id}--x4.png"
+        hires_asset = Path("artifact_renders") / unit_id / artifact_render_file_name(
+            artifact_id, suffix="--x4"
+        )
         if not _crop_artifact_render(
             hires_page_path,
             normalized_bbox=normalized_bbox,

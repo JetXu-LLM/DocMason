@@ -29,6 +29,7 @@ from docmason.control_plane import load_shared_job
 from docmason.coordination import lease_dir, workspace_lease
 from docmason.evidence_artifacts import compile_pptx_visual_artifacts
 from docmason.hybrid import (
+    artifact_render_file_name,
     materialize_focus_render_assets,
     required_overlay_slots,
     select_lane_b_batch,
@@ -544,6 +545,10 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
         for artifact in focus_artifacts:
             for asset in artifact.get("focus_render_assets", []):
                 self.assertTrue((source_dir / asset).exists())
+                self.assertFalse(
+                    set('<>:"|?*') & set(Path(asset).name),
+                    f"focus render name is not filesystem-safe: {asset}",
+                )
 
         layout_path = source_dir / "visual_layout" / "page-001.json"
         visual_layout = read_json(layout_path)
@@ -872,6 +877,79 @@ class SourceBuildOfficePdfTests(unittest.TestCase):
             ["renders/page-001.png"],
         )
         self.assertFalse((source_dir / "artifact_renders" / "page-001" / "artifact-1.png").exists())
+
+    def test_materialize_focus_render_assets_uses_windows_safe_file_names(self) -> None:
+        from PIL import Image
+
+        self.assertEqual(
+            artifact_render_file_name("page-001:major-region-001"),
+            "page-001--major-region-001.png",
+        )
+        self.assertEqual(
+            artifact_render_file_name("page-001:major-region-001", suffix="--x4"),
+            "page-001--major-region-001--x4.png",
+        )
+
+        workspace = self.make_workspace()
+        source_dir = workspace.knowledge_base_current_dir / "sources" / "source-1"
+        (source_dir / "renders").mkdir(parents=True, exist_ok=True)
+        render_asset = source_dir / "renders" / "page-001.png"
+        Image.new("RGB", (128, 128), color=(255, 255, 255)).save(render_asset, format="PNG")
+        write_json(
+            source_dir / "evidence_manifest.json",
+            {
+                "units": [
+                    {
+                        "unit_id": "page-001",
+                        "render_assets": ["renders/page-001.png"],
+                    }
+                ]
+            },
+        )
+        write_json(
+            source_dir / "artifact_index.json",
+            {
+                "artifacts": [
+                    {
+                        "artifact_id": "page-001:major-region-001",
+                        "unit_id": "page-001",
+                        "artifact_type": "major-region",
+                        "render_assets": ["renders/page-001.png"],
+                        "render_page_span": {"start": 1, "end": 1},
+                        "normalized_bbox": {
+                            "x0": 0.2,
+                            "y0": 0.2,
+                            "x1": 0.6,
+                            "y1": 0.5,
+                        },
+                    }
+                ]
+            },
+        )
+
+        focus_assets = materialize_focus_render_assets(source_dir)
+
+        crop_path = (
+            source_dir
+            / "artifact_renders"
+            / "page-001"
+            / "page-001--major-region-001.png"
+        )
+        self.assertTrue(crop_path.exists())
+        self.assertGreater(crop_path.stat().st_size, 0)
+        artifact_focus = focus_assets["page-001:major-region-001"]
+        self.assertTrue(artifact_focus)
+        for asset in artifact_focus:
+            file_name = Path(asset).name
+            self.assertFalse(
+                set('<>:"|?*') & set(file_name),
+                f"focus render name is not filesystem-safe: {file_name}",
+            )
+        artifact_index = read_json(source_dir / "artifact_index.json")
+        self.assertEqual(
+            artifact_index["artifacts"][0]["focus_render_assets"],
+            artifact_focus,
+        )
 
     def test_validate_soffice_binary_times_out_gracefully(self) -> None:
         with (
