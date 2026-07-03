@@ -14,7 +14,11 @@ from docmason.cli import build_parser
 from docmason.cli import main as docmason_main
 from docmason.commands import retrieve_knowledge, sync_workspace, trace_knowledge
 from docmason.project import WorkspacePaths, read_json, write_json
-from docmason.retrieval import _effective_source_ids_from_reference, run_retrieval_query
+from docmason.retrieval import (
+    _effective_source_ids_from_reference,
+    retrieve_corpus,
+    run_retrieval_query,
+)
 from docmason.source_references import (
     build_reference_resolution_summary,
     build_source_reference_fields,
@@ -1437,6 +1441,87 @@ class ReferenceResolutionTests(unittest.TestCase):
         )
         self.assertEqual(updated["reference_resolution"]["resolved_unit_id"], "page-002")
         self.assertEqual(updated["reference_resolution_summary"], "exact-reference")
+
+    def test_committed_turn_scope_does_not_govern_later_retrieval(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf", page_count=2)
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_pdf_corpus(workspace)
+        deck_source_id = source_ids["original_doc/a.pdf"]
+
+        turn = prepare_ask_turn(
+            workspace,
+            question="Project Planning Brief page 2 visual detail",
+            semantic_analysis={
+                "question_class": "answer",
+                "question_domain": "workspace-corpus",
+                "route_reason": "Committed-turn scope expiry test.",
+            },
+        )
+        self.assertEqual(turn["source_scope_policy"]["scope_mode"], "source-scoped-soft")
+
+        unrelated_query = "completely unrelated quarterly cheese production figures"
+        live_retrieval = retrieve_corpus(
+            workspace,
+            query=unrelated_query,
+            top=2,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=False,
+            log_context=turn["log_context"],
+        )
+        self.assertEqual(
+            live_retrieval["source_scope_policy"]["scope_mode"], "source-scoped-soft"
+        )
+        self.assertEqual(
+            live_retrieval["source_scope_policy"]["target_source_id"], deck_source_id
+        )
+
+        answer_path = workspace.root / turn["answer_file_path"]
+        answer_path.write_text(
+            "The exact visual detail remains unresolved without inspecting the render.\n",
+            encoding="utf-8",
+        )
+        trace_report = trace_knowledge(
+            answer_file=turn["answer_file_path"],
+            top=1,
+            paths=workspace,
+        )
+        complete_ask_turn(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            inner_workflow_id="grounded-answer",
+            trace_ids=[trace_report.payload["trace_id"]],
+            answer_file_path=turn["answer_file_path"],
+            response_excerpt="The exact visual detail remains unresolved.",
+            status="answered",
+        )
+
+        committed_retrieval = retrieve_corpus(
+            workspace,
+            query=unrelated_query,
+            top=2,
+            graph_hops=0,
+            document_types=None,
+            source_ids=None,
+            include_renders=False,
+            log_context=turn["log_context"],
+        )
+        self.assertEqual(
+            committed_retrieval["source_scope_policy"].get("scope_mode", "global"),
+            "global",
+        )
+        self.assertNotEqual(
+            committed_retrieval["source_scope_policy"].get("target_source_id"),
+            deck_source_id,
+        )
+        self.assertNotEqual(
+            committed_retrieval["reference_resolution"].get("resolved_source_id"),
+            deck_source_id,
+        )
 
     def test_commit_rejects_grounded_source_scope_without_target_support(self) -> None:
         workspace = self.make_workspace()

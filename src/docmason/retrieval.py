@@ -1755,6 +1755,32 @@ def _turn_record_from_log_payload(
     return {}
 
 
+# Turn states whose ask-owned scope may still govern new retrieval work.
+# Once a turn commits (`committed` / `completed` / boundary closure), its
+# reference narrowing belongs to that finished turn and must not leak into
+# later commands that merely share the conversation state.
+_LIVE_TURN_SCOPE_STATES = frozenset(
+    {
+        "opened",
+        "prepared",
+        "awaiting-confirmation",
+        "waiting-shared-job",
+    }
+)
+
+
+def _turn_scope_is_live(record: dict[str, Any]) -> bool:
+    """Return whether the turn is still live enough to govern new retrieval scope."""
+    if not isinstance(record, dict) or not record:
+        return False
+    turn_state = record.get("turn_state")
+    if not isinstance(turn_state, str) or not turn_state:
+        # Loaded turn records backfill turn_state; treat a missing value as live
+        # so partially-hydrated same-turn contexts keep their designed narrowing.
+        return True
+    return turn_state in _LIVE_TURN_SCOPE_STATES
+
+
 def _turn_record_from_log_context(
     paths: WorkspacePaths,
     log_context: dict[str, str] | None,
@@ -3323,6 +3349,10 @@ def retrieve_corpus(
         else None
     )
     turn_record = _turn_record_from_log_context(paths, effective_log_context)
+    if not _turn_scope_is_live(turn_record):
+        # The bound turn already committed: drop its ask-owned scope so this
+        # retrieval resolves references from the query alone (issue #3).
+        turn_record = {}
     source_scope_intent = _source_scope_intent_from_record(turn_record)
     memory_profile = infer_memory_query_profile(query, question_domain=effective_question_domain)
     retrieval_data = load_retrieval_data(paths, target=target)
