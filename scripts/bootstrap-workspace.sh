@@ -20,12 +20,10 @@ for arg in "$@"; do
   esac
 done
 
+# Log lines always go to stderr: several logging functions run inside command
+# substitution, where stdout is reserved for their return value.
 log() {
-  if [[ -n "$JSON_FLAG" ]]; then
-    printf '%s\n' "$*" >&2
-  else
-    printf '%s\n' "$*"
-  fi
+  printf '%s\n' "$*" >&2
 }
 
 json_escape() {
@@ -246,18 +244,36 @@ validate_bootstrap_uv_installer_url() {
     "The controlled UV bootstrap asset URL must remain an official Astral HTTPS installer URL."
 }
 
+resolve_installed_bootstrap_uv() {
+  # The official installer names the binary `uv.exe` on Windows hosts
+  # (including Git Bash / MSYS), so probe both spellings in both layouts.
+  local unmanaged_dir="$1"
+  local candidate
+  # `.exe` candidates come first: MSYS `test -x` resolves `uv` to `uv.exe`,
+  # but executing the extensionless spelling still fails, so prefer the real
+  # file name. The `.exe` names simply never exist on non-Windows hosts.
+  for candidate in \
+    "$unmanaged_dir/uv.exe" \
+    "$unmanaged_dir/uv" \
+    "$unmanaged_dir/bin/uv.exe" \
+    "$unmanaged_dir/bin/uv"
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 install_controlled_bootstrap_uv() {
   local cache_root="$1"
   local installer_path="$cache_root/uv-installer.sh"
   local unmanaged_dir="$cache_root/uv-unmanaged"
-  local uv_bin="$unmanaged_dir/uv"
+  local uv_bin=""
 
-  if [[ -x "$uv_bin" ]]; then
+  if uv_bin="$(resolve_installed_bootstrap_uv "$unmanaged_dir")"; then
     printf '%s\n' "$uv_bin"
-    return 0
-  fi
-  if [[ -x "$unmanaged_dir/bin/uv" ]]; then
-    printf '%s\n' "$unmanaged_dir/bin/uv"
     return 0
   fi
 
@@ -273,13 +289,13 @@ install_controlled_bootstrap_uv() {
 
   log "Installing the controlled UV bootstrap asset..."
   mkdir -p "$unmanaged_dir"
-  UV_UNMANAGED_INSTALL="$unmanaged_dir" UV_NO_MODIFY_PATH=1 sh "$installer_path" \
+  # Send the installer's stdout to stderr: this function runs inside command
+  # substitution, and stdout is reserved for the resolved uv path.
+  UV_UNMANAGED_INSTALL="$unmanaged_dir" UV_NO_MODIFY_PATH=1 sh "$installer_path" 1>&2 \
     || fail_last_resort "Could not install the controlled UV bootstrap asset."
 
-  if [[ ! -x "$uv_bin" && -x "$unmanaged_dir/bin/uv" ]]; then
-    uv_bin="$unmanaged_dir/bin/uv"
-  fi
-  [[ -x "$uv_bin" ]] \
+  uv_bin="$(resolve_installed_bootstrap_uv "$unmanaged_dir" || true)"
+  [[ -n "$uv_bin" && -x "$uv_bin" ]] \
     || fail_last_resort \
       "The controlled UV bootstrap asset did not produce a runnable `uv` binary."
   printf '%s\n' "$uv_bin"
