@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import site
+import stat
 import subprocess
 import sys
 import tempfile
@@ -993,10 +994,26 @@ def ensure_python_pip(
     )
 
 
+def _is_windows_junction(path: Path) -> bool:
+    """Return whether ``path`` is an NTFS junction (directory reparse point)."""
+    if os.name != "nt":
+        return False
+    try:
+        reparse_tag = os.lstat(path).st_reparse_tag
+    except (OSError, AttributeError):
+        return False
+    return reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+
+
 def remove_generated_path(path: Path) -> None:
     """Remove a generated file, directory, or symlink so it can be recreated cleanly."""
     if path.is_symlink() or path.is_file():
         path.unlink()
+        return
+    if _is_windows_junction(path):
+        # A junction is a link, not a real tree: rmdir removes the link only,
+        # while shutil.rmtree refuses reparse points outright.
+        os.rmdir(path)
         return
     if path.is_dir():
         shutil.rmtree(path)
@@ -1013,6 +1030,24 @@ def skill_shim_sources(paths: WorkspacePaths) -> list[Path]:
             f"Cannot generate repo-local skill shims because skill names collide: {duplicate_list}."
         )
     return directories
+
+
+def _link_skill_shim(source_dir: Path, destination: Path, relative_target: str) -> None:
+    """Link one shim entry, preferring a relative symlink with a junction fallback.
+
+    On Windows, directory symlinks require Developer Mode or elevation
+    (WinError 1314). NTFS junctions need no privilege, so fall back to a
+    junction pointing at the resolved skill directory.
+    """
+    try:
+        os.symlink(relative_target, destination, target_is_directory=True)
+        return
+    except OSError:
+        if os.name != "nt":
+            raise
+    import _winapi
+
+    _winapi.CreateJunction(str(source_dir.resolve()), str(destination))
 
 
 def sync_skill_shim_root(root: Path, skill_directories: list[Path]) -> list[Path]:
@@ -1036,9 +1071,18 @@ def sync_skill_shim_root(root: Path, skill_directories: list[Path]) -> list[Path
                 generated.append(destination)
                 continue
             destination.unlink()
+        elif _is_windows_junction(destination):
+            try:
+                junction_current = destination.resolve() == source_dir.resolve()
+            except OSError:
+                junction_current = False
+            if junction_current:
+                generated.append(destination)
+                continue
+            os.rmdir(destination)
         elif destination.exists():
             remove_generated_path(destination)
-        os.symlink(relative_target, destination)
+        _link_skill_shim(source_dir, destination, relative_target)
         generated.append(destination)
     return generated
 
@@ -4602,7 +4646,10 @@ def build_claude_project_memory(
 ) -> str:
     """Render the generated Claude project-memory file from canonical skills."""
     skill_imports = [
-        f"@../../{workflow.skill_path.relative_to(paths.root)}" for workflow in workflow_metadata
+        # POSIX separators keep the generated @-import lines portable when the
+        # adapter is generated on Windows.
+        f"@../../{workflow.skill_path.relative_to(paths.root).as_posix()}"
+        for workflow in workflow_metadata
     ]
     lines = [
         "# DocMason Claude Project Memory",
