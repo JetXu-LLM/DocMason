@@ -458,6 +458,59 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.assertFalse(second.payload["rebuild_telemetry"]["scoped_contract_repair_used"])
         self.assertIn("Rebuild telemetry: cause=none", "\n".join(second.lines))
 
+    def test_overlay_only_change_republishes_without_source_delta(self) -> None:
+        from docmason.commands import sync_workspace
+        from docmason.semantic_overlays import write_semantic_overlay
+
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+
+        baseline = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(baseline.payload["sync_status"], "valid")
+        self.assertTrue(baseline.payload["publish_skipped"])
+
+        source_dir = workspace.knowledge_base_staging_dir / "sources" / source_ids[0]
+        evidence_manifest = read_json(source_dir / "evidence_manifest.json")
+        unit_id = str(evidence_manifest["units"][0]["unit_id"])
+        write_semantic_overlay(
+            source_dir,
+            {
+                "unit_id": unit_id,
+                "origin": "sync-hybrid",
+                "derivation_mode": "agent-authored",
+                "eligible_reason": "diagram-or-ui-page",
+                "covered_slots": ["page-summary"],
+                "blocked_slots": [],
+                "consumed_inputs": {"render_assets": [], "focus_render_assets": []},
+                "semantic_labels": [
+                    {"label": "Overlay-only publish regression fixture"}
+                ],
+                "artifact_annotations": [],
+                "cross_region_relations": [],
+                "uncertainty_notes": [],
+            },
+        )
+
+        overlay_sync = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(overlay_sync.payload["sync_status"], "valid")
+        self.assertFalse(overlay_sync.payload["publish_skipped"])
+        self.assertTrue(overlay_sync.payload["published"])
+        published_overlay_path = (
+            workspace.knowledge_base_current_dir
+            / "sources"
+            / source_ids[0]
+            / "semantic_overlay"
+            / f"{unit_id}.json"
+        )
+        self.assertTrue(published_overlay_path.exists())
+
+        settled = sync_workspace(workspace, autonomous=False)
+        self.assertEqual(settled.payload["sync_status"], "valid")
+        self.assertTrue(settled.payload["publish_skipped"])
+
     def test_sync_repairs_staging_artifact_contract_without_full_rebuild(self) -> None:
         from docmason.commands import sync_workspace
 

@@ -3622,6 +3622,25 @@ def semantic_evidence_signature(
     return hashlib.sha256(str(payload).encode("utf-8")).hexdigest()
 
 
+def semantic_overlay_publish_signature(root_dir: Path) -> str:
+    """Digest all semantic-overlay sidecars under one knowledge-base root.
+
+    Overlay sidecars are additive and do not change the source inventory
+    signature, so publication skip decisions compare this digest between
+    staging and published truth to detect overlay-only deltas.
+    """
+    sources_dir = root_dir / "sources"
+    entries: list[tuple[str, str]] = []
+    if sources_dir.is_dir():
+        for overlay_path in sorted(sources_dir.glob("*/semantic_overlay/*.json")):
+            try:
+                digest = hashlib.sha256(overlay_path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            entries.append((overlay_path.relative_to(sources_dir).as_posix(), digest))
+    return hashlib.sha256(str(entries).encode("utf-8")).hexdigest()
+
+
 def _prune_source_related_sources(
     related_sources: Any,
     *,
@@ -6618,16 +6637,21 @@ def sync_workspace(
         lane_b_follow_up: dict[str, Any] = {}
         lane_b_follow_up_summary: dict[str, Any] = {}
         if validation_report["status"] in {"valid", "warnings"}:
+            staged_overlays_match_published = semantic_overlay_publish_signature(
+                paths.knowledge_base_staging_dir
+            ) == semantic_overlay_publish_signature(paths.knowledge_base_current_dir)
             if (
                 not rebuild_required
                 and int(auto_repairs.get("repair_count", 0) or 0) == 0
                 and int(interaction_snapshot.get("pending_promotion_count", 0) or 0) == 0
                 and state.get("published_source_signature") == current_signature
+                and staged_overlays_match_published
             ):
                 publish_skipped = True
                 publish_skip_reason = (
-                    "Published truth already matches the current source signature and no "
-                    "interaction promotion or repair changed publishable state."
+                    "Published truth already matches the current source signature, staged "
+                    "semantic overlays match published truth, and no interaction promotion "
+                    "or repair changed publishable state."
                 )
                 autonomous_steps.append(
                     {
