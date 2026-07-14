@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
+import subprocess
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -66,6 +68,186 @@ def _file_count(path: Path) -> int:
     return sum(1 for item in path.rglob("*") if item.is_file())
 
 
+def _snapshot_tree_stats(path: Path) -> tuple[set[str], int, int]:
+    """Return inventory and logical file cost in one metadata walk."""
+    inventory: set[str] = set()
+    file_count = 0
+    logical_bytes = 0
+    for item in path.rglob("*"):
+        if item.is_symlink():
+            inventory.add(str(item.relative_to(path)))
+            continue
+        if not item.is_file():
+            continue
+        inventory.add(str(item.relative_to(path)))
+        file_count += 1
+        logical_bytes += item.stat().st_size
+    return inventory, file_count, logical_bytes
+
+
+def _snapshot_tree_cost(path: Path) -> tuple[int, int, int]:
+    """Return entry count, regular-file count, and logical bytes without path materialization."""
+    inventory_entries = 0
+    file_count = 0
+    logical_bytes = 0
+    for item in path.rglob("*"):
+        if item.is_symlink():
+            inventory_entries += 1
+            continue
+        if not item.is_file():
+            continue
+        inventory_entries += 1
+        file_count += 1
+        logical_bytes += item.stat().st_size
+    return inventory_entries, file_count, logical_bytes
+
+
+def _darwin_clone_tree(source: Path, target: Path) -> bool:
+    """Atomically clone an APFS directory hierarchy with the native syscall."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    clonefile = libc.clonefile
+    clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    clonefile.restype = ctypes.c_int
+    return bool(clonefile(os.fsencode(source), os.fsencode(target), 0) == 0)
+
+
+def clone_or_copy_path(source: Path, target: Path) -> dict[str, Any]:
+    """Clone one file or tree when supported, with a verified safe-copy fallback."""
+    _remove_path(target)
+    method = "copy"
+    clone_strategy: str | None = None
+    if platform.system() == "Darwin":
+        try:
+            cloned = _darwin_clone_tree(source, target)
+        except (AttributeError, OSError):
+            cloned = False
+        if cloned:
+            method = "apfs-clone"
+            clone_strategy = "clonefile"
+    elif platform.system() == "Linux":
+        result = subprocess.run(
+            ["cp", "--reflink=always", "-a", str(source), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            method = "linux-reflink"
+            clone_strategy = "cp-reflink"
+    if not target.exists():
+        if source.is_dir():
+            shutil.copytree(source, target, symlinks=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target, follow_symlinks=False)
+
+    if source.is_dir():
+        source_inventory, file_count, logical_bytes = _snapshot_tree_stats(source)
+        target_inventory, target_file_count, target_logical_bytes = _snapshot_tree_stats(target)
+        valid = (
+            source_inventory == target_inventory
+            and file_count == target_file_count
+            and logical_bytes == target_logical_bytes
+        )
+        inventory_entries = len(source_inventory)
+    else:
+        source_stat = source.stat()
+        target_stat = target.stat()
+        file_count = 1
+        logical_bytes = source_stat.st_size
+        inventory_entries = 1
+        valid = source_stat.st_size == target_stat.st_size
+    if not valid:
+        _remove_path(target)
+        raise ValueError(f"Clone/copy verification failed for `{source}`.")
+    cloned = method in {"apfs-clone", "linux-reflink"}
+    return {
+        "method": method,
+        "clone_strategy": clone_strategy,
+        "files_cloned": file_count if cloned else 0,
+        "bytes_cloned": logical_bytes if cloned else 0,
+        "files_copied": 0 if cloned else file_count,
+        "bytes_copied": 0 if cloned else logical_bytes,
+        "inventory_entries": inventory_entries,
+    }
+
+
+def copy_snapshot_tree(source: Path, target: Path) -> dict[str, Any]:
+    """Materialize a publish candidate with clone/reflink/copy fallback telemetry."""
+    _remove_path(target)
+    method = "copytree"
+    clone_strategy: str | None = None
+    if platform.system() == "Darwin":
+        try:
+            native_cloned = _darwin_clone_tree(source, target)
+        except (AttributeError, OSError):
+            native_cloned = False
+        if native_cloned:
+            method = "apfs-clone"
+            clone_strategy = "clonefile"
+        else:
+            _remove_path(target)
+            result = subprocess.run(
+                ["/bin/cp", "-cR", str(source), str(target)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                method = "apfs-clone"
+                clone_strategy = "cp-clone"
+            else:
+                _remove_path(target)
+    elif platform.system() == "Linux":
+        result = subprocess.run(
+            ["cp", "--reflink=always", "-a", str(source), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            method = "linux-reflink"
+            clone_strategy = "cp-reflink"
+        else:
+            _remove_path(target)
+    if not target.exists():
+        shutil.copytree(source, target, symlinks=True)
+
+    required = {
+        "catalog.json",
+        "coverage_manifest.json",
+        "graph_edges.json",
+        "pending_work.json",
+        "hybrid_work.json",
+        "publish_manifest.json",
+        "validation_report.json",
+    }
+    source_inventory, file_count, logical_bytes = _snapshot_tree_stats(source)
+    target_inventory, target_file_count, target_logical_bytes = _snapshot_tree_stats(target)
+    if (
+        source_inventory != target_inventory
+        or file_count != target_file_count
+        or logical_bytes != target_logical_bytes
+        or not required.issubset(target_inventory)
+    ):
+        _remove_path(target)
+        raise ValueError("Publish candidate failed root-manifest or file-inventory validation.")
+    inventory_entries = len(source_inventory)
+
+    cloned = method in {"apfs-clone", "linux-reflink"}
+    return {
+        "method": method,
+        "clone_strategy": clone_strategy,
+        "files_cloned": file_count if cloned else 0,
+        "bytes_cloned": logical_bytes if cloned else 0,
+        "files_copied": 0 if cloned else file_count,
+        "bytes_copied": 0 if cloned else logical_bytes,
+        "inventory_entries": inventory_entries,
+    }
+
+
 def build_snapshot_id(validation_report: dict[str, Any]) -> str:
     """Build a logical publish-generation identifier."""
     source_signature = str(validation_report.get("source_signature") or "unknown")
@@ -90,7 +272,7 @@ def _current_hidden_publish_root(paths: WorkspacePaths) -> Path | None:
         resolved = current_path.resolve(strict=True)
     except FileNotFoundError:
         return None
-    if resolved.parent == paths.knowledge_base_published_dir:
+    if resolved.parent.resolve() == paths.knowledge_base_published_dir.resolve():
         return resolved
     return None
 
@@ -110,6 +292,31 @@ def _switch_current_to_root(paths: WorkspacePaths, target_root: Path) -> Path | 
 
     os.replace(temp_link, current_path)
     return backup_dir
+
+
+def _restore_current_after_failed_switch(
+    paths: WorkspacePaths,
+    *,
+    previous_hidden_root: Path | None,
+    legacy_backup_dir: Path | None,
+) -> None:
+    """Restore the exact pre-publication current surface after a failed commit."""
+    current_path = paths.knowledge_base_current_dir
+    if current_path.exists() or current_path.is_symlink():
+        _remove_path(current_path)
+    if legacy_backup_dir is not None and legacy_backup_dir.exists():
+        os.replace(legacy_backup_dir, current_path)
+        return
+    if previous_hidden_root is not None and previous_hidden_root.exists():
+        temporary_link = paths.knowledge_base_dir / f".current-rollback-{uuid.uuid4().hex}"
+        target = Path(
+            os.path.relpath(
+                previous_hidden_root.resolve(),
+                paths.knowledge_base_dir.resolve(),
+            )
+        )
+        os.symlink(target, temporary_link)
+        os.replace(temporary_link, current_path)
 
 
 def _normalize_interaction_manifest(root: Path) -> None:
@@ -631,7 +838,15 @@ def publish_staging_snapshot(
         paths.knowledge_base_published_dir.mkdir(parents=True, exist_ok=True)
         previous_hidden_root = _current_hidden_publish_root(paths)
         _remove_path(target_root)
-        shutil.copytree(paths.knowledge_base_staging_dir, target_root, symlinks=True)
+        publish_copy = copy_snapshot_tree(paths.knowledge_base_staging_dir, target_root)
+        candidate_validation = read_json(target_root / "validation_report.json")
+        if (
+            candidate_validation.get("status") != validation_report.get("status")
+            or candidate_validation.get("source_signature")
+            != validation_report.get("source_signature")
+        ):
+            _remove_path(target_root)
+            raise ValueError("Publish candidate validation does not match validated staging.")
         _normalize_interaction_manifest(target_root)
 
         publish_manifest_path = target_root / "publish_manifest.json"
@@ -640,31 +855,78 @@ def publish_staging_snapshot(
         publish_manifest["validation_status"] = validation_report["status"]
         publish_manifest["snapshot_id"] = snapshot_id
         publish_manifest["published_source_signature"] = validation_report.get("source_signature")
+        publish_manifest["publish_copy"] = publish_copy
         write_json(publish_manifest_path, publish_manifest)
 
+        prior_pointer = (
+            paths.current_publish_pointer_path.read_bytes()
+            if paths.current_publish_pointer_path.exists()
+            else None
+        )
+        prior_ledger = (
+            paths.publish_ledger_path.read_bytes()
+            if paths.publish_ledger_path.exists()
+            else None
+        )
         backup_dir = _switch_current_to_root(paths, target_root)
+        try:
+            _write_publish_pointer(
+                paths,
+                snapshot_id=snapshot_id,
+                published_at=published_at,
+                published_source_signature=validation_report.get("source_signature"),
+                published_root=target_root,
+            )
+            append_publish_ledger_record(
+                paths,
+                snapshot_id=snapshot_id,
+                published_at=published_at,
+                published_source_signature=validation_report.get("source_signature"),
+                validation_status=validation_report.get("status"),
+                rebuild_cause=rebuild_cause,
+                publish_driver=publish_driver,
+            )
+        except Exception:
+            _restore_current_after_failed_switch(
+                paths,
+                previous_hidden_root=previous_hidden_root,
+                legacy_backup_dir=backup_dir,
+            )
+            if prior_pointer is None:
+                if paths.current_publish_pointer_path.exists():
+                    paths.current_publish_pointer_path.unlink()
+            else:
+                paths.current_publish_pointer_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.current_publish_pointer_path.write_bytes(prior_pointer)
+            if prior_ledger is None:
+                paths.publish_ledger_path.unlink(missing_ok=True)
+            else:
+                paths.publish_ledger_path.parent.mkdir(parents=True, exist_ok=True)
+                paths.publish_ledger_path.write_bytes(prior_ledger)
+            _remove_path(target_root)
+            raise
         if backup_dir is not None:
             _remove_path(backup_dir)
-        _write_publish_pointer(
-            paths,
-            snapshot_id=snapshot_id,
-            published_at=published_at,
-            published_source_signature=validation_report.get("source_signature"),
-            published_root=target_root,
-        )
         keep_roots = {target_root}
-        if previous_hidden_root is not None and previous_hidden_root == target_root:
-            keep_roots.add(previous_hidden_root)
-        _prune_published_roots(paths, keep_roots=keep_roots)
-        append_publish_ledger_record(
-            paths,
-            snapshot_id=snapshot_id,
-            published_at=published_at,
-            published_source_signature=validation_report.get("source_signature"),
-            validation_status=validation_report.get("status"),
-            rebuild_cause=rebuild_cause,
-            publish_driver=publish_driver,
-        )
+        cleanup: dict[str, Any]
+        try:
+            deleted_roots = _prune_published_roots(paths, keep_roots=keep_roots)
+            cleanup = {"status": "completed", "deleted_roots": deleted_roots}
+        except OSError as error:
+            cleanup = {
+                "status": "degraded",
+                "deleted_roots": [],
+                "error": str(error),
+            }
+        publish_manifest["publish_cleanup"] = cleanup
+        try:
+            write_json(publish_manifest_path, publish_manifest)
+        except OSError as error:
+            # Publication is already committed once `current`, the pointer, and the
+            # ledger agree. A best-effort cleanup annotation must never turn that
+            # successful commit into a reported failure that callers may retry.
+            cleanup["manifest_update"] = "degraded"
+            cleanup["manifest_error"] = str(error)
         return publish_manifest
 
 

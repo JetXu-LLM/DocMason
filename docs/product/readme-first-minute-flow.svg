@@ -74,7 +74,7 @@
     <g transform="translate(24,144)">
       <circle cx="11" cy="11" r="11" fill="#3B82F6"/>
       <text class="sn" x="11" y="11.5">2</text>
-      <text class="st" x="32" y="9">Open DocMason folder in Codex</text>
+      <text class="st" x="32" y="9">Open DocMason folder in ChatGPT Work</text>
       <text class="sd" x="32" y="25">Your AI agent is the runtime.</text>
     </g>
     <path class="lb" d="M 35 170 L 35 206" marker-end="url(#arr-b)"/>
@@ -122,7 +122,7 @@
     <g transform="translate(24,144)">
       <circle cx="11" cy="11" r="11" fill="#F59E0B"/>
       <text class="sn" x="11" y="11.5">2</text>
-      <text class="st" x="32" y="9">Open DocMason folder in Codex</text>
+      <text class="st" x="32" y="9">Open DocMason folder in ChatGPT Work</text>
       <text class="sd" x="32" y="25">Your AI agent is the runtime.</text>
     </g>
     <path class="la" d="M 35 170 L 35 206" marker-end="url(#arr-a)"/>
@@ -131,7 +131,7 @@
     <g transform="translate(24,214)">
       <circle cx="11" cy="11" r="11" fill="#F59E0B"/>
       <text class="sn" x="11" y="11.5">3</text>
-      <text class="st" x="32" y="9">Prepare and sync - send command to Codex</text>
+      <text class="st" x="32" y="9">Prepare and sync - ask ChatGPT Work</text>
       <rect class="bb" x="32" y="15" width="340" height="44" rx="6"/>
       <text class="bt" x="44" y="35">"Prepare the DocMason environment."</text>
       <text class="bt" x="44" y="51">"Build the knowledge base."</text>

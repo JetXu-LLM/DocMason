@@ -911,10 +911,18 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     case_id="ask-ready-grounded-answer",
                     family="ask-ready",
                     question="What does the project planning brief say about the project work plan?",
-                    semantic_analysis=self.semantic_analysis(
-                        question_class="answer",
-                        question_domain="workspace-corpus",
-                    ),
+                    semantic_analysis={
+                        **self.semantic_analysis(
+                            question_class="answer",
+                            question_domain="workspace-corpus",
+                        ),
+                        "work_brief": {
+                            "deliverable": {
+                                "kind": "answer",
+                                "medium": "chat-answer",
+                            }
+                        },
+                    },
                     expected_status="ready",
                     expected_answer_state="grounded",
                     expected_support_basis="kb-grounded",
@@ -931,6 +939,9 @@ class EvaluationRuntimeTests(unittest.TestCase):
                     },
                     expectations={
                         "final_turn_status": "answered",
+                        "work_brief_deliverable_kind": "answer",
+                        "work_brief_medium": "chat-answer",
+                        "new_retrieval_executed": True,
                         "reused_turn": False,
                         "query_session_count": 1,
                         "trace_count": 1,
@@ -998,7 +1009,21 @@ class EvaluationRuntimeTests(unittest.TestCase):
             run_label="Ask ready and reuse",
         )
 
-        self.assertEqual(run_payload["summary"]["overall_status"], "passed")
+        self.assertEqual(
+            run_payload["summary"]["overall_status"],
+            "passed",
+            json.dumps(
+                {
+                    case["case_id"]: [
+                        check
+                        for check in case.get("deterministic_checks", [])
+                        if not check.get("passed")
+                    ]
+                    for case in run_payload.get("cases", [])
+                },
+                indent=2,
+            ),
+        )
         cases = {case["case_id"]: case for case in run_payload["cases"]}
         ready_case = cases["ask-ready-grounded-answer"]
         reuse_case = cases["ask-reuse-same-question"]

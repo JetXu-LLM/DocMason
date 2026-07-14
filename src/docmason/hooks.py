@@ -1,11 +1,15 @@
-"""Internal handler for Claude Code hook events.
+"""Internal best-effort handler for ChatGPT Work/Codex and Claude Code hooks.
 
-This module processes Claude Code hook payloads received via stdin and writes
-structured JSONL mirror records to the runtime interaction-ingest directory.
-It is called by the committed hook shell scripts in ``.claude/hooks/`` and
-exposed through a hidden ``_hook`` CLI subcommand.
+This module translates host payloads into one shared semantic decision core and
+writes host-specific JSONL mirror records to the runtime interaction-ingest
+directory. It is called by the committed ``.codex/hooks/`` and
+``.claude/hooks/`` shell adapters and exposed through a hidden ``_hook`` CLI
+subcommand.
 
 Not a public command surface. This is internal plumbing.
+Hosts may skip project Hooks when the project or Hook definition is untrusted,
+disabled, or blocked by policy. Canonical workflow correctness must therefore
+never depend on this module running.
 
 Hook event types handled:
 - session (SessionStart + SessionEnd, distinguished by hook_event_name)
@@ -23,7 +27,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .project import append_jsonl
+from .conversation import (
+    bound_conversation_id_for_host,
+    claim_turn_closure_continuation,
+    load_conversation_record,
+)
+from .project import WorkspacePaths, append_jsonl
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -57,17 +66,36 @@ def _utc_now() -> str:
 def _resolve_workspace_root() -> Path:
     """Resolve the workspace root directory.
 
-    Uses ``$CLAUDE_PROJECT_DIR`` when available, otherwise falls back to CWD.
+    Uses the host-provided project root when available, otherwise falls back to CWD.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    project_dir = os.environ.get("DOCMASON_PROJECT_DIR") or os.environ.get(
+        "CLAUDE_PROJECT_DIR"
+    )
     if project_dir:
         return Path(project_dir)
     return Path.cwd()
 
 
+def _hook_host(payload: dict[str, Any] | None = None) -> str:
+    explicit = os.environ.get("DOCMASON_HOOK_HOST")
+    if explicit in {"codex", "chatgpt-work", "claude-code"}:
+        return "chatgpt-work" if explicit in {"codex", "chatgpt-work"} else explicit
+    if isinstance(payload, dict) and payload.get("host_provider") in {
+        "codex",
+        "chatgpt-work",
+        "claude-code",
+    }:
+        return (
+            "chatgpt-work"
+            if payload.get("host_provider") in {"codex", "chatgpt-work"}
+            else "claude-code"
+        )
+    return "claude-code" if os.environ.get("CLAUDE_PROJECT_DIR") else "chatgpt-work"
+
+
 def _mirror_root(workspace_root: Path) -> Path:
-    """Return the Claude Code mirror directory."""
-    return workspace_root / "runtime" / "interaction-ingest" / "claude-code"
+    """Return the host-specific interaction mirror directory."""
+    return workspace_root / "runtime" / "interaction-ingest" / _hook_host()
 
 
 def _mirror_path(workspace_root: Path, session_id: str) -> Path:
@@ -189,6 +217,10 @@ def _handle_prompt_submit(payload: dict[str, Any], workspace_root: Path) -> None
         "recorded_at": _utc_now(),
         "prompt": payload.get("prompt", ""),
         "permission_mode": payload.get("permission_mode", ""),
+        **_optional_record_fields(
+            payload,
+            ("attachments", "transcript_path", "model", "cwd"),
+        ),
     }
     _append_record(workspace_root, session_id, record)
 
@@ -250,7 +282,276 @@ _HANDLER_MAP = {
 }
 
 
-def handle_hook_event(event_name: str, stdin_text: str) -> None:
+def normalize_hook_context(
+    *,
+    host: str,
+    event_name: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Translate host protocol fields into the shared semantic hook input."""
+    normalized_host = "chatgpt-work" if host in {"codex", "chatgpt-work"} else "claude-code"
+    return {
+        "host": normalized_host,
+        "event_name": event_name,
+        "session_id": str(payload.get("session_id") or ""),
+        "native_turn_id": str(payload.get("turn_id") or ""),
+        "prompt": str(payload.get("prompt") or ""),
+        "last_assistant_message": str(payload.get("last_assistant_message") or ""),
+        "stop_hook_active": bool(payload.get("stop_hook_active", False)),
+    }
+
+
+def _linked_turn(
+    paths: WorkspacePaths,
+    context: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    session_id = str(context.get("session_id") or "")
+    if not session_id:
+        return None
+    provider = "codex" if context.get("host") == "chatgpt-work" else "claude-code"
+    identity = {
+        "host_provider": provider,
+        "host_thread_ref": session_id,
+        "host_identity_source": (
+            "codex_thread_id" if provider == "codex" else "claude_session_id"
+        ),
+        "host_identity_trust": "hook-payload",
+    }
+    conversation_id = bound_conversation_id_for_host(paths, host_identity=identity)
+    if conversation_id is None:
+        return None
+    conversation = load_conversation_record(paths, conversation_id)
+    turns = [turn for turn in conversation.get("turns", []) if isinstance(turn, dict)]
+    if not turns:
+        return None
+    native_turn_id = str(context.get("native_turn_id") or "")
+    if native_turn_id:
+        matches = [
+            turn
+            for turn in turns
+            if native_turn_id in {str(turn.get("native_turn_id") or ""), str(turn.get("turn_id"))}
+        ]
+        if len(matches) == 1:
+            return conversation_id, matches[0]
+    return conversation_id, turns[-1]
+
+
+def _artifact_exists(paths: WorkspacePaths, turn: dict[str, Any]) -> bool:
+    candidates = [turn.get("answer_file_path"), *turn.get("bundle_paths", [])]
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate:
+            continue
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = paths.root / path
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _current_prompt_matches_turn(
+    paths: WorkspacePaths,
+    context: dict[str, Any],
+    turn: dict[str, Any],
+) -> bool:
+    """Require the current host prompt to own the candidate closure turn."""
+    session_id = str(context.get("session_id") or "")
+    host = str(context.get("host") or "")
+    if not session_id or host not in {"chatgpt-work", "claude-code"}:
+        return False
+    mirror = paths.interaction_ingest_dir / host / f"{session_id}.jsonl"
+    try:
+        lines = mirror.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    prompt = ""
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(record, dict) or record.get("record_type") != "prompt-submit":
+            continue
+        prompt = str(record.get("prompt") or "").strip()
+        break
+    question = str(turn.get("user_question") or "").strip()
+    return bool(prompt and question and prompt == question)
+
+
+def evaluate_hook_decision(
+    paths: WorkspacePaths,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the host-neutral sensor decision without doing workflow work."""
+    linked = _linked_turn(paths, context)
+    linked_conversation_id = linked[0] if linked else ""
+    turn = linked[1] if linked else {}
+    turn_id = str(turn.get("turn_id") or "")
+    if context.get("event_name") == "UserPromptSubmit":
+        if not turn_id:
+            return {
+                "action": "allow",
+                "reason": "no-continuation-state",
+                "additional_context": "",
+                "linked_conversation_id": linked_conversation_id,
+                "linked_turn_id": "",
+            }
+        reminders = [
+            "DocMason continuation state (advisory; ignore for unrelated requests): "
+            f"the latest linked canonical turn is `{turn_id}`. Use this exact id as "
+            "`revision_of` only when the user explicitly revises that work."
+        ]
+        gate = turn.get("decision_frontier")
+        if isinstance(gate, dict) and gate.get("status") == "open":
+            option_summary = "; ".join(
+                f"{option.get('id')}={option.get('label')}"
+                for option in gate.get("options", [])
+                if isinstance(option, dict)
+                and option.get("id")
+                and option.get("label")
+            )
+            reminders.append(
+                f"Open decision gate `{gate.get('gate_id', '')}`: "
+                f"{gate.get('question', '')} "
+                + (
+                    f"Legal option ids are {option_summary}. "
+                    if option_summary
+                    else ""
+                )
+                + "If the user explicitly answers it, pass the exact gate id and either one "
+                "legal option id or an explicit free-form decision; otherwise leave it open."
+            )
+        accepted_scopes = [
+            str(scope.get("scope_id"))
+            for scope in turn.get("accepted_scopes", [])
+            if isinstance(scope, dict) and scope.get("status") == "accepted"
+        ]
+        if accepted_scopes:
+            reminders.append(
+                "For an explicit continuation, preserve accepted scopes unless an upstream "
+                "dependency makes one at-risk: "
+                + ", ".join(accepted_scopes)
+            )
+        return {
+            "action": "allow",
+            "reason": "prompt-context",
+            "additional_context": " ".join(reminders),
+            "linked_conversation_id": linked_conversation_id,
+            "linked_turn_id": turn_id,
+        }
+
+    allow = {
+        "action": "allow",
+        "reason": "stop-not-eligible",
+        "additional_context": "",
+        "linked_conversation_id": linked_conversation_id,
+        "linked_turn_id": turn_id,
+    }
+    if context.get("event_name") != "Stop" or context.get("stop_hook_active"):
+        return allow
+    if not linked or not turn_id:
+        return allow
+    if not _current_prompt_matches_turn(paths, context, turn):
+        return allow
+    if turn.get("committed_run_id") or turn.get("turn_state") != "prepared":
+        return allow
+    gate = turn.get("decision_frontier")
+    if isinstance(gate, dict) and gate.get("status") == "open":
+        return allow
+    if turn.get("attached_shared_job_ids") or turn.get("turn_state") == "waiting-shared-job":
+        return allow
+    if turn.get("status") in {"action-required", "blocked", "boundary", "completed"}:
+        return allow
+    if turn.get("scope_freshness") == "unresolved-target-freshness":
+        return allow
+    if turn.get("source_escalation_required") or turn.get("admissibility_repair"):
+        return allow
+    if turn.get("hybrid_refresh_triggered") and not turn.get(
+        "hybrid_refresh_completion_status"
+    ):
+        return allow
+    if not _artifact_exists(paths, turn):
+        return allow
+    support_basis = str(turn.get("support_basis") or "kb-grounded")
+    has_session_support = bool(turn.get("session_ids"))
+    evidence_items = (
+        turn.get("evidence_packet", {}).get("items", [])
+        if isinstance(turn.get("evidence_packet"), dict)
+        else []
+    )
+    has_external_support = bool(turn.get("support_manifest_path")) or any(
+        isinstance(item, dict)
+        and item.get("availability") == "available"
+        and item.get("authority") not in {"untrusted", "reference-only"}
+        for item in evidence_items
+    )
+    if support_basis == "mixed" and (not has_session_support or not has_external_support):
+        return allow
+    if support_basis == "external-source-verified" and not has_external_support:
+        return allow
+    if support_basis not in {
+        "mixed",
+        "external-source-verified",
+        "model-knowledge",
+    } and not has_session_support:
+        return allow
+    if any(
+        isinstance(item, dict)
+        and (
+            item.get("availability") != "available"
+            or item.get("freshness") in {"stale", "superseded", "unknown"}
+        )
+        for item in evidence_items
+    ):
+        return allow
+    if any(
+        isinstance(scope, dict) and scope.get("status") == "at-risk"
+        for scope in turn.get("accepted_scopes", [])
+    ):
+        return allow
+    if not claim_turn_closure_continuation(
+        paths,
+        conversation_id=linked_conversation_id,
+        turn_id=turn_id,
+        host=str(context.get("host") or ""),
+    ):
+        return allow
+    return {
+        **allow,
+        "action": "continue-once",
+        "reason": (
+            "Complete only the pending DocMason trace/finalize closure for the existing "
+            "answer. Do not sync, retrieve, broaden scope, or alter the business deliverable."
+        ),
+    }
+
+
+def serialize_hook_decision(
+    context: dict[str, Any],
+    decision: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Translate a semantic decision into the current host hook protocol."""
+    if context.get("event_name") == "Stop":
+        if decision.get("action") != "continue-once":
+            return None
+        return {"decision": "block", "reason": decision.get("reason", "")}
+    additional_context = str(decision.get("additional_context") or "")
+    if not additional_context:
+        return None
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": additional_context,
+        }
+    }
+
+
+def handle_hook_event(event_name: str, stdin_text: str) -> dict[str, Any] | None:
     """Parse the stdin JSON payload and dispatch to the correct handler.
 
     This is the main entry point called by the hidden ``_hook`` CLI subcommand.
@@ -259,10 +560,10 @@ def handle_hook_event(event_name: str, stdin_text: str) -> None:
     try:
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
     except (json.JSONDecodeError, ValueError):
-        return
+        return None
 
     if not isinstance(payload, dict):
-        return
+        return None
 
     workspace_root = _resolve_workspace_root()
 
@@ -287,6 +588,21 @@ def handle_hook_event(event_name: str, stdin_text: str) -> None:
         except (OSError, ValueError, TypeError):
             # Hooks must never crash. Swallow filesystem or data errors.
             pass
+    if hook_event_name not in {"UserPromptSubmit", "Stop"}:
+        return None
+    try:
+        context = normalize_hook_context(
+            host=_hook_host(payload),
+            event_name=hook_event_name,
+            payload=payload,
+        )
+        decision = evaluate_hook_decision(
+            WorkspacePaths(root=workspace_root),
+            context,
+        )
+        return serialize_hook_decision(context, decision)
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+        return None
 
 
 def run_hook_cli(event_name: str) -> int:
@@ -306,5 +622,7 @@ def run_hook_cli(event_name: str) -> int:
     except (OSError, ValueError):
         pass
 
-    handle_hook_event(event_name, stdin_text)
+    output = handle_hook_event(event_name, stdin_text)
+    if isinstance(output, dict):
+        sys.stdout.write(json.dumps(output, ensure_ascii=False) + "\n")
     return 0

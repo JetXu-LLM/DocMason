@@ -138,11 +138,11 @@ def _interaction_ingest_snapshot(paths: WorkspacePaths) -> dict[str, Any]:
     return interaction_ingest_snapshot(paths)
 
 
-def _maybe_reconcile_active_thread(paths: WorkspacePaths) -> None:
+def _maybe_reconcile_active_thread(paths: WorkspacePaths) -> dict[str, Any] | None:
     """Run active-thread reconciliation lazily so readiness paths avoid heavy imports."""
     from .interaction import maybe_reconcile_active_thread
 
-    maybe_reconcile_active_thread(paths)
+    return maybe_reconcile_active_thread(paths)
 
 
 def _coordination_payload(
@@ -213,11 +213,7 @@ def _active_front_door_context(paths: WorkspacePaths) -> dict[str, Any]:
         else None
     )
     warning: dict[str, Any] | None = None
-    if (
-        isinstance(host_thread_ref, str)
-        and host_thread_ref
-        and front_door_state != "canonical-ask"
-    ):
+    if isinstance(host_thread_ref, str) and host_thread_ref and front_door_state != "canonical-ask":
         warning = {
             "code": "noncanonical-operator-direct",
             "detail": (
@@ -323,7 +319,7 @@ def _reconcile_command_context(
     reconciliation_state = "ready"
     reconciliation_result = None
     try:
-        _maybe_reconcile_active_thread(paths)
+        reconciliation_result = _maybe_reconcile_active_thread(paths)
     except LeaseConflictError as exc:
         reconciliation_state = "blocked" if mutating else "warning"
         coordination = _coordination_from_lease_conflict(
@@ -586,9 +582,7 @@ def _compact_trace_segment(segment: dict[str, Any]) -> dict[str, Any]:
         "supporting_source_ids": _string_list(segment.get("supporting_source_ids")),
         "supporting_unit_ids": _string_list(segment.get("supporting_unit_ids")),
         "supporting_artifact_ids": _string_list(segment.get("supporting_artifact_ids")),
-        "supporting_overlay_unit_ids": _string_list(
-            segment.get("supporting_overlay_unit_ids")
-        ),
+        "supporting_overlay_unit_ids": _string_list(segment.get("supporting_overlay_unit_ids")),
         "support_lane_counts": {
             "kb": _list_count(support_lanes.get("kb")),
             "interaction": _list_count(support_lanes.get("interaction")),
@@ -1152,10 +1146,7 @@ def _settle_sync_shared_job(
             job_id,
             result={
                 "status": "blocked",
-                "detail": (
-                    "Unexpected sync failure: "
-                    f"{type(unexpected_error).__name__}: {detail}"
-                ),
+                "detail": (f"Unexpected sync failure: {type(unexpected_error).__name__}: {detail}"),
             },
         )
     elif isinstance(result, dict):
@@ -1175,9 +1166,7 @@ def _settle_sync_shared_job(
                 job_id,
                 result={
                     "status": "blocked",
-                    "detail": (
-                        f"Sync returned non-terminal status: {result.get('status')}"
-                    ),
+                    "detail": (f"Sync returned non-terminal status: {result.get('status')}"),
                 },
             )
     _record_shared_job_settlement(workspace, shared_job)
@@ -1376,8 +1365,7 @@ def _provision_managed_python(
     if executable is None:
         return (
             None,
-            "uv reported success, but no repo-local managed Python 3.13 executable "
-            "was found.",
+            "uv reported success, but no repo-local managed Python 3.13 executable was found.",
         )
     _refresh_symlink(workspace.toolchain_python_current_dir, executable.parent.parent)
     return (
@@ -1464,8 +1452,7 @@ def _steady_state_pdf_renderer_snapshot(
         return {
             "ready": False,
             "detail": (
-                "The repo-local `.venv` PDF renderer probe returned non-JSON output during "
-                "prepare."
+                "The repo-local `.venv` PDF renderer probe returned non-JSON output during prepare."
             ),
             "missing": [],
         }
@@ -1636,9 +1623,7 @@ def _prepare_host_access_snapshot(
     machine_reasons = machine_baseline.get("host_access_reasons")
     if isinstance(machine_reasons, list):
         reasons.extend(
-            str(item)
-            for item in machine_reasons
-            if isinstance(item, str) and item.strip()
+            str(item) for item in machine_reasons if isinstance(item, str) and item.strip()
         )
         host_access_required = host_access_required or bool(
             machine_baseline.get("host_access_required")
@@ -1821,9 +1806,7 @@ def _machine_baseline_snapshot(
         guidance = _codex_full_access_guidance()
         status = "host-access-upgrade-required"
         if permission_mode == "default-permissions":
-            detail = (
-                f"{baseline_gap_detail} The current thread is still in `Default permissions`."
-            )
+            detail = f"{baseline_gap_detail} The current thread is still in `Default permissions`."
         else:
             detail = f"{baseline_gap_detail} The current turn does not expose `Full access` yet."
         host_access_required = True
@@ -1956,12 +1939,8 @@ def write_bootstrap_ready_marker(
         "office_probe_contract": office_snapshot.get("probe_contract"),
         "libreoffice_candidate_binary": office_snapshot.get("candidate_binary"),
         "libreoffice_validation_detail": office_snapshot.get("validation_detail"),
-        "libreoffice_detected_but_unusable": bool(
-            office_snapshot.get("detected_but_unusable")
-        ),
-        "libreoffice_blocked_by_host_access": bool(
-            office_snapshot.get("blocked_by_host_access")
-        ),
+        "libreoffice_detected_but_unusable": bool(office_snapshot.get("detected_but_unusable")),
+        "libreoffice_blocked_by_host_access": bool(office_snapshot.get("blocked_by_host_access")),
         "libreoffice_validation_launcher": office_snapshot.get("validation_launcher"),
         "libreoffice_origin": (
             "system-discovery"
@@ -2320,12 +2299,7 @@ def prepare_workspace(
         )
         prepare_job_info = ensure_shared_job(
             workspace,
-            job_key=(
-                "prepare:"
-                f"{workspace.root}:"
-                "host-access-upgrade:"
-                f"{host_access_signature}"
-            ),
+            job_key=(f"prepare:{workspace.root}:host-access-upgrade:{host_access_signature}"),
             job_family="prepare",
             criticality="answer-critical",
             scope={
@@ -2369,9 +2343,7 @@ def prepare_workspace(
             "workspace_write_network_access": prepare_host_access.get(
                 "workspace_write_network_access"
             ),
-            "sandbox_writable_roots": list(
-                prepare_host_access.get("sandbox_writable_roots") or []
-            ),
+            "sandbox_writable_roots": list(prepare_host_access.get("sandbox_writable_roots") or []),
             "host_access_required": True,
             "host_access_guidance": prepare_host_access.get("host_access_guidance"),
             "host_access_reasons": list(prepare_host_access["host_access_reasons"]),
@@ -2559,8 +2531,7 @@ def prepare_workspace(
     entrypoint_health = str(entrypoint_probe.get("entrypoint_health") or "module-import-failed")
     if entrypoint_health != "ready":
         startup_reason = str(
-            entrypoint_probe.get("detail")
-            or "The repo-local DocMason entrypoint is not healthy."
+            entrypoint_probe.get("detail") or "The repo-local DocMason entrypoint is not healthy."
         )
         payload = {
             "status": ACTION_REQUIRED,
@@ -2672,9 +2643,9 @@ def prepare_workspace(
             if confirmation_kind == "host-access-upgrade"
             else "docmason prepare --yes"
         )
-        requires_confirmation = bool(
-            prepare_requirements.get("host_access_upgrade_required")
-        ) or not assume_yes
+        requires_confirmation = (
+            bool(prepare_requirements.get("host_access_upgrade_required")) or not assume_yes
+        )
         prepare_job_info = ensure_shared_job(
             workspace,
             job_key=(
@@ -2729,12 +2700,8 @@ def prepare_workspace(
                 "machine_baseline_status": machine_baseline.get("status"),
                 "bootstrap_source": bootstrap_source,
                 "host_execution": host_execution,
-                "workspace_write_network_access": _host_execution_network_access(
-                    host_execution
-                ),
-                "sandbox_writable_roots": list(
-                    host_execution.get("sandbox_writable_roots") or []
-                ),
+                "workspace_write_network_access": _host_execution_network_access(host_execution),
+                "sandbox_writable_roots": list(host_execution.get("sandbox_writable_roots") or []),
                 "host_access_required": bool(machine_baseline.get("host_access_required")),
                 "host_access_guidance": machine_baseline.get("host_access_guidance"),
                 "host_access_reasons": list(machine_baseline.get("host_access_reasons") or []),
@@ -2825,10 +2792,9 @@ def prepare_workspace(
                 actions_performed.append(detail)
                 office_snapshot = office_renderer_snapshot(workspace)
                 if not bool(office_snapshot.get("ready")):
-                    validation_detail = (
-                        office_snapshot.get("validation_detail")
-                        or office_snapshot.get("detail")
-                    )
+                    validation_detail = office_snapshot.get(
+                        "validation_detail"
+                    ) or office_snapshot.get("detail")
                     actions_skipped.append(
                         "LibreOffice repair completed, but the renderer is still not usable. "
                         f"Details: {validation_detail}"
@@ -2878,9 +2844,11 @@ def prepare_workspace(
             office_snapshot=office_snapshot,
             host_execution=host_execution,
         )
-    office_renderer_gap = bool(office_snapshot["required"]) and not bool(
-        office_snapshot["ready"]
-    ) and not bool(machine_baseline.get("applicable"))
+    office_renderer_gap = (
+        bool(office_snapshot["required"])
+        and not bool(office_snapshot["ready"])
+        and not bool(machine_baseline.get("applicable"))
+    )
     if bool(machine_baseline.get("applicable")) and not bool(machine_baseline.get("ready")):
         status = DEGRADED
         next_steps.append(
@@ -2983,9 +2951,7 @@ def prepare_workspace(
         "actions_skipped": actions_skipped,
         "manual_recovery_doc": manual_workspace_recovery_doc(),
         "control_plane": (
-            shared_job_control_plane_payload(prepare_shared_job)
-            if prepare_shared_job
-            else {}
+            shared_job_control_plane_payload(prepare_shared_job) if prepare_shared_job else {}
         ),
         "environment": {
             "python_executable": str(managed_python),
@@ -3011,10 +2977,7 @@ def prepare_workspace(
         editable_detail,
     ]
     lines.append(f"Bootstrap source: {bootstrap_source}")
-    lines.append(
-        "Machine baseline: "
-        f"{machine_baseline.get('status', 'unknown')}"
-    )
+    lines.append(f"Machine baseline: {machine_baseline.get('status', 'unknown')}")
     if not bool(machine_baseline.get("ready")):
         lines.append(str(machine_baseline.get("detail")))
     elif office_renderer_gap:
@@ -3022,6 +2985,92 @@ def prepare_workspace(
     if next_steps:
         lines.append(f"Next steps: {', '.join(deduplicate(next_steps))}")
     return make_report(status, prepare_payload, lines)
+
+
+def _hook_registration_commands(value: Any) -> list[str]:
+    """Return command strings from one Codex/Claude hook-event registration."""
+    if not isinstance(value, list):
+        return []
+    commands: list[str] = []
+    for registration in value:
+        if not isinstance(registration, dict):
+            continue
+        hooks = registration.get("hooks")
+        if not isinstance(hooks, list):
+            continue
+        for hook in hooks:
+            if not isinstance(hook, dict) or hook.get("type") != "command":
+                continue
+            command = hook.get("command")
+            if isinstance(command, str) and command.strip():
+                commands.append(command)
+    return commands
+
+
+def _configured_hook_diagnostic(
+    *,
+    config_path: Path,
+    hooks_dir: Path,
+    required_events: dict[str, str],
+    host_label: str,
+    activation_guidance: str,
+) -> tuple[str, str, str | None]:
+    """Validate authored Hook files without pretending to know host trust state."""
+    try:
+        payload = read_json(config_path)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError) as exc:
+        return (
+            DEGRADED,
+            f"{host_label} hook configuration is not valid JSON: {exc}.",
+            (
+                f"Repair {config_path.relative_to(config_path.parents[1])} "
+                "and rerun `docmason doctor`."
+            ),
+        )
+
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return (
+            DEGRADED,
+            f"{host_label} hook configuration has no valid `hooks` object.",
+            f"Repair {config_path} and rerun `docmason doctor`.",
+        )
+
+    issues: list[str] = []
+    required_scripts = sorted(set(required_events.values()))
+    for event_name, script_name in required_events.items():
+        commands = _hook_registration_commands(hooks.get(event_name))
+        if not commands:
+            issues.append(f"missing `{event_name}` registration")
+        elif not any(script_name in command for command in commands):
+            issues.append(f"`{event_name}` does not call `{script_name}`")
+
+    missing_scripts = [name for name in required_scripts if not (hooks_dir / name).is_file()]
+    if missing_scripts:
+        issues.append(f"missing scripts: {', '.join(missing_scripts)}")
+    non_executable = [
+        name
+        for name in required_scripts
+        if (hooks_dir / name).is_file() and not os.access(hooks_dir / name, os.X_OK)
+    ]
+    if non_executable:
+        issues.append(f"non-executable scripts: {', '.join(non_executable)}")
+
+    if issues:
+        return (
+            DEGRADED,
+            f"{host_label} hook contract is incomplete: {'; '.join(issues)}.",
+            f"Repair {config_path} and {hooks_dir}, then rerun `docmason doctor`.",
+        )
+    return (
+        READY,
+        (
+            f"{host_label} hook contract has all {len(required_events)} required event "
+            f"registrations and {len(required_scripts)} executable scripts. This proves local "
+            f"configuration only; runtime activation remains host-owned. {activation_guidance}"
+        ),
+        None,
+    )
 
 
 def doctor_workspace(
@@ -3344,35 +3393,28 @@ def doctor_workspace(
             ),
         )
 
-    # Claude Code hook configuration check.
+    # Claude Code hook configuration check. It remains an optional host surface,
+    # but a present configuration must be complete and parseable.
     claude_code_settings = workspace.root / ".claude" / "settings.json"
     claude_code_hooks_dir = workspace.root / ".claude" / "hooks"
     if claude_code_settings.exists():
-        hook_scripts = (
-            sorted(claude_code_hooks_dir.glob("on-*.sh")) if claude_code_hooks_dir.exists() else []
+        status, detail, action = _configured_hook_diagnostic(
+            config_path=claude_code_settings,
+            hooks_dir=claude_code_hooks_dir,
+            required_events={
+                "SessionStart": "on-session.sh",
+                "UserPromptSubmit": "on-prompt.sh",
+                "PostToolUse": "on-tool.sh",
+                "Stop": "on-stop.sh",
+                "SessionEnd": "on-session.sh",
+            },
+            host_label="Claude Code",
+            activation_guidance=(
+                "Accept folder trust, then use `/hooks` to inspect the loaded project Hooks. "
+                "`disableAllHooks` or managed `allowManagedHooksOnly` policy may suppress them."
+            ),
         )
-        if hook_scripts:
-            non_executable = [s.name for s in hook_scripts if not os.access(s, os.X_OK)]
-            if non_executable:
-                add_check(
-                    "claude-code-hooks",
-                    DEGRADED,
-                    f"Hook scripts are present but not executable: {', '.join(non_executable)}.",
-                    f"Run `chmod +x {claude_code_hooks_dir / '*.sh'}` to fix permissions.",
-                )
-            else:
-                add_check(
-                    "claude-code-hooks",
-                    READY,
-                    f"Claude Code hooks are configured with {len(hook_scripts)} scripts.",
-                )
-        else:
-            add_check(
-                "claude-code-hooks",
-                DEGRADED,
-                "Claude Code settings.json exists but no hook scripts were found.",
-                "Re-check the .claude/hooks/ directory.",
-            )
+        add_check("claude-code-hooks", status, detail, action)
     else:
         add_check(
             "claude-code-hooks",
@@ -3381,6 +3423,31 @@ def doctor_workspace(
                 "Claude Code hook configuration is not present. This is expected "
                 "when Claude Code is not the active agent surface."
             ),
+        )
+
+    codex_hooks_config = workspace.root / ".codex" / "hooks.json"
+    codex_hooks_dir = workspace.root / ".codex" / "hooks"
+    if codex_hooks_config.exists():
+        status, detail, action = _configured_hook_diagnostic(
+            config_path=codex_hooks_config,
+            hooks_dir=codex_hooks_dir,
+            required_events={
+                "UserPromptSubmit": "on-prompt.sh",
+                "Stop": "on-stop.sh",
+            },
+            host_label="ChatGPT Work/Codex",
+            activation_guidance=(
+                "Trust the project `.codex` layer and each current Hook definition in `/hooks`; "
+                "new or changed definitions are skipped until reviewed again."
+            ),
+        )
+        add_check("chatgpt-work-hooks", status, detail, action)
+    else:
+        add_check(
+            "chatgpt-work-hooks",
+            DEGRADED,
+            "Project .codex/hooks.json is missing.",
+            "Restore the authored ChatGPT Work/Codex hook configuration.",
         )
 
     interaction = _interaction_ingest_snapshot(workspace)
@@ -3454,11 +3521,7 @@ def doctor_workspace(
             (
                 "No confirmation-required shared control-plane job is currently "
                 "blocking the workspace."
-                + (
-                    f" Recent auto-repairs={repair_count}."
-                    if repair_count
-                    else ""
-                )
+                + (f" Recent auto-repairs={repair_count}." if repair_count else "")
             ),
         )
 
@@ -3557,10 +3620,7 @@ def status_workspace(
         f"Toolchain mode: {payload['environment']['toolchain_mode']}",
         f"Isolation grade: {payload['environment']['isolation_grade']}",
         f"Entrypoint health: {payload['environment']['entrypoint_health']}",
-        (
-            "Machine baseline: "
-            f"{payload['environment'].get('machine_baseline_status', 'unknown')}"
-        ),
+        (f"Machine baseline: {payload['environment'].get('machine_baseline_status', 'unknown')}"),
         (
             "Host network access: "
             + (
@@ -3628,9 +3688,7 @@ def status_workspace(
         ),
         (
             "Control plane: "
-            + str(
-                len(payload.get("control_plane", {}).get("active_answer_critical_jobs", []))
-            )
+            + str(len(payload.get("control_plane", {}).get("active_answer_critical_jobs", [])))
             + " active answer-critical job(s)"
         ),
         _release_entry_status_line(payload.get("release_entry", {})),
@@ -3642,9 +3700,7 @@ def status_workspace(
         lines.append("Host access required: yes")
     host_access_reasons = payload["environment"].get("host_access_reasons")
     if isinstance(host_access_reasons, list) and host_access_reasons:
-        lines.append(
-            "Host access reasons: " + "; ".join(str(item) for item in host_access_reasons)
-        )
+        lines.append("Host access reasons: " + "; ".join(str(item) for item in host_access_reasons))
     if payload["environment"].get("host_access_guidance"):
         lines.append(str(payload["environment"]["host_access_guidance"]))
     rebuild_telemetry = payload["knowledge_base"].get("last_sync_rebuild_telemetry", {})
@@ -3834,9 +3890,7 @@ def sync_workspace(
             owner=effective_owner,
             run_id=run_id,
             requires_confirmation=materiality["materiality"] == "material" and not assume_yes,
-            confirmation_kind="material-sync"
-            if materiality["materiality"] == "material"
-            else None,
+            confirmation_kind="material-sync" if materiality["materiality"] == "material" else None,
             confirmation_prompt=(
                 "A large unpublished workspace change set was detected. Build or refresh the "
                 "knowledge base now before continuing this question?"
@@ -4005,6 +4059,13 @@ def sync_workspace(
         "autonomous_steps": result.get("autonomous_steps", []),
         "required_capabilities": result.get("required_capabilities", []),
         "phase_costs": result.get("phase_costs", {}),
+        "physical_costs": result.get("physical_costs", {}),
+        "validation_cache": result.get("validation_cache", {}),
+        "transcript_reconciliation": (
+            command_context.get("reconciliation_result", {}).get("transcript_reconciliation", {})
+            if isinstance(command_context.get("reconciliation_result"), dict)
+            else result.get("transcript_reconciliation", {})
+        ),
         "publish_skipped": result.get("publish_skipped", False),
         "publish_skip_reason": result.get("publish_skip_reason"),
         "repair_actions": result.get("repair_actions", []),
@@ -4186,11 +4247,7 @@ def retrieve_knowledge(
             "status": ACTION_REQUIRED,
             "retrieve_status": "artifacts-missing",
             "detail": str(exc),
-            "front_door": {
-                key: value
-                for key, value in front_door.items()
-                if key != "log_context"
-            },
+            "front_door": {key: value for key, value in front_door.items() if key != "log_context"},
         }
         lines = [
             f"Retrieve status: {ACTION_REQUIRED}",
@@ -4211,11 +4268,7 @@ def retrieve_knowledge(
         "status": status,
         "retrieve_status": result["status"],
         **result,
-        "front_door": {
-            key: value
-            for key, value in front_door.items()
-            if key != "log_context"
-        },
+        "front_door": {key: value for key, value in front_door.items() if key != "log_context"},
     }
     if compact:
         payload = _compact_retrieve_payload(payload)
@@ -4396,11 +4449,7 @@ def trace_knowledge(
             "status": ACTION_REQUIRED,
             "trace_status": "artifacts-missing",
             "detail": str(exc),
-            "front_door": {
-                key: value
-                for key, value in front_door.items()
-                if key != "log_context"
-            },
+            "front_door": {key: value for key, value in front_door.items() if key != "log_context"},
         }
         lines = [
             f"Trace status: {ACTION_REQUIRED}",
@@ -4420,11 +4469,7 @@ def trace_knowledge(
             "status": ACTION_REQUIRED,
             "trace_status": "not-found",
             "detail": str(exc),
-            "front_door": {
-                key: value
-                for key, value in front_door.items()
-                if key != "log_context"
-            },
+            "front_door": {key: value for key, value in front_door.items() if key != "log_context"},
         }
         lines = [
             f"Trace status: {ACTION_REQUIRED}",
@@ -4443,11 +4488,7 @@ def trace_knowledge(
             "status": ACTION_REQUIRED,
             "trace_status": "invalid-input",
             "detail": str(exc),
-            "front_door": {
-                key: value
-                for key, value in front_door.items()
-                if key != "log_context"
-            },
+            "front_door": {key: value for key, value in front_door.items() if key != "log_context"},
         }
         lines = [
             f"Trace status: {ACTION_REQUIRED}",
@@ -4466,11 +4507,7 @@ def trace_knowledge(
     payload = {
         "status": status,
         **result,
-        "front_door": {
-            key: value
-            for key, value in front_door.items()
-            if key != "log_context"
-        },
+        "front_door": {key: value for key, value in front_door.items() if key != "log_context"},
     }
     if compact:
         payload = _compact_trace_payload(payload)

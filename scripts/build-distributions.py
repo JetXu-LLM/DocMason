@@ -42,6 +42,7 @@ COMMON_TOP_LEVEL_EXCLUDES = {
     "tests",
 }
 EXCLUDED_SUBTREES = {
+    Path("skills") / "private",
     Path("skills") / "optional",
     Path("scripts") / "private",
 }
@@ -66,7 +67,7 @@ PROTECTED_PATHS = ["original_doc", "knowledge_base", "runtime", "adapters"]
 EXACT_PATH_EXCLUDES = {"scripts/install-git-hooks.sh"}
 RELEASE_ENTRY_SCHEMA_VERSION = 1
 RELEASE_ENTRY_STATE_SCHEMA_VERSION = 1
-DEFAULT_RELEASE_ENTRY_SCOPE = "canonical-ask"
+DEFAULT_RELEASE_ENTRY_SCOPE = "explicit-update-core"
 DEFAULT_RELEASE_ENTRY_COOLDOWN_HOURS = 20
 
 
@@ -191,7 +192,7 @@ def stage_bundle(
                     "distribution_channel": config["distribution_name"],
                     "automatic_check_scope": DEFAULT_RELEASE_ENTRY_SCOPE,
                     "automatic_check_cooldown_hours": DEFAULT_RELEASE_ENTRY_COOLDOWN_HOURS,
-                    "automatic_check_enabled_by_default": True,
+                    "automatic_check_enabled_by_default": False,
                     "asset_name": config["asset_name"],
                 },
                 "source_version": version,
@@ -213,7 +214,7 @@ def stage_bundle(
         json.dumps(
             {
                 "schema_version": RELEASE_ENTRY_STATE_SCHEMA_VERSION,
-                "automatic_check_enabled": True,
+                "automatic_check_enabled": False,
                 "installation_hash": None,
                 "created_at": None,
                 "last_check_attempted_at": None,

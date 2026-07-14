@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -163,6 +164,88 @@ def load_support_manifest(
     return read_json(candidate)
 
 
+def validate_support_manifest_binding(
+    paths: WorkspacePaths,
+    manifest: dict[str, Any] | None,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    answer_file_path: str | None,
+    support_basis: str | None,
+) -> list[tuple[str, str]]:
+    """Validate that one manifest is bound to this turn and exact answer bytes."""
+    if not isinstance(manifest, dict) or not manifest:
+        return [("support-manifest-missing", "The required support manifest is missing.")]
+    issues: list[tuple[str, str]] = []
+    if manifest.get("conversation_id") != conversation_id:
+        issues.append(
+            (
+                "support-manifest-conversation-mismatch",
+                "Support manifest belongs to another conversation.",
+            )
+        )
+    if manifest.get("turn_id") != turn_id:
+        issues.append(
+            ("support-manifest-turn-mismatch", "Support manifest belongs to another turn.")
+        )
+    if isinstance(support_basis, str) and manifest.get("support_basis") != support_basis:
+        issues.append(
+            ("support-manifest-basis-mismatch", "Support manifest basis does not match the turn.")
+        )
+
+    expected_path: Path | None = None
+    if isinstance(answer_file_path, str) and answer_file_path:
+        expected_path = Path(answer_file_path)
+        if not expected_path.is_absolute():
+            expected_path = paths.root / expected_path
+        expected_path = expected_path.resolve()
+    manifest_path_value = manifest.get("answer_file_path")
+    manifest_answer_path: Path | None = None
+    if isinstance(manifest_path_value, str) and manifest_path_value:
+        manifest_answer_path = Path(manifest_path_value)
+        if not manifest_answer_path.is_absolute():
+            manifest_answer_path = paths.root / manifest_answer_path
+        manifest_answer_path = manifest_answer_path.resolve()
+    if expected_path is None or manifest_answer_path != expected_path:
+        issues.append(
+            (
+                "support-manifest-answer-path-mismatch",
+                "Support manifest is not bound to this answer path.",
+            )
+        )
+        return issues
+    if not expected_path.is_file():
+        issues.append(
+            (
+                "support-manifest-answer-missing",
+                "The support-bound answer file is missing.",
+            )
+        )
+        return issues
+
+    answer_bytes = expected_path.read_bytes()
+    digest = manifest.get("answer_digest")
+    if not isinstance(digest, dict):
+        issues.append(("support-manifest-digest-missing", "Support manifest has no answer digest."))
+        return issues
+    if digest.get("algorithm") != "sha256":
+        issues.append(
+            (
+                "support-manifest-digest-invalid",
+                "Support manifest uses an unsupported digest algorithm.",
+            )
+        )
+    expected_hex = hashlib.sha256(answer_bytes).hexdigest()
+    if digest.get("hex") != expected_hex or digest.get("byte_count") != len(answer_bytes):
+        issues.append(
+            (
+                "support-manifest-digest-mismatch",
+                "Support manifest does not match the exact answer bytes.",
+            )
+        )
+    return issues
+
+
 def write_external_support_manifest(
     paths: WorkspacePaths,
     *,
@@ -177,6 +260,10 @@ def write_external_support_manifest(
     """Persist the lightweight external-support manifest for one answer turn."""
     path = support_manifest_path(paths, conversation_id=conversation_id, turn_id=turn_id)
     checked_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+    resolved_answer_path = Path(answer_file_path)
+    if not resolved_answer_path.is_absolute():
+        resolved_answer_path = paths.root / resolved_answer_path
+    answer_bytes = resolved_answer_path.read_bytes() if resolved_answer_path.exists() else b""
     normalized_sources: list[dict[str, Any]] = []
     for source in sources:
         if not isinstance(source, dict):
@@ -188,6 +275,15 @@ def write_external_support_manifest(
                 "source_type": source.get("source_type") or "external-web",
                 "checked_at": source.get("checked_at") or checked_at,
                 "support_snippet": source.get("support_snippet"),
+                "locator": source.get("locator"),
+                "sha256": source.get("sha256"),
+                "size_bytes": source.get("size_bytes"),
+                "media_type": source.get("media_type"),
+                "source_role": source.get("source_role"),
+                "authority": source.get("authority"),
+                "freshness": source.get("freshness"),
+                "supersedes": source.get("supersedes", []),
+                "supersession_basis": source.get("supersession_basis"),
             }
         )
     write_json(
@@ -198,6 +294,11 @@ def write_external_support_manifest(
             "support_basis": support_basis,
             "verified_at": checked_at,
             "answer_file_path": answer_file_path,
+            "answer_digest": {
+                "algorithm": "sha256",
+                "hex": hashlib.sha256(answer_bytes).hexdigest(),
+                "byte_count": len(answer_bytes),
+            },
             "sources": normalized_sources,
             "key_assertions": [
                 value for value in (key_assertions or []) if isinstance(value, str) and value

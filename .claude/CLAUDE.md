@@ -29,15 +29,19 @@ Bootstrap, repair, or `docmason sync-adapters` may generate repo-local Claude he
 Treat those as generated local helpers, not authored instructions.
 Do not hand-edit them, create global skill links, or maintain parallel skill copies.
 The committed `.claude/settings.json` plus `.claude/hooks/` are the repo's Claude host plumbing.
-They support native capture, audit, and repo-local shim refresh; they are not a replacement for bootstrap or for canonical ordinary ask execution.
-When `.venv` is absent, hook behavior remains best-effort and may only surface bootstrap guidance rather than full workspace capability.
+They provide best-effort native capture, minimal continuation context, one-shot closure, and
+repo-local shim refresh; they never own canonical ordinary ask execution.
+Claude Code may skip them until folder trust is accepted, when Hooks are disabled, or when managed
+policy permits only managed Hooks. That never changes the canonical workflow contract.
+When `.venv` is absent, the wrappers exit quietly and ordinary bootstrap guidance still comes from
+`AGENTS.md` and the canonical skills.
 Do not treat low-level Python helpers in `docmason.ask` as preferred host entrypoints.
 They are internal lifecycle primitives behind the canonical `ask` workflow contract.
 Generated helpers and adapter routing are derived convenience surfaces for Claude Code.
 These generated helpers should help Claude follow the authored canonical contract, not replace it.
 If generated Claude helpers exist, use them to avoid reverse engineering the repo.
 If they do not exist yet, continue directly from `AGENTS.md` and `skills/canonical/ask/SKILL.md`.
-Use committed hooks as Claude-side capture and shim plumbing, not as the ordinary ask front door.
+Use committed hooks only as optional host plumbing, not as the ordinary ask front door.
 Do not reverse engineer `ask.py` or substitute `retrieve` / `trace` for canonical ask completion.
 Do not return a final business answer unless the canonical turn has already reached legal completion or governed boundary closure.
 

@@ -425,16 +425,43 @@ def build_retrieval_artifacts(
     source_contexts: list[dict[str, Any]],
     graph_edges: list[dict[str, Any]],
     source_signature: str | None,
+    replace_source_ids: set[str] | None = None,
+    active_source_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build and persist retrieval artifacts for a validated knowledge-base target."""
     retrieval_dir = paths.retrieval_dir(target)
     retrieval_dir.mkdir(parents=True, exist_ok=True)
 
-    source_records: list[dict[str, Any]] = []
-    unit_records: list[dict[str, Any]] = []
-    artifact_records: list[dict[str, Any]] = []
+    incremental_source_ids = set(replace_source_ids or ())
+    active_ids = set(active_source_ids or ())
 
-    for context in source_contexts:
+    def reusable_records(path: Path) -> list[dict[str, Any]]:
+        if not incremental_source_ids:
+            return []
+        return [
+            dict(record)
+            for record in read_json(path).get("records", [])
+            if isinstance(record, dict)
+            and isinstance(record.get("source_id"), str)
+            and record["source_id"] not in incremental_source_ids
+            and (not active_ids or record["source_id"] in active_ids)
+        ]
+
+    source_records = reusable_records(paths.retrieval_source_records_path(target))
+    unit_records = reusable_records(paths.retrieval_unit_records_path(target))
+    artifact_records = reusable_records(paths.retrieval_artifact_records_path(target))
+    contexts_to_build = (
+        [
+            context
+            for context in source_contexts
+            if isinstance(context.get("source_manifest"), dict)
+            and context["source_manifest"].get("source_id") in incremental_source_ids
+        ]
+        if incremental_source_ids
+        else source_contexts
+    )
+
+    for context in contexts_to_build:
         source_manifest = context["source_manifest"]
         evidence_manifest = context["evidence_manifest"]
         knowledge = context["knowledge"]
@@ -871,6 +898,9 @@ def build_retrieval_artifacts(
         "source_fingerprints": {
             record["source_id"]: record["source_fingerprint"] for record in source_records
         },
+        "build_mode": "incremental" if incremental_source_ids else "full",
+        "rebuilt_source_count": len(contexts_to_build),
+        "reused_source_count": max(len(source_records) - len(contexts_to_build), 0),
     }
     write_json(paths.retrieval_manifest_path(target), manifest)
     return manifest
@@ -883,15 +913,33 @@ def build_trace_artifacts(
     source_contexts: list[dict[str, Any]],
     graph_edges: list[dict[str, Any]],
     source_signature: str | None,
+    replace_source_ids: set[str] | None = None,
+    active_source_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build and persist trace artifacts for a validated knowledge-base target."""
     trace_dir = paths.trace_dir(target)
     trace_dir.mkdir(parents=True, exist_ok=True)
 
-    source_provenance: dict[str, Any] = {}
-    unit_provenance: dict[str, Any] = {}
+    incremental_source_ids = set(replace_source_ids or ())
+    active_ids = set(active_source_ids or ())
+
+    def reusable_mapping(path: Path) -> dict[str, Any]:
+        if not incremental_source_ids:
+            return {}
+        payload = read_json(path)
+        return {
+            key: value
+            for key, value in payload.items()
+            if isinstance(value, dict)
+            and isinstance(value.get("source_id"), str)
+            and value["source_id"] not in incremental_source_ids
+            and (not active_ids or value["source_id"] in active_ids)
+        }
+
+    source_provenance = reusable_mapping(paths.trace_source_provenance_path(target))
+    unit_provenance = reusable_mapping(paths.trace_unit_provenance_path(target))
+    knowledge_consumers = reusable_mapping(paths.trace_knowledge_consumers_path(target))
     relation_index: dict[str, Any] = {}
-    knowledge_consumers: dict[str, Any] = {}
 
     incoming_edges: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     outgoing_edges: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -903,7 +951,17 @@ def build_trace_artifacts(
         outgoing_edges[edge["source_id"]].append(edge)
         incoming_edges[edge["related_source_id"]].append(edge)
 
-    for context in source_contexts:
+    contexts_to_build = (
+        [
+            context
+            for context in source_contexts
+            if isinstance(context.get("source_manifest"), dict)
+            and context["source_manifest"].get("source_id") in incremental_source_ids
+        ]
+        if incremental_source_ids
+        else source_contexts
+    )
+    for context in contexts_to_build:
         source_manifest = context["source_manifest"]
         evidence_manifest = context["evidence_manifest"]
         knowledge = context["knowledge"]
@@ -1293,6 +1351,15 @@ def build_trace_artifacts(
                 ],
             }
 
+    for source_id in active_ids or set(source_provenance):
+        relation_index[source_id] = {
+            "outgoing": outgoing_edges[source_id],
+            "incoming": incoming_edges[source_id],
+        }
+        provenance = source_provenance.get(source_id)
+        if isinstance(provenance, dict):
+            provenance["relations"] = relation_index[source_id]
+
     write_json(paths.trace_source_provenance_path(target), source_provenance)
     write_json(paths.trace_unit_provenance_path(target), unit_provenance)
     write_json(paths.trace_relation_index_path(target), relation_index)
@@ -1320,6 +1387,9 @@ def build_trace_artifacts(
                 paths.knowledge_target_dir(target)
             )
         ),
+        "build_mode": "incremental" if incremental_source_ids else "full",
+        "rebuilt_source_count": len(contexts_to_build),
+        "reused_source_count": max(len(source_provenance) - len(contexts_to_build), 0),
     }
     write_json(paths.trace_manifest_path(target), manifest)
     return manifest
@@ -4024,8 +4094,7 @@ def trace_answer_text(
         log_context=effective_log_context,
         explicit_log_origin=log_origin or _log_origin_from_env(),
     )
-    answer_text = answer_text.strip()
-    if not answer_text:
+    if not answer_text.strip():
         raise ValueError("Answer text is empty.")
     effective_question_domain = question_domain or (
         str(effective_log_context.get("question_domain"))
@@ -4506,6 +4575,11 @@ def trace_answer_text(
         "primary_issue_code": issue_codes[0] if issue_codes else None,
         "issue_codes": issue_codes,
         "answer_text": answer_text,
+        "answer_digest": {
+            "algorithm": "sha256",
+            "hex": hashlib.sha256(answer_text.encode("utf-8")).hexdigest(),
+            "byte_count": len(answer_text.encode("utf-8")),
+        },
         "segments": segment_traces,
         "segment_count": len(segment_traces),
         "segment_budget_applied": bool(segment_budget["segment_budget_applied"]),
@@ -4643,7 +4717,7 @@ def trace_answer_file(
         answer_file_reference = str(answer_file)
     turn_record = _turn_record_from_answer_file(paths, answer_file_path=answer_file_reference)
     answer_text = answer_file.read_text(encoding="utf-8")
-    answer_digest = hashlib.sha256(answer_text.strip().encode("utf-8")).hexdigest()
+    answer_digest = hashlib.sha256(answer_text.encode("utf-8")).hexdigest()
     run_id = (
         str(turn_record.get("active_run_id") or turn_record.get("committed_run_id"))
         if isinstance(turn_record.get("active_run_id") or turn_record.get("committed_run_id"), str)
@@ -4701,7 +4775,7 @@ def trace_answer_file(
         else None
     )
     latest_answer_digest = (
-        hashlib.sha256(latest_answer_text.strip().encode("utf-8")).hexdigest()
+        hashlib.sha256(latest_answer_text.encode("utf-8")).hexdigest()
         if isinstance(latest_answer_text, str)
         else None
     )

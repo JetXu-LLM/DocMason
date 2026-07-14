@@ -19,6 +19,14 @@ NEUTRAL_TEST_FIXTURE_MARKERS = (
 class FoundationAndContractTests(unittest.TestCase):
     """Verify the committed repository foundation and public metadata."""
 
+    def test_readme_describes_hooks_as_optional_and_host_trust_as_external(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("optional prompt-continuity and one-shot completion Hooks", readme)
+        self.assertIn("never own the workflow", readme)
+        self.assertIn("A new or changed definition is skipped", readme)
+        self.assertIn("accept folder trust", readme)
+        self.assertIn("runtime activation remains visible in the host", readme)
+
     def test_expected_foundation_files_exist(self) -> None:
         expected = [
             ROOT / "README.md",
@@ -291,8 +299,8 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertIn("## Canonical Ask Contract", ask_skill)
         self.assertIn("./.venv/bin/python -m docmason _ask", ask_skill)
         self.assertIn("`workflow.json` remains routing metadata", ask_skill)
-        self.assertIn("This closure note is mandatory", ask_skill)
-        self.assertIn("even when the user asked for an exact output shape", ask_skill)
+        self.assertIn("Do not append it to a successful copy-ready artifact", ask_skill)
+        self.assertIn("exact business answer plus the separate `user_status_line`", ask_skill)
         self.assertIn("do not hand-fill placeholder host thread references", ask_skill)
         self.assertIn("only `completed` or `boundary` permits a final business reply", ask_skill)
         self.assertIn(
@@ -341,9 +349,14 @@ class FoundationAndContractTests(unittest.TestCase):
         self.assertNotIn("`docmason _ask`", composition_skill)
         self.assertIn("not a free-standing ordinary front door", answer_skill)
         self.assertIn("canonical ask runtime ownership", answer_skill)
-        self.assertIn("even when the user asked for an exact output shape", answer_skill)
+        self.assertIn("do not render terminal closure metadata yourself", answer_skill)
+        self.assertIn("which alone decides whether a separate status line", answer_skill)
         self.assertIn("never a free-standing ordinary front door", composition_skill)
-        self.assertIn("even when the user asked for an exact output shape", composition_skill)
+        self.assertIn("do not render terminal closure metadata yourself", composition_skill)
+        self.assertIn("one representative sample", composition_skill)
+        self.assertNotIn("for a high-cost multi-part artifact", ask_skill)
+        self.assertIn("Host Hooks are optional accelerators", ask_skill)
+        self.assertNotIn("Hook", agents)
         self.assertIn("legal operator provenance surface", trace_skill)
         self.assertIn("legal operator evidence surface", retrieval_skill)
         self.assertIn("require canonical ask ownership", review_skill)

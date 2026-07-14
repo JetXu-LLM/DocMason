@@ -581,6 +581,22 @@ class WorkspacePaths:
         return self.interaction_ingest_dir / "reconciliation-state.json"
 
     @property
+    def runtime_cache_dir(self) -> Path:
+        return self.runtime_dir / "cache"
+
+    @property
+    def validation_cache_path(self) -> Path:
+        return self.runtime_cache_dir / "source-validation.json"
+
+    @property
+    def transcript_cursor_dir(self) -> Path:
+        return self.runtime_cache_dir / "transcript-cursors"
+
+    def transcript_cursor_path(self, provider: str, host_thread_ref: str) -> Path:
+        digest = hashlib.sha256(host_thread_ref.encode("utf-8")).hexdigest()[:24]
+        return self.transcript_cursor_dir / f"{provider}-{digest}.json"
+
+    @property
     def usage_history_path(self) -> Path:
         return self.logs_dir / "usage-history.jsonl"
 

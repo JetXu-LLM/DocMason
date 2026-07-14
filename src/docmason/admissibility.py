@@ -13,7 +13,7 @@ from .control_plane import (
     shared_job_is_settled,
 )
 from .conversation import load_turn_record
-from .front_controller import load_support_manifest
+from .front_controller import load_support_manifest, validate_support_manifest_binding
 from .project import WorkspacePaths, read_json
 from .run_control import load_run_state
 from .truth_boundary import (
@@ -21,6 +21,7 @@ from .truth_boundary import (
     normalize_repo_relative_source_path,
     support_manifest_is_local_corpus,
 )
+from .work_experience import accepted_scope_integrity_issues
 
 ILLEGAL_WORK_AREA_MARKERS = (
     "knowledge_base/staging/",
@@ -91,6 +92,7 @@ def _payload_identity_issue(
     conversation_id: str,
     turn_id: str,
     run_id: str | None,
+    allowed_prior_turn_ids: set[str] | None = None,
 ) -> str | None:
     payload_conversation_id = payload.get("conversation_id")
     if (
@@ -100,9 +102,19 @@ def _payload_identity_issue(
     ):
         return f"Linked {label} belongs to a different conversation."
     payload_turn_id = payload.get("turn_id")
-    if isinstance(payload_turn_id, str) and payload_turn_id and payload_turn_id != turn_id:
+    inherited_identity = bool(
+        isinstance(payload_turn_id, str)
+        and payload_turn_id
+        and payload_turn_id in (allowed_prior_turn_ids or set())
+    )
+    if (
+        isinstance(payload_turn_id, str)
+        and payload_turn_id
+        and payload_turn_id != turn_id
+        and not inherited_identity
+    ):
         return f"Linked {label} belongs to a different turn."
-    if isinstance(run_id, str) and run_id:
+    if isinstance(run_id, str) and run_id and not inherited_identity:
         payload_run_id = payload.get("run_id")
         if isinstance(payload_run_id, str) and payload_run_id and payload_run_id != run_id:
             return f"Linked {label} belongs to a different run."
@@ -221,6 +233,21 @@ def evaluate_commit_admissibility(
         conversation_id=conversation_id,
         turn_id=turn_id,
         run_id=effective_run_id or None,
+        allowed_prior_turn_ids=(
+            {str(turn.get("revision_of"))}
+            if (
+                effective_session_ids
+                and effective_session_ids[-1]
+                in {
+                    value
+                    for value in turn.get("inherited_session_ids", [])
+                    if isinstance(value, str) and value
+                }
+                and isinstance(turn.get("revision_of"), str)
+                and turn.get("revision_of")
+            )
+            else set()
+        ),
     )
     if session_identity_issue:
         issues.append(session_identity_issue)
@@ -386,6 +413,7 @@ def evaluate_commit_admissibility(
     if support_basis in {"external-source-verified", "mixed"}:
         if not isinstance(support_manifest_path, str) or not support_manifest_path:
             issues.append(f"support_basis `{support_basis}` requires a support manifest.")
+            issue_codes.append("support-manifest-missing")
             if support_basis == "mixed":
                 issue_codes.append("mixed-support-unexplained")
     support_manifest = load_support_manifest(
@@ -394,6 +422,23 @@ def evaluate_commit_admissibility(
         conversation_id=conversation_id,
         turn_id=turn_id,
     )
+    if support_basis in {"external-source-verified", "mixed"}:
+        for issue_code, issue in validate_support_manifest_binding(
+            paths,
+            support_manifest,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            answer_file_path=answer_file_path,
+            support_basis=support_basis,
+        ):
+            issues.append(issue)
+            issue_codes.append(issue_code)
+    for issue_code in accepted_scope_integrity_issues(
+        paths,
+        turn.get("accepted_scopes"),
+    ):
+        issues.append(f"Accepted scope integrity failed: {issue_code}.")
+        issue_codes.append(issue_code)
     if support_basis == "external-source-verified" and support_manifest_is_local_corpus(
         support_manifest
     ):

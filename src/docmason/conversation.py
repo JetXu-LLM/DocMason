@@ -25,6 +25,7 @@ from .project import (
 
 ACTIVE_CONVERSATION_IDLE_WINDOW = timedelta(hours=8)
 OPEN_TURN_REUSE_WINDOW = timedelta(minutes=15)
+CLOSURE_CONTINUATION_RETRY_WINDOW = timedelta(minutes=2)
 LOG_CONTEXT_CORE_FIELD_NAMES = (
     "conversation_id",
     "turn_id",
@@ -243,6 +244,27 @@ def _backfill_turn_runtime_fields(turn: dict[str, Any]) -> dict[str, Any]:
         turn["contract_repair_count"] = 0
     if "noncanonical_answer_file_path" not in turn:
         turn["noncanonical_answer_file_path"] = None
+    additive_work_defaults: dict[str, Any] = {
+        "work_brief": {},
+        "revision_of": None,
+        "revision_scope": {},
+        "evidence_delta": [],
+        "decision_frontier": None,
+        "decision_ledger": [],
+        "resolves_gate_id": None,
+        "accepted_scopes": [],
+        "affected_outputs": [],
+        "evidence_packet": {"packet_id": None, "items": []},
+        "closure_continuation": None,
+        "scope_freshness": None,
+        "accepted_scope_issues": [],
+        "work_state_issue_code": None,
+        "work_state_issue_detail": None,
+        "inherited_session_ids": [],
+    }
+    for field_name, default_value in additive_work_defaults.items():
+        if field_name not in turn:
+            turn[field_name] = default_value
     return turn
 
 
@@ -975,9 +997,25 @@ def base_turn_record(
         "freshness_notice": None,
         "response_excerpt": None,
         "continuation_type": None,
+        "work_brief": {},
+        "revision_of": None,
+        "revision_scope": {},
+        "evidence_delta": [],
+        "decision_frontier": None,
+        "decision_ledger": [],
+        "resolves_gate_id": None,
+        "accepted_scopes": [],
+        "affected_outputs": [],
+        "evidence_packet": {"packet_id": None, "items": []},
+        "closure_continuation": None,
+        "scope_freshness": None,
         "reused_previous_evidence": False,
         "new_retrieval_executed": False,
         "new_trace_executed": False,
+        "inherited_session_ids": [],
+        "accepted_scope_issues": [],
+        "work_state_issue_code": None,
+        "work_state_issue_detail": None,
         "question_class": None,
         "question_domain": None,
         "analysis_origin": None,
@@ -1350,6 +1388,64 @@ def update_conversation_turn(
             },
         )
         return updated_turn
+
+
+def claim_turn_closure_continuation(
+    paths: WorkspacePaths,
+    *,
+    conversation_id: str,
+    turn_id: str,
+    host: str,
+) -> bool:
+    """Atomically claim one host Stop continuation, with bounded stale recovery.
+
+    A hook can be terminated by the host after this record is persisted but before
+    its JSON response is delivered.  Treating ``requested`` as permanent would then
+    strand an otherwise complete answer forever.  A fresh claim remains one-shot;
+    only an uncompleted claim older than the bounded retry window may be reclaimed.
+    """
+    path = conversation_path(paths, conversation_id)
+    with workspace_lease(
+        paths,
+        _conversation_resource(conversation_id),
+        timeout_seconds=0.25,
+    ):
+        conversation = read_json(path)
+        if not conversation:
+            path = legacy_conversation_path(paths, conversation_id)
+            conversation = read_json(path)
+        turns = conversation.get("turns", [])
+        if not isinstance(turns, list):
+            return False
+        for turn in turns:
+            if not isinstance(turn, dict) or turn.get("turn_id") != turn_id:
+                continue
+            _backfill_turn_runtime_fields(turn)
+            existing = turn.get("closure_continuation")
+            retry_count = 0
+            if isinstance(existing, dict):
+                if existing.get("status") == "completed":
+                    return False
+                if int(existing.get("retry_count", 0) or 0) >= 1:
+                    return False
+                requested_at = _parse_timestamp(existing.get("requested_at"))
+                if (
+                    requested_at is None
+                    or datetime.now(tz=UTC) - requested_at
+                    < CLOSURE_CONTINUATION_RETRY_WINDOW
+                ):
+                    return False
+                retry_count = 1
+            turn["closure_continuation"] = {
+                "requested_at": utc_now(),
+                "host": host,
+                "status": "requested",
+                "retry_count": retry_count,
+            }
+            turn["updated_at"] = utc_now()
+            write_json(path, conversation)
+            return True
+    return False
 
 
 def latest_conversation_turn(conversation: dict[str, Any]) -> dict[str, Any] | None:

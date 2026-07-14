@@ -22,7 +22,7 @@
   </p>
   
   <p><sub>
-    Already paying for ChatGPT? <a href="https://openai.com/codex"><strong>Codex for macOS</strong></a> is included in your plan. Turn that unused capacity into a local Second Brain.<br>
+    Already paying for ChatGPT? Open <a href="https://learn.chatgpt.com/docs/get-started-with-work"><strong>ChatGPT Desktop Work</strong></a> and turn that capacity into a local Second Brain.<br>
     Watch the <a href="https://youtu.be/Sq3a5qxsLwM"><b>▶️ video demo</b></a> to see how DocMason performs deep research on local complex office files.<br>
     Get zero-to-working in minutes with this <a href="https://www.youtube.com/watch?v=jWRtr70Rvug"><b>▶️ 3-min setup tutorial video</b></a>.
   </sub></p>
@@ -30,7 +30,7 @@
 <br>
 Most workspace AI tools flatten your complex office documents into a single, unstructured text blob. They might summarize a file or retrieve a stray quote, but once your research gets complex, the illusion breaks. You lose the tables, the slide layouts, the hidden notes—and it becomes impossible to verify where the AI's answer actually came from.
 
-**DocMason** is built on a different thesis: **answers must be strictly traceable.** It compiles your private decks, spreadsheets, PDFs, and emails into a local, file-based knowledge base. Instead of chatting with anonymous text chunks, your AI agent reasons over structured, multimodal evidence bundles. It’s not a cloud service or a lightweight wrapper. It is a local repo running as a deep-research AI app on Codex. No hidden backends, no cloud ingestion. Just your files, and answers you can actually trust.
+**DocMason** is built on a different thesis: **answers must be strictly traceable.** It compiles your private decks, spreadsheets, PDFs, and emails into a local, file-based knowledge base. Instead of chatting with anonymous text chunks, your AI agent reasons over structured, multimodal evidence bundles. It’s not a cloud service or a lightweight wrapper. It is a local repo-native work system operated through ChatGPT Work, Codex mode, or Claude Code. No hidden backends, no cloud ingestion. Just your files, and answers you can actually trust.
 
 ## How It Works: A Production-Grade Runtime
 
@@ -56,10 +56,10 @@ Getting started requires zero developer experience. Just drop your files and let
 ![Two ways to reach your first answer](./docs/product/readme-first-minute-flow.svg)
 
 - **Path A: Start Small**
-  Drop a handful of work files (`.pptx`, `.docx`, `.xlsx`, PDFs) into the `DocMason/original_doc/` folder. Open the DocMason folder in Codex, and ask your question naturally. DocMason intelligently guides you through environment setup and quietly builds the knowledge base in the background — just approve when prompted. After that, you can keep adding or revising files inside `original_doc/`; on the native path, DocMason can quietly and incrementally sync the published knowledge base instead of forcing a full restart.
+  Drop a handful of work files (`.pptx`, `.docx`, `.xlsx`, PDFs) into the `DocMason/original_doc/` folder. Open the DocMason folder in ChatGPT Desktop Work, and ask your question naturally. DocMason intelligently guides you through environment setup and quietly builds the knowledge base in the background — just approve when prompted. After that, you can keep adding or revising files inside `original_doc/`; on the native path, DocMason can quietly and incrementally sync the published knowledge base instead of forcing a full restart.
 
 - **Path B: Stage Entire Folders**
-  Drop your massive, department-level folders into `DocMason/original_doc/`. Open the DocMason folder in Codex. Tell Codex:
+  Drop your massive, department-level folders into `DocMason/original_doc/`. Open the DocMason folder in ChatGPT Desktop Work. Ask your agent:
   > "Please prepare the DocMason environment."
 
   Then:
@@ -88,8 +88,23 @@ Getting started requires zero developer experience. Just drop your files and let
 **1. Download, unzip, and drop in your files**
 **[Download DocMason](https://github.com/JetXu-LLM/DocMason/releases/latest/download/DocMason-clean.zip)**, unzip it to any folder on your Mac, then drag your `.pptx`, `.docx`, `.xlsx`, `.pdf`, and other work files into `DocMason/original_doc/`.
 
-**2. Open the DocMason folder in Codex**
-Launch [Codex for macOS](https://openai.com/codex) (or Claude Code) and open the DocMason folder as your workspace. This is the operating model — the repo is your app, the agent is your runtime.
+**2. Open the DocMason folder in ChatGPT Desktop**
+For ordinary document and professional work, open the folder in ChatGPT Desktop and use
+[Work](https://learn.chatgpt.com/docs/get-started-with-work). Codex mode remains available for
+coding, operator maintenance, and implementation-heavy tasks; Claude Code remains a supported
+host adapter. This is the operating model — the repo is your app, the agent is your runtime.
+
+DocMason ships optional prompt-continuity and one-shot completion Hooks for both hosts. They make
+continuations smoother, but never own the workflow: if Hooks are untrusted, disabled, unsupported,
+or blocked by policy, `AGENTS.md` and the canonical skills still complete the same work normally.
+
+- **ChatGPT Work/Codex:** trust the project `.codex` layer and review each current Hook definition
+  in `/hooks`. A new or changed definition is skipped until it is reviewed again.
+- **Claude Code:** accept folder trust, then use `/hooks` to inspect the loaded project Hooks.
+  `disableAllHooks` or managed `allowManagedHooksOnly` policy can suppress them.
+
+`docmason doctor` verifies the committed configuration and executable scripts; no local command can
+grant or prove host trust, so runtime activation remains visible in the host.
 
 **3. Ask your agent to prepare the environment**
 > "Please prepare the DocMason environment."
@@ -158,7 +173,7 @@ DocMason is designed to run entirely over local files. Here's exactly what that 
 **All AI inference traffic** is handled by your chosen host agent (Codex, Claude Code, etc.) — DocMason itself makes zero model API calls. The network behavior of your AI agent is governed by that agent's own privacy and telemetry policy.
 
 **The only network request DocMason may make:**
-Generated `clean` and `demo-ico-gcs` release bundles may only perform a bounded update check: automatically after canonical `ask` completion, or when you explicitly run `docmason update-core`. This path is disabled in the source repository, the automatic check respects `DO_NOT_TRACK=1`, and the request sends only `schema_version`, `distribution_channel`, a bundle-local pseudonymous `installation_hash`, and `trigger`. It never sends corpus content, file names, file paths, query text, answer text, source locators, environment variables, secrets, machine fingerprints, or IP-derived identifiers. See [Release Entry And Networking](docs/policies/release-entry-and-networking.md).
+Generated `clean` and `demo-ico-gcs` release bundles may perform a bounded update check only when you explicitly run `docmason update-core`. Canonical `ask` completion never performs release-entry work. The request sends only `schema_version`, `distribution_channel`, a bundle-local pseudonymous `installation_hash`, and `trigger`. It never sends corpus content, file names, file paths, query text, answer text, source locators, environment variables, secrets, machine fingerprints, or IP-derived identifiers. See [Release Entry And Networking](docs/policies/release-entry-and-networking.md).
 
 **Your responsibility:**
 - Configure your host agent's telemetry and privacy settings according to your own standards.

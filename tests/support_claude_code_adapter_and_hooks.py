@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +24,7 @@ from unittest import mock
 
 from docmason.cli import build_parser
 from docmason.cli import main as docmason_main
-from docmason.commands import READY, doctor_workspace
+from docmason.commands import DEGRADED, READY, doctor_workspace
 from docmason.conversation import detect_agent_surface
 from docmason.hooks import (
     SUPPORTED_EVENTS,
@@ -557,7 +558,7 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
                         "stop_reason": "end_turn",
                         "content": [
                             {"type": "text", "text": "Final grounded answer."},
-                        ]
+                        ],
                     },
                 },
             ],
@@ -605,10 +606,7 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
         self.assertIn("Bash", tool_names)
         self.assertIn("Skill", tool_names)
         self.assertTrue(
-            any(
-                output.get("call_id") == "skill-001"
-                for output in turn["function_call_outputs"]
-            )
+            any(output.get("call_id") == "skill-001" for output in turn["function_call_outputs"])
         )
 
     def test_native_transcript_meta_skill_text_and_nested_image_keep_one_turn(self) -> None:
@@ -765,10 +763,7 @@ class ClaudeCodeTranscriptReaderTests(unittest.TestCase):
         self.assertIn("Read", tool_names)
         self.assertIn("Skill", tool_names)
         self.assertTrue(
-            any(
-                output.get("call_id") == "read-001"
-                for output in turn["function_call_outputs"]
-            )
+            any(output.get("call_id") == "read-001" for output in turn["function_call_outputs"])
         )
 
     def test_session_end_without_stop_marks_incomplete_operator_evidence(self) -> None:
@@ -1019,7 +1014,7 @@ class CLIHookSubcommandTests(unittest.TestCase):
 
 
 class CommittedBootstrapperFilesTests(unittest.TestCase):
-    """Test the committed .claude/ directory structure."""
+    """Test the committed Claude Code and ChatGPT Work/Codex hook surfaces."""
 
     def test_committed_claude_md_exists(self) -> None:
         path = ROOT / ".claude" / "CLAUDE.md"
@@ -1043,6 +1038,12 @@ class CommittedBootstrapperFilesTests(unittest.TestCase):
         self.assertNotIn("`docmason _ask`", content)
         self.assertNotIn("docmason.ask.prepare_ask_turn()", content)
         self.assertNotIn("docmason.ask.complete_ask_turn()", content)
+
+    def test_committed_claude_md_keeps_hooks_optional(self) -> None:
+        content = (ROOT / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("may skip them until folder trust is accepted", content)
+        self.assertIn("never changes the canonical workflow contract", content)
+        self.assertIn("the wrappers exit quietly", content)
 
     def test_committed_settings_json_exists(self) -> None:
         path = ROOT / ".claude" / "settings.json"
@@ -1076,6 +1077,94 @@ class CommittedBootstrapperFilesTests(unittest.TestCase):
 
     def test_repo_does_not_commit_root_claude_md(self) -> None:
         self.assertFalse((ROOT / "CLAUDE.md").exists())
+
+    def test_codex_hook_contract_is_authored_and_executable(self) -> None:
+        config_path = ROOT / ".codex" / "hooks.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(config["hooks"]), {"UserPromptSubmit", "Stop"})
+        for script_name in ("on-prompt.sh", "on-stop.sh"):
+            script = ROOT / ".codex" / "hooks" / script_name
+            self.assertTrue(script.is_file())
+            self.assertTrue(os.access(script, os.X_OK))
+            content = script.read_text(encoding="utf-8")
+            self.assertNotIn("git ", content)
+            self.assertIn('SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"', content)
+
+    def test_codex_hook_wrappers_resolve_root_from_script_location(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            root = Path(tempdir_name)
+            hooks_dir = root / ".codex" / "hooks"
+            hooks_dir.mkdir(parents=True)
+            for script_name in ("on-prompt.sh", "on-stop.sh"):
+                shutil.copy2(ROOT / ".codex" / "hooks" / script_name, hooks_dir / script_name)
+            executable = root / ".venv" / "bin" / "docmason"
+            executable.parent.mkdir(parents=True)
+            capture = root / "capture.txt"
+            executable.write_text(
+                "#!/bin/bash\n"
+                f"printf '%s\\n' \"$DOCMASON_PROJECT_DIR|$DOCMASON_HOOK_HOST|$*\" > {capture!s}\n"
+                f"cat >> {capture!s}\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+            nested_cwd = root / "nested" / "work"
+            nested_cwd.mkdir(parents=True)
+
+            result = subprocess.run(
+                [str(hooks_dir / "on-prompt.sh")],
+                cwd=nested_cwd,
+                input='{"hook_event_name":"UserPromptSubmit"}',
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lines = capture.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[0], f"{root}|codex|_hook prompt-submit")
+            self.assertEqual(lines[1], '{"hook_event_name":"UserPromptSubmit"}')
+
+    def test_claude_prompt_hook_is_silent_before_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            root = Path(tempdir_name)
+            hooks_dir = root / ".claude" / "hooks"
+            hooks_dir.mkdir(parents=True)
+            hook = hooks_dir / "on-prompt.sh"
+            shutil.copy2(ROOT / ".claude" / "hooks" / "on-prompt.sh", hook)
+
+            result = subprocess.run(
+                [str(hook)],
+                cwd=root,
+                input='{"hook_event_name":"UserPromptSubmit"}',
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "CLAUDE_PROJECT_DIR": str(root)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+
+    def test_codex_prompt_hook_is_silent_before_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            root = Path(tempdir_name)
+            hooks_dir = root / ".codex" / "hooks"
+            hooks_dir.mkdir(parents=True)
+            hook = hooks_dir / "on-prompt.sh"
+            shutil.copy2(ROOT / ".codex" / "hooks" / "on-prompt.sh", hook)
+
+            result = subprocess.run(
+                [str(hook)],
+                cwd=root,
+                input='{"hook_event_name":"UserPromptSubmit"}',
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
 
 
 class ProjectPathsTests(unittest.TestCase):
@@ -1140,47 +1229,114 @@ class DoctorHookCheckTests(unittest.TestCase):
         (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
         return WorkspacePaths(root=root)
 
+    @staticmethod
+    def _doctor_check(workspace: WorkspacePaths, name: str) -> dict[str, object]:
+        def fake_editable_install(paths: WorkspacePaths) -> tuple[bool, str]:
+            return True, "editable install available"
+
+        with mock.patch.dict(
+            "os.environ", {"CODEX_THREAD_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False
+        ):
+            report = doctor_workspace(workspace, editable_install_probe=fake_editable_install)
+        matches = [check for check in report.payload.get("checks", []) if check["name"] == name]
+        if len(matches) != 1:
+            raise AssertionError(f"Expected one {name!r} check, found {len(matches)}")
+        return matches[0]
+
+    @staticmethod
+    def _write_executable(path: Path) -> None:
+        path.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+
     def test_doctor_reports_hooks_when_settings_present(self) -> None:
         workspace = self.make_workspace()
         hooks_dir = workspace.root / ".claude" / "hooks"
         hooks_dir.mkdir(parents=True)
         settings = workspace.root / ".claude" / "settings.json"
-        settings.write_text('{"hooks":{}}', encoding="utf-8")
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [
+                            {"hooks": [{"type": "command", "command": "on-session.sh"}]}
+                        ],
+                        "UserPromptSubmit": [
+                            {"hooks": [{"type": "command", "command": "on-prompt.sh"}]}
+                        ],
+                        "PostToolUse": [{"hooks": [{"type": "command", "command": "on-tool.sh"}]}],
+                        "Stop": [{"hooks": [{"type": "command", "command": "on-stop.sh"}]}],
+                        "SessionEnd": [
+                            {"hooks": [{"type": "command", "command": "on-session.sh"}]}
+                        ],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        for script_name in ("on-session.sh", "on-prompt.sh", "on-tool.sh", "on-stop.sh"):
+            self._write_executable(hooks_dir / script_name)
 
-        # Create executable hook script
-        script = hooks_dir / "on-session.sh"
-        script.write_text("#!/bin/bash\n", encoding="utf-8")
-        script.chmod(0o755)
-
-        def fake_editable_install(paths: WorkspacePaths) -> tuple[bool, str]:
-            return True, "editable install available"
-
-        with mock.patch.dict(
-            "os.environ", {"CODEX_THREAD_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False
-        ):
-            report = doctor_workspace(workspace, editable_install_probe=fake_editable_install)
-
-        checks = report.payload.get("checks", [])
-        hook_checks = [c for c in checks if c["name"] == "claude-code-hooks"]
-        self.assertEqual(len(hook_checks), 1, "Should have a claude-code-hooks check")
-        self.assertEqual(hook_checks[0]["status"], READY)
+        check = self._doctor_check(workspace, "claude-code-hooks")
+        self.assertEqual(check["status"], READY)
+        self.assertIn("5 required event registrations", str(check["detail"]))
+        self.assertIn("runtime activation remains host-owned", str(check["detail"]))
+        self.assertIn("Accept folder trust", str(check["detail"]))
+        self.assertIn("allowManagedHooksOnly", str(check["detail"]))
 
     def test_doctor_reports_hooks_absent_gracefully(self) -> None:
         workspace = self.make_workspace()
         # No .claude/settings.json - hooks not configured
 
-        def fake_editable_install(paths: WorkspacePaths) -> tuple[bool, str]:
-            return True, "editable install available"
+        check = self._doctor_check(workspace, "claude-code-hooks")
+        self.assertEqual(check["status"], READY)  # Not a blocker when absent
 
-        with mock.patch.dict(
-            "os.environ", {"CODEX_THREAD_ID": "", "CLAUDE_SESSION_ID": ""}, clear=False
-        ):
-            report = doctor_workspace(workspace, editable_install_probe=fake_editable_install)
+    def test_doctor_reports_malformed_hook_json_without_crashing(self) -> None:
+        workspace = self.make_workspace()
+        settings = workspace.root / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{not-json", encoding="utf-8")
 
-        checks = report.payload.get("checks", [])
-        hook_checks = [c for c in checks if c["name"] == "claude-code-hooks"]
-        self.assertEqual(len(hook_checks), 1)
-        self.assertEqual(hook_checks[0]["status"], READY)  # Not a blocker when absent
+        check = self._doctor_check(workspace, "claude-code-hooks")
+        self.assertEqual(check["status"], DEGRADED)
+        self.assertIn("not valid JSON", str(check["detail"]))
+
+    def test_doctor_rejects_incomplete_claude_event_contract(self) -> None:
+        workspace = self.make_workspace()
+        settings = workspace.root / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('{"hooks": {"Stop": []}}', encoding="utf-8")
+
+        check = self._doctor_check(workspace, "claude-code-hooks")
+        self.assertEqual(check["status"], DEGRADED)
+        self.assertIn("missing `UserPromptSubmit` registration", str(check["detail"]))
+
+    def test_doctor_validates_codex_event_to_script_contract(self) -> None:
+        workspace = self.make_workspace()
+        hooks_dir = workspace.root / ".codex" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        config = workspace.root / ".codex" / "hooks.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "UserPromptSubmit": [
+                            {"hooks": [{"type": "command", "command": "on-prompt.sh"}]}
+                        ],
+                        "Stop": [{"hooks": [{"type": "command", "command": "on-stop.sh"}]}],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._write_executable(hooks_dir / "on-prompt.sh")
+        self._write_executable(hooks_dir / "on-stop.sh")
+
+        check = self._doctor_check(workspace, "chatgpt-work-hooks")
+        self.assertEqual(check["status"], READY)
+        self.assertIn("2 required event registrations", str(check["detail"]))
+        self.assertIn("runtime activation remains host-owned", str(check["detail"]))
+        self.assertIn("each current Hook definition", str(check["detail"]))
+        self.assertIn("skipped until reviewed again", str(check["detail"]))
 
 
 class ConnectorManifestTests(unittest.TestCase):

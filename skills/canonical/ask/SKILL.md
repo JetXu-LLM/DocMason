@@ -87,6 +87,8 @@ JSON
 - Hidden wrapper status meanings:
   - `execute` means canonical ask is open and the host should continue through the chosen inner workflow.
   - `awaiting-confirmation` means pause the same turn and wait for the user's confirmation reply.
+  - `awaiting-user-decision` means pause the current work for a material decision that only
+    the user can authorize. It never implies a timeout, default, or skip.
   - `waiting-shared-job` means pause the same turn and wait for governed shared-job settlement.
   - `completed` means the turn is committed and a final business answer may be returned.
   - `boundary` means the turn is committed as a governed boundary and that boundary reply may be returned.
@@ -94,13 +96,14 @@ JSON
 - Hidden wrapper `next_step` is a derived convenience field and should stay aligned with that status law:
   - `execute -> continue-inner-workflow`
   - `awaiting-confirmation -> wait-for-user-confirmation`
+  - `awaiting-user-decision -> wait-for-user-decision`
   - `waiting-shared-job -> wait-for-shared-job`
   - `completed -> return-final-answer`
   - `boundary -> return-boundary-answer`
   - `blocked -> do-not-return-final-answer`
 - Hidden wrapper `result_explanation` is a derived convenience field, not a new truth surface.
-  - When `result_explanation.show_to_user = true`, translate its `summary`, `why`, and `next_step` into one concise user-facing explanation in the user's language.
-  - This closure note is mandatory even when the user requested a strict business-answer shape such as "exactly 3 bullets"; append it after the requested answer as a separate short support-status note.
+  - When `result_explanation.show_to_user = true` for a blocker or evidence boundary, translate its `summary`, `why`, and `next_step` into one concise user-facing explanation in the user's language.
+  - Do not append it to a successful copy-ready artifact; successful completion returns only the exact business answer plus the separate `user_status_line`.
   - When `show_to_user = false`, do not add extra result-explanation prose.
   - Do not write `result_explanation` text into the canonical answer markdown.
 - Hidden wrapper `admissibility_repair` is present only for same-turn repairable finalize failures.
@@ -153,6 +156,49 @@ export DOCMASON_FRONT_DOOR_STATE="canonical-ask"
 }
 ```
 
+- A material professional judgment may instead persist a decision gate:
+
+```json
+{
+  "action": "progress",
+  "conversation_id": "<conversation_id>",
+  "turn_id": "<turn_id>",
+  "decision_frontier": {
+    "class": "judgment-authority-gap | high-cost-expression-choice",
+    "question": "<material decision question>",
+    "why_user_is_required": "<why evidence and reasoning cannot decide it>",
+    "evidence_boundary": "<what evidence establishes and cannot decide>",
+    "options": [
+      {
+        "id": "<stable option id>",
+        "label": "<short label>",
+        "impact": "<real downstream consequence>",
+        "recommended": true
+      },
+      {
+        "id": "<stable option id>",
+        "label": "<short label>",
+        "impact": "<real downstream consequence>",
+        "recommended": false
+      }
+    ],
+    "affected_outputs": ["<specific model or artifact scope>"],
+    "invalidates": []
+  }
+}
+```
+
+- A legal gate has two or three real options, explains their downstream impact, marks exactly
+  one current recommendation, and names the affected output scope. Do not persist a vague or
+  non-material question.
+- After `progress` returns `awaiting-user-decision`, present the same gate through the host's
+  native Plan or structured-input UI, without a timeout or default, and wait. If no such UI is
+  available, ask the one material question concisely in-band.
+- The user's answer opens a new linked turn with `continuation_type=decision-resolution`, the
+  exact `gate_id` as `resolves_gate_id`, and either one legal `option_id` or a non-empty
+  `free_form` decision. Never settle the old turn in place or reinterpret an unrelated message
+  as consent.
+
 - `completion_status` is optional when the caller is only re-entering a `waiting-shared-job` turn to let the hidden wrapper reconcile deterministic repo-owned shared-job truth.
 - supply `completion_status` only when the host is actively settling a still-unsettled governed multimodal refresh.
 - when the current-turn `hybrid_refresh_work.json` lists render or focus-render assets and the host can inspect images, inspect the relevant assets lightly and include `render_inspection_used` plus `inspected_render_assets` in `hybrid_refresh_summary`.
@@ -165,6 +211,7 @@ export DOCMASON_FRONT_DOOR_STATE="canonical-ask"
   "action": "finalize",
   "conversation_id": "<conversation_id>",
   "turn_id": "<turn_id>",
+  "answer_text": "<exact final business answer>",
   "answer_file_path": "<answer_file_path>",
   "response_excerpt": "<short excerpt>",
   "session_ids": ["<selected_session_id>"],
@@ -177,6 +224,13 @@ export DOCMASON_FRONT_DOOR_STATE="canonical-ask"
   }
 }
 ```
+
+- `answer_text` is the preferred terminal input. The wrapper writes it atomically to the
+  canonical answer path, binds the exact digest, reuses only a digest-matching trace, and runs
+  one exact trace when necessary. The successful response keeps `answer_text` clean and returns
+  one separate `user_status_line`; internal IDs and support state remain in `governance_detail`.
+  When the exact final answer is already present at `answer_file_path`, callers may omit
+  `answer_text` and use the file-based handshake below.
 
 - `session_ids` and `trace_ids` are optional advanced-caller fields. Omit them when the turn has exactly one ask-owned retrieve session and one final trace candidate. Supply them only when the caller has already selected the canonical pair among multiple ask-owned candidates.
 - `workflow_outcome` is the preferred finalize-time handoff for workflow-owned facts. Supply it when the inner workflow already knows the correct `support_basis`, selected `session_ids` / `trace_ids`, support-manifest linkage, bundle linkage, or bounded degradation metadata. Older callers may keep using the compatible top-level finalize fields.
@@ -198,7 +252,8 @@ JSON
 
 - Completion rule:
   - only `completed` or `boundary` permits a final business reply to the user
-  - `execute`, `awaiting-confirmation`, `waiting-shared-job`, and `blocked` do not
+  - `execute`, `awaiting-confirmation`, `awaiting-user-decision`,
+    `waiting-shared-job`, and `blocked` do not
 
 ## Required Capabilities
 
@@ -218,7 +273,22 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - return in the user's language unless they ask for another language
 2. Open or reuse the canonical ask turn through the supported path defined in `Canonical Ask Contract`.
    - reconcile any active native thread, and keep that reconciliation in the native ledger and interaction-ingest path until canonical ask ownership is open
-   - pass best-effort `semantic_analysis`: keep one concise `route_reason`, set `needs_latest_workspace_state` only when fresh local workspace truth is actually required, and include compact `evidence_requirements` only when the question needs channel guidance
+   - before calling `open`, form a thin agent-authored `work_brief` from the user's actual goal
+     and medium; include only fields that matter for this turn: deliverable and use, audience,
+     in/out scope, success criteria, distinctions that must survive, named evidence and
+     exemplars, confirmed method/storyline/expression grammar, and high-cost artifact risk
+   - simple work may use an empty or very small brief; never ask the user to fill a form and
+     never replace professional framing with keyword inference in deterministic runtime code
+   - pass the brief inside best-effort `semantic_analysis`; keep one concise `route_reason`, and
+     set `needs_latest_workspace_state` only when fresh local workspace truth is
+     actually required, and include compact `evidence_requirements` only when the question
+     needs channel guidance
+   - when the user explicitly revises a prior result, pass its exact `revision_of` turn id and
+     the narrow `continuation_type`, `revision_scope`, and `affected_outputs`; adjacency in the
+     same chat is not sufficient authority to inherit evidence or accepted scopes
+   - when the user answers a persisted gate, pass the exact `resolves_gate_id` plus either a
+     legal `option_id` from that gate or an explicit non-empty `free_form` decision; do not
+     reinterpret arbitrary later text as gate approval
    - let `open` normalize supported routing fields, resolve user-native source references when the user names a document, path, page, slide, sheet, heading, or similar locator, and return the governed turn binding
 3. During `open` or same-turn reuse, let the governed ask path choose the smallest evidence basis that can support the answer correctly and truthfully before deeper workflow execution.
    - `workspace-corpus` -> KB-first
@@ -263,6 +333,25 @@ If the environment cannot satisfy those capabilities, stop and explain the block
      - which published evidence channels are required
      - whether a single contract-repair chance exists for this turn
    - keep approximate or unresolved reference notices explicit
+   - normalize the additive thin `work_brief`, revision lineage, accepted scopes, and turn
+     evidence packet before deciding whether evidence work is necessary
+   - treat user-named files and host attachments as current turn evidence by default, but keep
+     their role, authority, freshness, hash and supersession semantics explicit; do not promote
+     them into the durable KB merely because they were used once
+   - distinguish `evidence-gap`, `reasoning-uncertainty`, and
+     `judgment-authority-gap`: solve the first two autonomously; persist a decision gate only
+     for the third or for a genuinely expensive expression choice
+   - for `constraint-update` and evidence-neutral `decision-resolution`, inherit legal evidence,
+     skip sync and retrieval, preserve unrelated accepted scopes, retrace only the exact revised
+     answer or artifact, and finalize
+   - record an accepted scope only when the current user explicitly accepted it and the host sets
+     `accepted_by_user: true`; reopen it only after explicit user authority with
+     `reopened_by_user: true`. Dependency drift marks a scope `at-risk` but never silently
+     reopens or replaces it
+   - for `evidence-refresh` or `mixed`, retrieve only the evidence delta and invalidate only
+     explicitly affected or dependency-linked outputs
+   - unresolved relevance alone does not authorize global sync; use task-scoped freshness and
+     expose a boundary when critical target freshness cannot be established
    - let the routed inner workflow own retrieval, trace, render inspection, and answer or composition drafting
    - if published artifacts are still insufficient because of hard-artifact semantic gaps, let the canonical routed path enter one governed narrowed hybrid refresh instead of improvising raw source fallback
      - this ask-owned narrowed hybrid refresh is the Lane C path and is the only ordinary ask follow-up settled through hidden `progress`
@@ -280,8 +369,13 @@ If the environment cannot satisfy those capabilities, stop and explain the block
    - direct answer when supported
    - explicit non-answer boundary when not
    - one concise freshness or waiting note only when it materially helps the user
-   - if terminal hidden `_ask` returns `result_explanation.show_to_user = true`, append one concise explanation of what happened and the next legal action after the business answer, even when the user asked for an exact output shape
-   - keep successful grounded completions quiet; do not append explanation prose just because the field exists
+   - return the business `answer_text` unchanged, followed outside the artifact by exactly one
+     concise completion line; use `user_status_code` as the stable meaning and render the line
+     naturally in the user's language (`completed-and-verified` or
+     `completed-with-evidence-boundary`)
+   - show `governance_detail` only for blockers, evidence boundaries, diagnostics, or explicit
+     user inspection; never append trace IDs, manifest paths, repair codes, or release-entry
+     notices to a successful copy-ready artifact
 
 ## Escalation Rules
 
@@ -300,5 +394,7 @@ If the environment cannot satisfy those capabilities, stop and explain the block
 
 - A reconciled native turn is still only host-side context until the matching canonical ask turn has been opened.
 - `grounded-answer` and `grounded-composition` remain inner specialist workflows.
+- Host Hooks are optional accelerators. Never assume their context injection or one-shot Stop
+  continuation ran; without them, follow the same canonical contract directly.
 - Tracked repo search, live corpus discovery, knowledge-base artifact discovery, and runtime
   artifact discovery are different surfaces; do not substitute one for another silently.

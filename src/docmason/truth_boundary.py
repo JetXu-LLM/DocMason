@@ -460,14 +460,20 @@ def support_manifest_is_local_corpus(
     for source in candidate_sources:
         source_type = _nonempty_string(source.get("source_type"))
         if source_type in {
-            "local-file",
             "workspace-corpus",
             "original-doc",
             "kb-source",
             "published-corpus",
         }:
             return True
-        for field_name in ("url", "title", "path", "source_path", "current_path"):
+        for field_name in (
+            "url",
+            "title",
+            "path",
+            "source_path",
+            "current_path",
+            "locator",
+        ):
             value = _nonempty_string(source.get(field_name))
             if value is None:
                 continue

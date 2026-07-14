@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +34,14 @@ from .conversation import (
     load_turn_record,
     update_conversation_turn,
 )
-from .project import WorkspacePaths, locate_workspace
-from .release_entry import maybe_run_release_entry_check
+from .project import WorkspacePaths, locate_workspace, read_json
 from .retrieval import trace_answer_file
 from .runtime_log_index import discover_turn_artifact_candidates
+from .work_experience import normalize_new_decision_gate
 
-_WAITING_TURN_STATES = frozenset({"awaiting-confirmation", "waiting-shared-job"})
+_WAITING_TURN_STATES = frozenset(
+    {"awaiting-confirmation", "awaiting-user-decision", "waiting-shared-job"}
+)
 _REPAIRABLE_FINALIZE_ISSUE_CODES = frozenset(
     {"illegal-source-citation-path", "mixed-support-unexplained"}
 )
@@ -47,6 +51,7 @@ _TRUSTED_NATIVE_IDENTITY_SOURCES = frozenset(
 _HOST_NEXT_STEP_BY_STATUS = {
     "execute": "continue-inner-workflow",
     "awaiting-confirmation": "wait-for-user-confirmation",
+    "awaiting-user-decision": "wait-for-user-decision",
     "waiting-shared-job": "wait-for-shared-job",
     "completed": "return-final-answer",
     "boundary": "return-boundary-answer",
@@ -179,10 +184,22 @@ def _answer_text(paths: WorkspacePaths, answer_file_path: str | None) -> str | N
     if path is None or not path.exists():
         return None
     try:
-        text = path.read_text(encoding="utf-8").strip()
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    return text or None
+    return text if text.strip() else None
+
+
+def _write_exact_answer_text(path: Path, answer_text: str) -> None:
+    """Atomically install the exact host-supplied business answer."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(answer_text, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _resolved_answer_path(paths: WorkspacePaths, answer_file_path: str | None) -> Path | None:
@@ -230,7 +247,24 @@ def _autotrace_finalize_ids(
         inner_workflow_id=inner_workflow_id,
         answer_file_path=answer_file_path,
     )
-    if _string_list(turn.get("trace_ids")) or candidate_trace_ids:
+    exact_trace_ids: list[str] = []
+    exact_session_ids: list[str] = []
+    for trace_id in [*_string_list(turn.get("trace_ids")), *candidate_trace_ids]:
+        trace_payload = read_json(paths.retrieval_traces_dir / f"{trace_id}.json")
+        traced_answer = trace_payload.get("answer_text")
+        if not isinstance(traced_answer, str):
+            continue
+        if traced_answer != answer_path.read_text(encoding="utf-8"):
+            continue
+        exact_trace_ids.append(trace_id)
+        session_id = _nonempty_string(trace_payload.get("session_id"))
+        if session_id is not None:
+            exact_session_ids.append(session_id)
+    unique_exact_trace_ids = list(dict.fromkeys(exact_trace_ids))
+    unique_exact_session_ids = list(dict.fromkeys(exact_session_ids))
+    if len(unique_exact_trace_ids) == 1 and len(unique_exact_session_ids) <= 1:
+        return unique_exact_session_ids, unique_exact_trace_ids
+    if unique_exact_trace_ids:
         return None, None
     trace_result = trace_answer_file(
         paths,
@@ -248,10 +282,10 @@ def _autotrace_finalize_ids(
         declared_answer_state=_nonempty_string(turn.get("answer_state")),
     )
     session_id = _nonempty_string(trace_result.get("session_id"))
-    trace_id = _nonempty_string(trace_result.get("trace_id"))
-    if trace_id is None:
+    created_trace_id = _nonempty_string(trace_result.get("trace_id"))
+    if created_trace_id is None:
         return None, None
-    return [session_id] if session_id is not None else None, [trace_id]
+    return [session_id] if session_id is not None else None, [created_trace_id]
 
 
 def _next_step(status: str) -> str:
@@ -385,6 +419,8 @@ def _status_from_turn(turn: dict[str, Any]) -> tuple[str, bool]:
         return "execute", False
     if turn_state == "awaiting-confirmation":
         return "awaiting-confirmation", False
+    if turn_state == "awaiting-user-decision":
+        return "awaiting-user-decision", False
     if turn_state == "waiting-shared-job":
         return "waiting-shared-job", False
     return "blocked", False
@@ -550,17 +586,28 @@ def _host_turn_payload(
         if user_reply_allowed
         else None
     )
-    release_entry_notice = None
-    release_entry_status = None
-    if include_release_entry and user_reply_allowed:
-        try:
-            release_entry = maybe_run_release_entry_check(paths)
-        except Exception:
-            release_entry = {"notice": None, "release_entry_status": None}
-        release_entry_notice = _nonempty_string(release_entry.get("notice"))
-        release_entry_status = release_entry.get("release_entry_status")
-        if answer_text is not None and release_entry_notice is not None:
-            answer_text = f"{answer_text}\n\n{release_entry_notice}"
+    _ = include_release_entry  # compatibility-only argument; release checks are operator work.
+    user_status_line = None
+    user_status_code = None
+    if status == "completed":
+        if _nonempty_string(turn.get("answer_state")) == "partially-grounded":
+            user_status_code = "completed-with-evidence-boundary"
+            user_status_line = "Completed; the evidence boundary is noted."
+        else:
+            user_status_code = "completed-and-verified"
+            user_status_line = "Completed and verified."
+    elif status == "boundary":
+        user_status_code = "completed-with-evidence-boundary"
+        user_status_line = "Completed; the evidence boundary is noted."
+    governance_detail = {
+        "answer_state": _nonempty_string(turn.get("answer_state")),
+        "support_basis": _nonempty_string(turn.get("support_basis")),
+        "session_ids": _string_list(turn.get("session_ids")),
+        "trace_ids": _string_list(turn.get("trace_ids")),
+        "primary_issue_code": _nonempty_string(turn.get("primary_issue_code")),
+        "issue_codes": _string_list(turn.get("issue_codes")),
+        "result_explanation": result_explanation,
+    }
     return {
         "status": status,
         "user_reply_allowed": user_reply_allowed,
@@ -568,6 +615,9 @@ def _host_turn_payload(
         "turn_id": _nonempty_string(turn.get("turn_id")),
         "run_id": _nonempty_string(turn.get("committed_run_id") or turn.get("active_run_id")),
         "answer_text": answer_text,
+        "user_status_code": user_status_code,
+        "user_status_line": user_status_line,
+        "governance_detail": governance_detail,
         "answer_state": _nonempty_string(turn.get("answer_state")),
         "support_basis": _nonempty_string(turn.get("support_basis")),
         "session_ids": _string_list(turn.get("session_ids")),
@@ -614,8 +664,18 @@ def _host_turn_payload(
         "log_context": _turn_log_context(turn),
         "canonical_turn_state": _nonempty_string(turn.get("turn_state")),
         "canonical_turn_status": _nonempty_string(turn.get("status")),
-        "release_entry_notice": release_entry_notice,
-        "release_entry_status": release_entry_status,
+        "work_brief": _mapping(turn.get("work_brief")),
+        "revision_of": _nonempty_string(turn.get("revision_of")),
+        "continuation_type": _nonempty_string(turn.get("continuation_type")),
+        "revision_scope": _mapping(turn.get("revision_scope")),
+        "evidence_delta": turn.get("evidence_delta", []),
+        "decision_frontier": _mapping(turn.get("decision_frontier")) or None,
+        "decision_ledger": turn.get("decision_ledger", []),
+        "accepted_scopes": turn.get("accepted_scopes", []),
+        "affected_outputs": _string_list(turn.get("affected_outputs")),
+        "scope_freshness": _nonempty_string(turn.get("scope_freshness")),
+        "release_entry_notice": None,
+        "release_entry_status": None,
     }
 
 
@@ -800,12 +860,51 @@ def finalize_canonical_ask(
             "issue_codes": ["illegal-finalize-override"],
             "next_step": _next_step("blocked"),
         }
+    exact_answer_text = request.get("answer_text")
+    if isinstance(exact_answer_text, str):
+        if not exact_answer_text.strip():
+            return {
+                "status": "blocked",
+                "user_reply_allowed": False,
+                "conversation_id": conversation_id,
+                "turn_id": turn_id,
+                "run_id": _nonempty_string(turn.get("active_run_id")),
+                "detail": "Hidden ask finalize requires non-empty answer_text when supplied.",
+                "primary_issue_code": "empty-answer-text",
+                "issue_codes": ["empty-answer-text"],
+                "next_step": _next_step("blocked"),
+            }
+        canonical_answer_path = _resolved_answer_path(
+            paths, _nonempty_string(turn.get("answer_file_path"))
+        )
+        if canonical_answer_path is None:
+            raise ValueError("missing-canonical-answer-path")
+        _write_exact_answer_text(canonical_answer_path, exact_answer_text)
+        request = {
+            **request,
+            "answer_file_path": str(canonical_answer_path.relative_to(paths.root)),
+            "response_excerpt": request.get("response_excerpt") or exact_answer_text[:500],
+        }
     explicit_session_ids = (
         _string_list(request.get("session_ids")) if "session_ids" in request else None
     )
     explicit_trace_ids = (
         _string_list(request.get("trace_ids")) if "trace_ids" in request else None
     )
+    if explicit_session_ids is None and explicit_trace_ids is None and isinstance(
+        exact_answer_text, str
+    ):
+        recovered_session_ids, recovered_trace_ids = _autotrace_finalize_ids(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            turn={"conversation_id": conversation_id, "turn_id": turn_id, **turn},
+            request=request,
+        )
+        if recovered_session_ids is not None:
+            explicit_session_ids = recovered_session_ids
+        if recovered_trace_ids is not None:
+            explicit_trace_ids = recovered_trace_ids
     inner_workflow_id = str(turn.get("inner_workflow_id") or "grounded-answer")
     requested_answer_file_path = _nonempty_string(request.get("answer_file_path"))
     requested_response_excerpt = _nonempty_string(request.get("response_excerpt"))
@@ -1007,6 +1106,64 @@ def progress_canonical_ask(
         )
         if auto_settled_turn is not None:
             return _host_turn_payload(paths, turn=auto_settled_turn)
+    if "decision_frontier" in request:
+        if _nonempty_string(turn.get("turn_state")) not in {
+            "prepared",
+            "awaiting-user-decision",
+        }:
+            return {
+                "status": "blocked",
+                "user_reply_allowed": False,
+                "conversation_id": conversation_id,
+                "turn_id": turn_id,
+                "run_id": _nonempty_string(turn.get("active_run_id")),
+                "detail": (
+                    "A decision gate can only be opened on a prepared canonical turn; "
+                    "create a linked continuation for completed or reconciled work."
+                ),
+                "primary_issue_code": "decision-gate-turn-not-progressable",
+                "issue_codes": ["decision-gate-turn-not-progressable"],
+                "next_step": _next_step("blocked"),
+            }
+        existing_gate = _mapping(turn.get("decision_frontier"))
+        if existing_gate.get("status") == "open":
+            return _host_turn_payload(
+                paths,
+                turn=turn,
+                detail=str(existing_gate.get("question") or "A user decision is pending."),
+            )
+        gate = normalize_new_decision_gate(request.get("decision_frontier"))
+        if gate is None or gate.get("status") != "open":
+            return {
+                "status": "blocked",
+                "user_reply_allowed": False,
+                "conversation_id": conversation_id,
+                "turn_id": turn_id,
+                "run_id": _nonempty_string(turn.get("active_run_id")),
+                "detail": (
+                    "A decision gate requires a material judgment/authority class, question, "
+                    "and why the user is required."
+                ),
+                "primary_issue_code": "invalid-decision-gate",
+                "issue_codes": ["invalid-decision-gate"],
+                "next_step": _next_step("blocked"),
+            }
+        updated = update_conversation_turn(
+            paths,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            updates={
+                "decision_frontier": gate,
+                "status": "awaiting-user-decision",
+                "turn_state": "awaiting-user-decision",
+                "freshness_notice": gate["question"],
+            },
+        )
+        return _host_turn_payload(
+            paths,
+            turn={"conversation_id": conversation_id, "turn_id": turn_id, **updated},
+            detail=str(gate["question"]),
+        )
     completion_status = _nonempty_string(
         request.get("hybrid_refresh_completion_status") or request.get("completion_status")
     )
@@ -1083,14 +1240,19 @@ def handle_hidden_ask_request(
                     "issue_codes": ["missing-question"],
                     "next_step": _next_step("blocked"),
                 })
+            semantic_analysis_input = request.get("semantic_analysis")
+            semantic_analysis = (
+                dict(semantic_analysis_input)
+                if isinstance(semantic_analysis_input, dict)
+                else {}
+            )
+            for field_name in ("attachments", "evidence_items", "evidence_packet"):
+                if field_name in request and field_name not in semantic_analysis:
+                    semantic_analysis[field_name] = request[field_name]
             return _with_result_explanation(open_canonical_ask(
                 workspace,
                 question=question,
-                semantic_analysis=(
-                    request.get("semantic_analysis")
-                    if isinstance(request.get("semantic_analysis"), dict)
-                    else None
-                ),
+                semantic_analysis=semantic_analysis or None,
                 log_origin=_nonempty_string(request.get("log_origin")),
                 host_provider=_nonempty_string(request.get("host_provider")),
                 host_thread_ref=_nonempty_string(request.get("host_thread_ref")),

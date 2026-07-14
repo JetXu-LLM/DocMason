@@ -41,6 +41,7 @@ from .conversation import (
     build_log_context,
     current_host_identity,
     load_bound_conversation_record_for_host,
+    load_conversation_record,
     load_turn_record,
     normalize_front_door_state,
     normalize_log_origin,
@@ -53,6 +54,7 @@ from .conversation import (
 from .front_controller import (
     load_support_manifest,
     question_execution_profile,
+    validate_support_manifest_binding,
     write_external_support_manifest,
     write_hybrid_refresh_work,
 )
@@ -97,6 +99,11 @@ from .truth_boundary import (
     apply_machine_semantic_guard,
     build_source_scope_policy,
     support_manifest_is_local_corpus,
+)
+from .work_experience import (
+    build_turn_work_state,
+    evidence_packet_support_sources,
+    resolve_continuation_anchor,
 )
 
 _HOST_SNIPPET_FILENAMES = frozenset({"<stdin>", "<string>"})
@@ -182,21 +189,7 @@ def _interaction_backlog_policy(
         if isinstance(source_scope_policy, dict)
         else "global"
     )
-    exact_or_source_narrowed_reference = (
-        isinstance(reference_resolution, dict)
-        and (
-            str(reference_resolution.get("status") or "") == "exact"
-            or (
-                str(reference_resolution.get("source_match_status") or "") == "exact"
-                and bool(reference_resolution.get("source_narrowing_allowed"))
-            )
-        )
-    )
-    narrowed_exact_source = (
-        question_class in {"answer", "composition"}
-        and exact_or_source_narrowed_reference
-        and inspection_scope in {"source", "unit", "compare"}
-    )
+    _ = (question_class, inspection_scope, reference_resolution)
     if scope_mode in {"source-scoped-hard", "compare"}:
         notice = (
             "Pending interaction-derived backlog was ignored for this strict source-scoped ask."
@@ -207,19 +200,13 @@ def _interaction_backlog_policy(
             "Pending interaction-derived runtime state could not be read completely "
             "during this check."
         )
-        return {
-            "state": "advisory" if narrowed_exact_source else "blocking",
-            "notice": notice,
-        }
+        return {"state": "advisory", "notice": notice}
     if interaction_relevance.get("has_relevant_pending_interaction"):
         notice = (
             "Pending interaction-derived knowledge appears relevant and still "
             "awaits sync-time promotion."
         )
-        return {
-            "state": "advisory" if narrowed_exact_source else "blocking",
-            "notice": notice,
-        }
+        return {"state": "advisory", "notice": notice}
     return {"state": "ignored", "notice": None}
 
 
@@ -233,6 +220,25 @@ def _latest_trace_record(paths: WorkspacePaths, trace_ids: list[str] | None) -> 
         if payload:
             return payload
     return {}
+
+
+def _artifact_ids_created_for_turn(
+    paths: WorkspacePaths,
+    artifact_ids: list[str],
+    *,
+    conversation_id: str,
+    turn_id: str,
+    trace: bool,
+) -> bool:
+    directory = paths.retrieval_traces_dir if trace else paths.query_sessions_dir
+    for artifact_id in artifact_ids:
+        payload = read_json(directory / f"{artifact_id}.json")
+        if (
+            payload.get("conversation_id") == conversation_id
+            and payload.get("turn_id") == turn_id
+        ):
+            return True
+    return False
 
 
 def _resolve_scalar(
@@ -575,7 +581,7 @@ def _resolved_answer_path(paths: WorkspacePaths, answer_file_path: Any) -> Path 
 
 
 def _answer_text_digest(answer_text: str) -> str:
-    return hashlib.sha256(answer_text.strip().encode("utf-8")).hexdigest()
+    return hashlib.sha256(answer_text.encode("utf-8")).hexdigest()
 
 
 def _selected_turn_log_artifact_ids(
@@ -694,6 +700,7 @@ def _sync_turn_log_artifacts(
     mixed_support_explainable: bool | None = None,
     primary_issue_code: str | None = None,
     issue_codes: list[str] | None = None,
+    inherited_session_ids: list[str] | None = None,
 ) -> None:
     update_fields = {
         "conversation_id": conversation_id,
@@ -736,6 +743,8 @@ def _sync_turn_log_artifacts(
     if semantic_log_context:
         update_fields.update(semantic_log_context)
     for session_id in session_ids:
+        if session_id in (inherited_session_ids or []):
+            continue
         session_path = paths.query_sessions_dir / f"{session_id}.json"
         payload = read_json(session_path)
         if not payload:
@@ -760,14 +769,14 @@ def _changed_source_relevance(
     source_scope_policy: dict[str, Any] | None,
     reference_resolution: dict[str, Any] | None,
     needs_latest_workspace_state: bool,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     changed_sources = [
         change
         for change in change_set.get("changes", [])
         if isinstance(change, dict) and change.get("change_classification") != "unchanged"
     ]
     if not changed_sources:
-        return False, "No current source drift was detected."
+        return False, "No current source drift was detected.", "no-relevant-delta"
 
     changed_source_ids = {
         str(change.get("source_id"))
@@ -792,12 +801,24 @@ def _changed_source_relevance(
     )
     if resolved_source_id and source_match_status in {"exact", "approximate"}:
         if resolved_source_id in changed_source_ids:
-            return True, "The resolved source reference points to a changed source."
+            return (
+                True,
+                "The resolved source reference points to a changed source.",
+                "relevant-delta",
+            )
         if source_match_status == "exact":
-            return False, "The resolved source reference points to an unchanged source."
+            return (
+                False,
+                "The resolved source reference points to an unchanged source.",
+                "no-relevant-delta",
+            )
 
     if needs_latest_workspace_state:
-        return True, "The semantic analysis explicitly requires the latest workspace state."
+        return (
+            True,
+            "The semantic analysis explicitly requires the latest workspace state.",
+            "relevant-delta",
+        )
 
     question_tokens = set(tokenize_text(question))
     for change in changed_sources:
@@ -805,15 +826,24 @@ def _changed_source_relevance(
         previous_path = str(change.get("previous_path") or "")
         searchable = set(tokenize_text(f"{current_path} {previous_path}"))
         if question_tokens & searchable:
-            return True, "Changed source paths overlap lexically with the current question."
+            return (
+                True,
+                "Changed source paths overlap lexically with the current question.",
+                "relevant-delta",
+            )
 
     if scope_mode in {"source-scoped-hard", "compare"}:
         return (
             False,
             "The strict source-scoped ask does not currently point at a changed published source.",
+            "no-relevant-delta",
         )
 
-    return True, "Change relevance is uncertain, so the ask path is biasing to sync."
+    return (
+        False,
+        "Target freshness remains unresolved, so unrelated corpus drift will not trigger sync.",
+        "unresolved-target-freshness",
+    )
 
 
 def _auto_sync_summary(sync_result: dict[str, Any]) -> dict[str, Any]:
@@ -2260,6 +2290,120 @@ def prepare_ask_turn(
             turn_id=opened["turn_id"],
         ),
     }
+    conversation = load_conversation_record(paths, opened["conversation_id"])
+    prior_turns = [
+        turn
+        for turn in conversation.get("turns", [])
+        if isinstance(turn, dict) and turn.get("turn_id") != opened["turn_id"]
+    ]
+    previous_turn, continuation_issue = resolve_continuation_anchor(
+        prior_turns,
+        semantic_analysis,
+    )
+    work_state = build_turn_work_state(
+        paths,
+        question=question,
+        semantic_analysis=semantic_analysis,
+        previous_turn=previous_turn,
+        turn_id=opened["turn_id"],
+    )
+    if continuation_issue is not None:
+        work_state["work_state_issue_code"] = continuation_issue["code"]
+        work_state["work_state_issue_detail"] = continuation_issue["detail"]
+    if (
+        work_state.get("work_state_issue_code") is None
+        and work_state.get("continuation_type") == "decision-resolution"
+        and isinstance(previous_turn, dict)
+        and isinstance(work_state.get("decision_frontier"), dict)
+        and work_state["decision_frontier"].get("status") == "resolved"
+    ):
+        update_conversation_turn(
+            paths,
+            conversation_id=opened["conversation_id"],
+            turn_id=str(previous_turn["turn_id"]),
+            updates={
+                "decision_frontier": work_state["decision_frontier"],
+                "decision_ledger": work_state["decision_ledger"],
+                "status": "decision-resolved",
+                "turn_state": "reconciled",
+                "freshness_notice": None,
+            },
+            refresh_workspace_snapshot=False,
+        )
+    inherited_updates: dict[str, Any] = {}
+    if work_state["reused_previous_evidence"] and isinstance(previous_turn, dict):
+        for field_name in (
+            "session_ids",
+            "selected_session_ids",
+            "support_basis",
+            "support_contract",
+            "reference_resolution",
+            "reference_resolution_summary",
+            "source_scope_policy",
+            "inspection_scope",
+            "preferred_channels",
+            "used_published_channels",
+            "published_artifacts_sufficient",
+        ):
+            if field_name in previous_turn:
+                inherited_updates[field_name] = previous_turn[field_name]
+        inherited_updates["inherited_session_ids"] = [
+            value
+            for value in previous_turn.get("session_ids", [])
+            if isinstance(value, str) and value
+        ]
+    current_turn = {
+        "conversation_id": opened["conversation_id"],
+        "turn_id": opened["turn_id"],
+        **update_conversation_turn(
+            paths,
+            conversation_id=opened["conversation_id"],
+            turn_id=opened["turn_id"],
+            updates={**work_state, **inherited_updates},
+            refresh_workspace_snapshot=False,
+        ),
+    }
+    work_state_issue_code = work_state.get("work_state_issue_code")
+    if isinstance(work_state_issue_code, str) and work_state_issue_code:
+        work_state_issue_detail = str(
+            work_state.get("work_state_issue_detail")
+            or "The requested continuation does not have a legal work-state anchor."
+        )
+        blocked_turn = update_conversation_turn(
+            paths,
+            conversation_id=opened["conversation_id"],
+            turn_id=opened["turn_id"],
+            updates={
+                "status": "action-required",
+                "turn_state": "reconciled",
+                "route_reason": work_state_issue_detail,
+                "freshness_notice": work_state_issue_detail,
+                "primary_issue_code": work_state_issue_code,
+                "issue_codes": [work_state_issue_code],
+            },
+            refresh_workspace_snapshot=False,
+        )
+        record_run_event(
+            paths,
+            run_id=run_id,
+            stage="prepare",
+            event_type="work-state-blocked",
+            payload={"issue_code": work_state_issue_code},
+        )
+        return {
+            **opened,
+            "run_id": run_id,
+            "status": "action-required",
+            "detail": work_state_issue_detail,
+            "route_reason": work_state_issue_detail,
+            "primary_issue_code": work_state_issue_code,
+            "issue_codes": [work_state_issue_code],
+            "turn_state": blocked_turn.get("turn_state"),
+        }
+    constraint_fast_path = bool(
+        work_state["reused_previous_evidence"]
+        and work_state["continuation_type"] in {"constraint-update", "decision-resolution"}
+    )
     knowledge_base = opened["workspace_snapshot"]["knowledge_base"]
     profile = question_execution_profile(
         paths,
@@ -2290,6 +2434,10 @@ def prepare_ask_turn(
     needs_latest_workspace_state = bool(profile["needs_latest_workspace_state"])
     analysis_origin = str(profile["analysis_origin"])
     normalized_semantic_analysis = dict(profile["semantic_analysis"])
+    decision_gate_open = bool(
+        isinstance(work_state.get("decision_frontier"), dict)
+        and work_state["decision_frontier"].get("status") == "open"
+    )
     current_version_truth = version_context(paths)
     current_governance_basis = _governance_basis(
         question_digest=_question_digest(question),
@@ -2375,7 +2523,9 @@ def prepare_ask_turn(
     )
     interaction_snapshot = interaction_ingest_snapshot(paths)
     warm_start = profile["warm_start_evidence"]
-    workspace_notices_enabled = _workspace_notices_enabled(question_domain)
+    workspace_notices_enabled = (
+        _workspace_notices_enabled(question_domain) and not decision_gate_open
+    )
     reference_resolution = (
         resolve_workspace_reference(
             paths,
@@ -2420,6 +2570,23 @@ def prepare_ask_turn(
         source_scope_policy=source_scope_policy,
         prefer_published_artifacts=prefer_published_artifacts,
     )
+    if constraint_fast_path and isinstance(previous_turn, dict):
+        reference_resolution = previous_turn.get("reference_resolution")
+        reference_resolution_summary = previous_turn.get("reference_resolution_summary")
+        previous_scope_policy = previous_turn.get("source_scope_policy")
+        if isinstance(previous_scope_policy, dict):
+            source_scope_policy = dict(previous_scope_policy)
+        previous_support_contract = previous_turn.get("support_contract")
+        if isinstance(previous_support_contract, dict):
+            support_contract = dict(previous_support_contract)
+        previous_inspection_scope = previous_turn.get("inspection_scope")
+        if isinstance(previous_inspection_scope, str) and previous_inspection_scope:
+            inspection_scope = previous_inspection_scope
+        previous_channels = previous_turn.get("preferred_channels")
+        if isinstance(previous_channels, list):
+            preferred_channels = [
+                channel for channel in previous_channels if isinstance(channel, str)
+            ]
     normalized_semantic_analysis["question_domain"] = question_domain
     normalized_semantic_analysis["support_strategy"] = support_strategy
     normalized_semantic_analysis["analysis_guard_applied"] = bool(
@@ -2519,7 +2686,12 @@ def prepare_ask_turn(
             )
         )
         freshness_notice = "No published knowledge base is available yet."
-    elif workspace_notices_enabled and question_domain == "workspace-corpus" and environment_ready:
+    elif (
+        workspace_notices_enabled
+        and question_domain == "workspace-corpus"
+        and environment_ready
+        and not constraint_fast_path
+    ):
         should_auto_sync = False
         candidate_reason = None
         if not knowledge_base["present"]:
@@ -2531,7 +2703,7 @@ def prepare_ask_turn(
             _index_preview, _active_preview, _ambiguous_preview, preview_change_set = (
                 _preview_source_changes(paths)
             )
-            should_auto_sync, candidate_reason = _changed_source_relevance(
+            should_auto_sync, candidate_reason, scope_freshness = _changed_source_relevance(
                 question=question,
                 change_set=preview_change_set,
                 source_scope_policy=source_scope_policy,
@@ -2540,15 +2712,22 @@ def prepare_ask_turn(
             )
             sync_suggested = should_auto_sync
             prefer_sync_before_answer = should_auto_sync
+            work_state["scope_freshness"] = scope_freshness
             if not should_auto_sync:
                 freshness_notice = (
-                    "The published knowledge base is stale, but the current question appears "
-                    "unrelated to the changed sources."
+                    "The published knowledge base is stale, and target freshness remains "
+                    "unresolved; unrelated corpus drift did not trigger a global sync."
+                    if scope_freshness == "unresolved-target-freshness"
+                    else (
+                        "The published knowledge base is stale, but the current question is "
+                        "outside the changed source scope."
+                    )
                 )
     if (
         workspace_notices_enabled
         and question_domain == "workspace-corpus"
         and not action_required
+        and not constraint_fast_path
         and interaction_snapshot["pending_promotion_count"]
     ):
         backlog_notice = (
@@ -2569,6 +2748,7 @@ def prepare_ask_turn(
         workspace_notices_enabled
         and question_domain == "workspace-corpus"
         and environment_ready
+        and not constraint_fast_path
         and (
             (not knowledge_base["present"])
             or (knowledge_base["stale"] and prefer_sync_before_answer)
@@ -2739,7 +2919,12 @@ def prepare_ask_turn(
             "safely from current state."
         )
         freshness_notice = "No published knowledge base is available yet."
-    elif not action_required and knowledge_base["stale"] and workspace_notices_enabled:
+    elif (
+        not action_required
+        and knowledge_base["stale"]
+        and workspace_notices_enabled
+        and not constraint_fast_path
+    ):
         sync_suggested = True
         freshness_notice = "The published knowledge base appears stale relative to `original_doc/`."
         if needs_latest_workspace_state:
@@ -2754,7 +2939,11 @@ def prepare_ask_turn(
         and backlog_policy.get("state") in {"blocking", "advisory"}
     )
 
-    if control_plane_pause_state == "awaiting-confirmation":
+    if decision_gate_open:
+        status = "awaiting-user-decision"
+        gate = work_state["decision_frontier"]
+        freshness_notice = str(gate.get("question") or "A material user decision is required.")
+    elif control_plane_pause_state == "awaiting-confirmation":
         status = "awaiting-confirmation"
         if confirmation_prompt:
             freshness_notice = confirmation_prompt
@@ -2803,7 +2992,10 @@ def prepare_ask_turn(
             ),
             "research_depth": research_depth,
             "bundle_paths": bundle_paths,
-            "reused_previous_evidence": bool(warm_start.get("matched_records")),
+            **work_state,
+            "reused_previous_evidence": bool(
+                work_state["reused_previous_evidence"] or warm_start.get("matched_records")
+            ),
             "captured_interaction_ids": latest_captured_interaction_ids,
             "attached_shared_job_ids": attached_shared_job_ids,
             "confirmation_kind": confirmation_kind,
@@ -2815,7 +3007,11 @@ def prepare_ask_turn(
             "log_origin": effective_log_origin,
             "turn_state": (
                 status
-                if status in {"awaiting-confirmation", "waiting-shared-job"}
+                if status in {
+                    "awaiting-confirmation",
+                    "awaiting-user-decision",
+                    "waiting-shared-job",
+                }
                 else "prepared"
             ),
             "status": status,
@@ -3132,7 +3328,7 @@ def complete_ask_turn(
             if session_ids is not None
             else (workflow_session_ids if workflow_session_ids else None)
         ),
-        current_ids=selected_session_ids or current_turn.get("session_ids"),
+        current_ids=selected_session_ids,
         discovered_ids=discovered_session_ids,
     )
     effective_trace_ids = _resolved_log_artifact_ids(
@@ -3141,7 +3337,7 @@ def complete_ask_turn(
             if trace_ids is not None
             else (workflow_trace_ids if workflow_trace_ids else None)
         ),
-        current_ids=selected_trace_ids or current_turn.get("trace_ids"),
+        current_ids=selected_trace_ids,
         discovered_ids=discovered_trace_ids,
     )
     latest_trace_payload = _latest_trace_record(paths, effective_trace_ids)
@@ -3388,6 +3584,39 @@ def complete_ask_turn(
         )
         if isinstance(source, dict)
     ]
+    if not resolved_support_manifest_sources and effective_support_basis in {
+        "external-source-verified",
+        "mixed",
+    }:
+        resolved_support_manifest_sources = evidence_packet_support_sources(
+            current_turn.get("evidence_packet")
+        )
+    if (
+        effective_support_basis in {"external-source-verified", "mixed"}
+        and isinstance(resolved_support_manifest_path, str)
+        and resolved_support_manifest_path
+    ):
+        candidate_manifest = load_support_manifest(
+            paths,
+            support_manifest_path_value=resolved_support_manifest_path,
+        )
+        binding_issues = validate_support_manifest_binding(
+            paths,
+            candidate_manifest,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            answer_file_path=(
+                resolved_answer_file_path
+                if isinstance(resolved_answer_file_path, str)
+                else None
+            ),
+            support_basis=effective_support_basis,
+        )
+        if binding_issues:
+            # A manifest is answer identity, not reusable evidence.  Sources may be
+            # inherited, but the current turn always receives a current digest-bound
+            # manifest or fails admissibility when no source packet is available.
+            resolved_support_manifest_path = None
     effective_answer_state = (
         resolved_answer_state
         if isinstance(resolved_answer_state, str)
@@ -3408,20 +3637,14 @@ def complete_ask_turn(
             )
         )
     if (
-        effective_support_basis == "external-source-verified"
+        effective_support_basis in {"external-source-verified", "mixed"}
         and not resolved_support_manifest_path
         and isinstance(resolved_answer_file_path, str)
         and isinstance(
-            support_manifest_sources
-            if support_manifest_sources is not None
-            else workflow_support_manifest_sources,
+            resolved_support_manifest_sources,
             list,
         )
-        and bool(
-            support_manifest_sources
-            if support_manifest_sources is not None
-            else workflow_support_manifest_sources
-        )
+        and bool(resolved_support_manifest_sources)
         and not explicit_local_manifest
     ):
         resolved_support_manifest_path = write_external_support_manifest(
@@ -3656,6 +3879,20 @@ def complete_ask_turn(
             "trace_ids": effective_trace_ids,
             "selected_session_ids": resolved_session_ids,
             "selected_trace_ids": effective_trace_ids,
+            "new_retrieval_executed": _artifact_ids_created_for_turn(
+                paths,
+                resolved_session_ids,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                trace=False,
+            ),
+            "new_trace_executed": _artifact_ids_created_for_turn(
+                paths,
+                effective_trace_ids,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                trace=True,
+            ),
             "freshness_notice": None,
             "answer_state": effective_answer_state,
             "render_inspection_required": resolved_render_inspection_required,
@@ -3720,11 +3957,19 @@ def complete_ask_turn(
             ),
         ),
     )
+    result_updates: dict[str, Any] = {"result_explanation": result_explanation}
+    closure_continuation = updated.get("closure_continuation")
+    if isinstance(closure_continuation, dict):
+        result_updates["closure_continuation"] = {
+            **closure_continuation,
+            "status": "completed",
+            "completed_at": utc_now(),
+        }
     updated = update_conversation_turn(
         paths,
         conversation_id=conversation_id,
         turn_id=turn_id,
-        updates={"result_explanation": result_explanation},
+        updates=result_updates,
         refresh_workspace_snapshot=False,
     )
     _sync_turn_log_artifacts(
@@ -3822,6 +4067,11 @@ def complete_ask_turn(
         support_fulfillment=support_fulfillment,
         workflow_outcome=normalized_workflow_outcome,
         contract_repair_count=resolved_contract_repair_count,
+        inherited_session_ids=[
+            value
+            for value in updated.get("inherited_session_ids", [])
+            if isinstance(value, str) and value
+        ],
     )
     projection_refresh = queue_projection_refresh(
         paths,

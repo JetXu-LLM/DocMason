@@ -57,8 +57,9 @@ They are copied into `original_doc/` only when a contributor explicitly material
 
 ## Update Behavior
 
-Generated bundles may participate in the bounded release-entry contract documented in [Release Entry And Networking](../policies/release-entry-and-networking.md).
-That contract exists only to support update checks and explicit `docmason update-core`; it is not a general telemetry surface.
+Generated bundles participate in the bounded [Release Entry And Networking](../policies/release-entry-and-networking.md)
+contract only when the user explicitly runs `docmason update-core` without a local `--bundle`.
+It is not a background update check or a general telemetry surface.
 
 ## Choosing The Right Path
 

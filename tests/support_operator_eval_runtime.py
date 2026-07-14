@@ -18,6 +18,7 @@ from docmason.evaluation import (
     load_evaluation_suite,
     load_rubric_definition,
 )
+from docmason.front_controller import write_external_support_manifest
 from docmason.operator_eval import load_operator_request
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import trace_answer_file
@@ -513,28 +514,21 @@ class OperatorEvalRuntimeTests(unittest.TestCase):
             "It also proves DocMason already ships watch mode.",
             encoding="utf-8",
         )
-        manifest_path = (
-            workspace.agent_work_dir
-            / turn["conversation_id"]
-            / turn["turn_id"]
-            / "external-support-manifest.json"
-        )
-        manifest_relative = str(manifest_path.relative_to(workspace.root))
-        write_json(
-            manifest_path,
-            {
-                "support_basis": "mixed",
-                "answer_file_path": turn["answer_file_path"],
-                "sources": [
-                    {
-                        "url": "https://example.com/operator-review",
-                        "title": "Operator review note",
-                        "source_type": "official-doc",
-                        "support_snippet": "Example mixed-support reference.",
-                    }
-                ],
-                "key_assertions": ["Example mixed-support assertion."],
-            },
+        manifest_relative = write_external_support_manifest(
+            workspace,
+            conversation_id=turn["conversation_id"],
+            turn_id=turn["turn_id"],
+            answer_file_path=turn["answer_file_path"],
+            support_basis="mixed",
+            sources=[
+                {
+                    "url": "https://example.com/operator-review",
+                    "title": "Operator review note",
+                    "source_type": "official-doc",
+                    "support_snippet": "Example mixed-support reference.",
+                }
+            ],
+            key_assertions=["Example mixed-support assertion."],
         )
         trace = trace_answer_file(
             workspace,

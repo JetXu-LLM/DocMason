@@ -260,6 +260,9 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                 clean_manifest = json.loads(
                     archive.read("distribution-manifest.json").decode("utf-8")
                 )
+                clean_release_state = json.loads(
+                    archive.read("runtime/state/release-client.json").decode("utf-8")
+                )
             self.assertIn("README.md", names)
             self.assertIn(".github/copilot-instructions.md", names)
             self.assertIn("distribution-manifest.json", names)
@@ -279,13 +282,14 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             )
             self.assertEqual(
                 clean_manifest["release_entry"]["automatic_check_scope"],
-                "canonical-ask",
+                "explicit-update-core",
             )
             self.assertEqual(
                 clean_manifest["release_entry"]["automatic_check_cooldown_hours"],
                 20,
             )
-            self.assertTrue(clean_manifest["release_entry"]["automatic_check_enabled_by_default"])
+            self.assertFalse(clean_manifest["release_entry"]["automatic_check_enabled_by_default"])
+            self.assertFalse(clean_release_state["automatic_check_enabled"])
             self.assertEqual(
                 clean_manifest["source_commit"],
                 "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -387,7 +391,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
                 names = set(archive.namelist())
             self.assertNotIn("ops/release-entry/worker.js", names)
 
-    def test_build_distributions_non_git_fallback_skips_symlinked_files(self) -> None:
+    def test_build_distributions_non_git_fallback_is_private_and_keeps_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:
             tempdir = Path(tempdir_name)
             repo_root = tempdir / "repo"
@@ -418,6 +422,20 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             )
             (repo_root / "sample_corpus" / "ico-gcs" / "gcs" / "fixture.md").write_text(
                 "fixture\n",
+                encoding="utf-8",
+            )
+            (repo_root / ".codex" / "hooks").mkdir(parents=True)
+            (repo_root / ".codex" / "hooks.json").write_text(
+                '{"hooks": {}}\n',
+                encoding="utf-8",
+            )
+            (repo_root / ".codex" / "hooks" / "on-prompt.sh").write_text(
+                "#!/bin/bash\nexit 0\n",
+                encoding="utf-8",
+            )
+            (repo_root / "skills" / "private").mkdir(parents=True)
+            (repo_root / "skills" / "private" / "private-skill.md").write_text(
+                "must not ship\n",
                 encoding="utf-8",
             )
             (repo_root / "leak.txt").symlink_to(outside_file)
@@ -451,6 +469,9 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             with zipfile.ZipFile(output_dir / "DocMason-clean.zip") as archive:
                 names = set(archive.namelist())
             self.assertNotIn("leak.txt", names)
+            self.assertNotIn("skills/private/private-skill.md", names)
+            self.assertIn(".codex/hooks.json", names)
+            self.assertIn(".codex/hooks/on-prompt.sh", names)
 
     def test_build_distributions_rejects_mismatched_release_tag(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:
@@ -604,9 +625,7 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             )
             self.assertEqual(
                 json.loads(
-                    (workspace.root / "distribution-manifest.json").read_text(
-                        encoding="utf-8"
-                    )
+                    (workspace.root / "distribution-manifest.json").read_text(encoding="utf-8")
                 )["source_version"],
                 "v0.2.0",
             )
@@ -923,6 +942,34 @@ class DistributionAndPrivacyTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_repo_safety_check_rejects_forced_private_skill_tracking(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir_name:
+            repo_root = Path(tempdir_name)
+            subprocess.run(["git", "init", "-q"], cwd=repo_root, check=True)
+            private_skill = repo_root / "skills" / "private" / "local" / "SKILL.md"
+            private_skill.parent.mkdir(parents=True)
+            private_skill.write_text("private\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-f", "skills/private/local/SKILL.md"],
+                cwd=repo_root,
+                check=True,
+            )
+
+            result = subprocess.run(
+                [
+                    PYTHON,
+                    str(ROOT / "scripts" / "check-repo-safety.py"),
+                    "--repo-root",
+                    str(repo_root),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("skills/private/local/SKILL.md", result.stderr)
 
     def test_repo_safety_check_skips_non_git_bundle_root(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir_name:

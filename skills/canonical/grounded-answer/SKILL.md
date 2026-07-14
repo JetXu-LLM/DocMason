@@ -29,6 +29,9 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
 ## Procedure
 
 1. Start from canonical ask turn metadata instead of assuming every direct answer is purely KB-grounded.
+   - honor the ask-owned `work_brief`, resolved decisions, accepted scopes, and affected-output
+     boundary; use them to preserve the intended medium and critical distinctions without
+     reopening decisions this workflow does not own
    - treat `answer_state` as the top-level four-state answer contract
    - choose an explicit `support_basis` for the overall answer:
      - `kb-grounded`
@@ -101,7 +104,9 @@ If the agent cannot inspect required rendered evidence, stop and explain that th
    - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; prefer the structured `workflow_outcome` handoff when the workflow already knows the correct `support_basis`, selected IDs, or other finalize-owned facts
    - if finalize returns `status = execute` together with a repairable `support_fulfillment`, do one contract-aware rewrite and retrace on the same turn, then finalize once more
    - if finalize returns `status = execute` together with `admissibility_repair`, use its issue codes and suggested action to rewrite the same answer file, rerun trace, and finalize once more
-   - if terminal finalize returns `result_explanation.show_to_user = true`, keep that explanation separate from the canonical answer file and append it after the business answer as concise user-facing closure context, even when the user asked for an exact output shape
+   - do not render terminal closure metadata yourself; return the exact business answer and
+     workflow-owned support facts to `ask`, which alone decides whether a separate status line or
+     boundary explanation is user-visible
 10. Emit one of these final answer states:
    - `grounded`
    - `partially-grounded`

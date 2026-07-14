@@ -16,6 +16,10 @@ PROTECTED_TOP_LEVEL = {
     "planning",
     "runtime",
 }
+PROTECTED_SUBTREES = {
+    Path("scripts") / "private",
+    Path("skills") / "private",
+}
 ALLOWED_TRACKED_FILES = {
     "original_doc/.gitkeep",
     "knowledge_base/.gitkeep",
@@ -77,8 +81,12 @@ def validate_paths(paths: list[str]) -> list[str]:
     for raw_path in paths:
         if raw_path in ALLOWED_TRACKED_FILES:
             continue
-        top_level = Path(raw_path).parts[0] if Path(raw_path).parts else ""
-        if top_level in PROTECTED_TOP_LEVEL:
+        path = Path(raw_path)
+        top_level = path.parts[0] if path.parts else ""
+        protected_subtree = any(
+            path == subtree or subtree in path.parents for subtree in PROTECTED_SUBTREES
+        )
+        if top_level in PROTECTED_TOP_LEVEL or protected_subtree:
             violations.append(raw_path)
     return violations
 

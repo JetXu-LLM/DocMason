@@ -19,6 +19,7 @@ TURN_STATES = frozenset(
         "reconciled",
         "waiting-shared-job",
         "awaiting-confirmation",
+        "awaiting-user-decision",
         "committed",
         "completed",
     }

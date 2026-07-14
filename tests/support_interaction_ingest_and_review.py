@@ -30,6 +30,7 @@ from docmason.interaction import (
     reconcile_codex_thread,
     refresh_interaction_overlay,
 )
+from docmason.knowledge import sync_workspace as run_phase4_sync
 from docmason.project import WorkspacePaths, read_json, write_json
 from docmason.retrieval import merge_pending_interaction_overlay, retrieve_corpus, trace_source
 from docmason.review import refresh_log_review_summary
@@ -1033,9 +1034,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         )["turns"][0]
         captured_ids = live_turn["captured_interaction_ids"]
         self.assertEqual(len(captured_ids), 1)
-        captured_entry = read_json(
-            workspace.interaction_entries_dir / f"{captured_ids[0]}.json"
-        )
+        captured_entry = read_json(workspace.interaction_entries_dir / f"{captured_ids[0]}.json")
         self.assertFalse(captured_entry["pending_promotion"])
         self.assertEqual(captured_entry["status"], "operator-evidence-only")
         self.assertEqual(
@@ -1185,6 +1184,46 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
 
         self.assertFalse(turn["auto_sync_triggered"])
         self.assertTrue(turn["interaction_sync_suggested"])
+
+    def test_foreground_interaction_promotion_defers_without_kb_publication(self) -> None:
+        workspace = self.make_workspace()
+        self.mark_environment_ready(workspace)
+        self.create_pdf(workspace.source_dir / "a.pdf")
+        self.create_pdf(workspace.source_dir / "b.pdf")
+        source_ids = self.publish_seeded_corpus(workspace)
+        thread_id = "thread-foreground-promotion"
+        state_db, sessions_root = self.write_fake_codex_storage(
+            workspace,
+            thread_id=thread_id,
+            source_ids=source_ids,
+        )
+        with (
+            self.patch_codex_storage(state_db, sessions_root),
+            self.patch_interaction_storage(state_db, sessions_root),
+        ):
+            reconcile_codex_thread(workspace, thread_id=thread_id)
+
+        previous_snapshot = read_json(workspace.current_publish_manifest_path).get("snapshot_id")
+        result = run_phase4_sync(
+            workspace,
+            autonomous=False,
+            run_id="ask-run-foreground-promotion",
+        )
+
+        self.assertEqual(result["rebuild_cause"], "interaction-promotion-only")
+        self.assertFalse(result["published"])
+        self.assertTrue(result["publish_skipped"])
+        self.assertEqual(result["phase_costs"]["stage"], 0.0)
+        self.assertEqual(result["phase_costs"]["validate"], 0.0)
+        self.assertEqual(result["phase_costs"]["publish"], 0.0)
+        self.assertEqual(
+            read_json(workspace.current_publish_manifest_path).get("snapshot_id"),
+            previous_snapshot,
+        )
+        self.assertGreater(
+            interaction_ingest_snapshot(workspace)["pending_promotion_count"],
+            0,
+        )
 
     def test_sync_promotes_pending_interactions_into_current_kb_and_trace(self) -> None:
         workspace = self.make_workspace()
@@ -1519,6 +1558,66 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         self.assertEqual(codex_identity["host_provider"], "codex")
         self.assertEqual(claude_identity["host_provider"], "claude-code")
 
+    def test_incremental_claude_reconciliation_keeps_native_enrichment(self) -> None:
+        workspace = self.make_workspace()
+        mirror = workspace.claude_code_mirror_path("claude-session")
+        mirror.parent.mkdir(parents=True)
+        mirror.write_text('{"record_type":"prompt-submit"}\n', encoding="utf-8")
+        cursor_state = {
+            "mode": "incremental-append",
+            "previous_turn_count": 4,
+            "tail_records": [],
+            "cursor_path": workspace.transcript_cursor_path("claude-code", "claude-session"),
+            "last_byte_offset": mirror.stat().st_size,
+            "transcript_path": str(mirror),
+            "device": mirror.stat().st_dev,
+            "inode": mirror.stat().st_ino,
+            "file_size": mirror.stat().st_size,
+            "mtime_ns": mirror.stat().st_mtime_ns,
+        }
+        transcript = {
+            "cwd": str(workspace.root),
+            "turns": [{"native_turn_id": "turn-4"}, {"native_turn_id": "turn-5"}],
+            "fidelity": {"capture_method": "hook-mirror-plus-native"},
+        }
+
+        with (
+            mock.patch(
+                "docmason.interaction.refresh_generated_connector_manifests",
+                return_value=None,
+            ),
+            mock.patch(
+                "docmason.interaction.locate_claude_code_session",
+                return_value=mirror,
+            ),
+            mock.patch(
+                "docmason.interaction._transcript_records_with_cursor",
+                return_value=([{"record_type": "prompt-submit"}], cursor_state),
+            ),
+            mock.patch(
+                "docmason.interaction.load_claude_code_transcript",
+                return_value=transcript,
+            ) as loader,
+            mock.patch(
+                "docmason.interaction._reconcile_native_transcript",
+                return_value={"status": "reconciled"},
+            ),
+            mock.patch("docmason.interaction._persist_transcript_cursor"),
+        ):
+            result = reconcile_claude_code_thread(
+                workspace,
+                session_id="claude-session",
+            )
+
+        self.assertEqual(result["status"], "reconciled")
+        loader.assert_called_once_with(
+            "claude-session",
+            workspace.root,
+            records_override=[{"record_type": "prompt-submit"}],
+            enrich_native=True,
+            turn_ordinal_offset=3,
+        )
+
     def test_reconcile_claude_host_runtime_failure_stays_in_audit_surfaces(self) -> None:
         workspace = self.make_workspace()
         transcript = {
@@ -1531,8 +1630,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "completed_at": "2026-03-17T00:01:00Z",
                     "user_text": "Summarize the proposal.",
                     "assistant_final_text": (
-                        "The Claude host SDK failed before canonical "
-                        "completion."
+                        "The Claude host SDK failed before canonical completion."
                     ),
                     "attachments": [],
                     "function_calls": [],
@@ -1542,8 +1640,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                         "stop_reason": "sdk-error",
                         "diagnostics": {
                             "host_error_text": (
-                                "Cannot read properties of undefined "
-                                "(reading 'input_tokens')."
+                                "Cannot read properties of undefined (reading 'input_tokens')."
                             )
                         },
                     },
@@ -1551,8 +1648,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                         "status": "degraded",
                         "classification": "host-runtime-failure",
                         "detail": (
-                            "Claude session captured an explicit host/runtime "
-                            "failure signal."
+                            "Claude session captured an explicit host/runtime failure signal."
                         ),
                     },
                 }
@@ -1758,8 +1854,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                     "last_assistant_message": "The host SDK failed during the first attempt.",
                     "stop_reason": "sdk-error",
                     "host_error_text": (
-                        "Cannot read properties of undefined "
-                        "(reading 'input_tokens')."
+                        "Cannot read properties of undefined (reading 'input_tokens')."
                     ),
                 },
                 {
@@ -1989,9 +2084,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
                 question_domain="workspace-corpus",
             ),
         )
-        entry_path = (
-            workspace.interaction_entries_dir / f"{entry['interaction_id']}.json"
-        )
+        entry_path = workspace.interaction_entries_dir / f"{entry['interaction_id']}.json"
         persisted = read_json(entry_path)
         persisted["pending_promotion"] = False
         persisted["status"] = "promoted"
@@ -2050,9 +2143,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         )
         self.assertEqual(entry["native_ledger_id"], "a" * 64)
         self.assertTrue(
-            (
-                workspace.interaction_entries_dir / f"{entry['interaction_id']}.json"
-            ).exists()
+            (workspace.interaction_entries_dir / f"{entry['interaction_id']}.json").exists()
         )
 
     def test_persist_interaction_entry_updates_same_entry_after_late_binding(self) -> None:
@@ -2175,9 +2266,7 @@ class InteractionIngestAndReviewTests(unittest.TestCase):
         )
         self.assertTrue((workspace.interaction_memories_dir("current") / stable_memory_id).exists())
         self.assertFalse(
-            (
-                workspace.interaction_memories_dir("current") / "interaction-memory-legacy"
-            ).exists()
+            (workspace.interaction_memories_dir("current") / "interaction-memory-legacy").exists()
         )
 
 

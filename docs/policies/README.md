@@ -22,5 +22,6 @@ Policy pages explain the boundaries that public readers should rely on:
 
 DocMason is local-first and file-only by default.
 The tracked repository should not become a hidden telemetry client, a live private data store, or a public mirror of private runtime state.
-Generated bundles may perform the narrow release-entry check documented here.
+Generated bundles contact the narrow release-entry service only when the user explicitly runs
+`docmason update-core` without a local `--bundle`.
 Everything else should be assumed local unless a public document says otherwise.

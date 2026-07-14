@@ -140,10 +140,17 @@ def locate_codex_thread(thread_id: str) -> CodexThreadLocation:
     )
 
 
-def iter_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read a JSONL file into a list of JSON objects."""
+def iter_jsonl(path: Path, *, start_offset: int = 0) -> list[dict[str, Any]]:
+    """Read JSON objects from a JSONL byte offset."""
     payloads: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    with path.open("rb") as handle:
+        handle.seek(max(start_offset, 0))
+        raw_lines = handle.readlines()
+    for raw_line in raw_lines:
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
         if not line.strip():
             continue
         try:
@@ -176,11 +183,19 @@ def _normalized_function_call(
     }
 
 
-def load_codex_transcript(thread_id: str) -> dict[str, Any]:
+def load_codex_transcript(
+    thread_id: str,
+    *,
+    records_override: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Load one native Codex thread into a normalized transcript structure."""
     location = locate_codex_thread(thread_id)
     metadata = codex_thread_metadata(thread_id, state_db_path=location.state_db_path)
-    records = iter_jsonl(location.rollout_path)
+    records = (
+        records_override
+        if records_override is not None
+        else iter_jsonl(location.rollout_path)
+    )
 
     turns: list[dict[str, Any]] = []
     current_turn: dict[str, Any] | None = None
@@ -893,6 +908,10 @@ def load_claude_code_native_transcript(transcript_path: str | Path) -> dict[str,
 def load_claude_code_transcript(
     session_id: str,
     workspace_root: Path,
+    *,
+    records_override: list[dict[str, Any]] | None = None,
+    enrich_native: bool = True,
+    turn_ordinal_offset: int = 0,
 ) -> dict[str, Any]:
     """Load a Claude Code session from the hook-written mirror JSONL.
 
@@ -911,7 +930,7 @@ def load_claude_code_transcript(
             f"No Claude Code mirror file for session {session_id!r} "
             f"under {claude_code_mirror_root(workspace_root)}."
         )
-    records = iter_jsonl(mirror_path)
+    records = records_override if records_override is not None else iter_jsonl(mirror_path)
 
     # Phase 1: extract session metadata and native transcript path.
     cwd: str = ""
@@ -929,7 +948,7 @@ def load_claude_code_transcript(
     # Phase 2: reconstruct turns by pairing prompt-submit → stop records.
     turns: list[dict[str, Any]] = []
     current_turn: dict[str, Any] | None = None
-    turn_ordinal = 0
+    turn_ordinal = max(turn_ordinal_offset, 0)
     for record in records:
         record_type = record.get("record_type", "")
         if record_type == "prompt-submit":
@@ -955,6 +974,12 @@ def load_claude_code_transcript(
                 opened_at=record.get("recorded_at"),
                 user_text=str(record.get("prompt", "")),
             )
+            if isinstance(record.get("attachments"), list):
+                current_turn["attachments"] = [
+                    dict(item)
+                    for item in record["attachments"]
+                    if isinstance(item, dict)
+                ]
             turns.append(current_turn)
         elif record_type == "tool-use" and current_turn is not None:
             current_turn["function_calls"].append(
@@ -1046,7 +1071,7 @@ def load_claude_code_transcript(
         for turn in turns
         if isinstance(turn, dict)
     )
-    if transcript_path_str:
+    if transcript_path_str and enrich_native:
         enrichment = load_claude_code_native_transcript(transcript_path_str)
         if enrichment is not None and isinstance(enrichment.get("turns"), list):
             capture_method = "hook-mirror-plus-native"

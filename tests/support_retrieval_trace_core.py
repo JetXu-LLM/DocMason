@@ -454,9 +454,16 @@ class RetrievalTraceCoreTests(unittest.TestCase):
         self.assertEqual(second.payload["publish_storage"]["publish_ledger_count"], 1)
         self.assertIn("projection_state", second.payload)
         self.assertFalse(second.payload["projection_state"]["dirty"])
-        self.assertEqual(second.payload["rebuild_telemetry"]["rebuild_cause"], "none")
+        self.assertEqual(
+            second.payload["rebuild_telemetry"]["rebuild_cause"], "zero-delta"
+        )
+        self.assertEqual(second.payload["phase_costs"]["stage"], 0.0)
+        self.assertEqual(second.payload["phase_costs"]["validate"], 0.0)
+        self.assertEqual(second.payload["phase_costs"]["publish"], 0.0)
+        self.assertEqual(second.payload["physical_costs"]["files_copied"], 0)
+        self.assertEqual(second.payload["physical_costs"]["files_cloned"], 0)
         self.assertFalse(second.payload["rebuild_telemetry"]["scoped_contract_repair_used"])
-        self.assertIn("Rebuild telemetry: cause=none", "\n".join(second.lines))
+        self.assertIn("Rebuild telemetry: cause=zero-delta", "\n".join(second.lines))
 
     def test_sync_repairs_staging_artifact_contract_without_full_rebuild(self) -> None:
         from docmason.commands import sync_workspace

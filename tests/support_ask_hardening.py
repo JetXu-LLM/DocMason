@@ -456,7 +456,7 @@ class AskHardeningTests(unittest.TestCase):
             [current_entry["interaction_id"]],
         )
 
-    def test_prepare_ask_turn_keeps_older_pending_interaction_backlog_blocking(
+    def test_prepare_ask_turn_keeps_older_pending_interaction_backlog_advisory(
         self,
     ) -> None:
         workspace = self.make_workspace()
@@ -549,14 +549,13 @@ class AskHardeningTests(unittest.TestCase):
                 semantic_analysis=semantic_analysis,
             )
 
-        self.assertTrue(turn["auto_sync_triggered"])
-        self.assertEqual(sync_mock.call_count, 1)
-        self.assertEqual(
-            turn["auto_sync_reason"],
-            (
-                "Relevant pending interaction-derived knowledge still awaits "
-                "sync-time promotion."
-            ),
+        self.assertFalse(turn["auto_sync_triggered"])
+        sync_mock.assert_not_called()
+        self.assertIsNone(turn["auto_sync_reason"])
+        self.assertTrue(turn["sync_suggested"])
+        self.assertIn(
+            "awaits sync-time promotion",
+            str(turn["freshness_notice"]),
         )
         stored_turn = load_turn_record(
             workspace,
@@ -4328,27 +4327,26 @@ class AskHardeningTests(unittest.TestCase):
         self.create_pdf(workspace.source_dir / "b.pdf")
         self.publish_seeded_corpus(workspace)
 
-        with mock.patch(
-            "docmason.host_integration.maybe_run_release_entry_check"
-        ) as release_entry_check:
-            opened = handle_hidden_ask_request(
-                {
-                    "action": "open",
-                    "question": (
-                        'Using only the document "Project Planning Brief", summarize the '
-                        "project outline in 3 bullet points."
-                    ),
-                    "host_provider": "codex",
-                    "host_thread_ref": "thread-hidden-release-open",
-                    "host_identity_source": "codex_thread_id",
-                },
-                paths=workspace,
-            )
+        opened = handle_hidden_ask_request(
+            {
+                "action": "open",
+                "question": (
+                    'Using only the document "Project Planning Brief", summarize the '
+                    "project outline in 3 bullet points."
+                ),
+                "host_provider": "codex",
+                "host_thread_ref": "thread-hidden-release-open",
+                "host_identity_source": "codex_thread_id",
+            },
+            paths=workspace,
+        )
 
         self.assertEqual(opened["status"], "execute")
-        release_entry_check.assert_not_called()
+        self.assertNotIn("release_entry", opened)
+        self.assertIsNone(opened["release_entry_status"])
+        self.assertIsNone(opened["release_entry_notice"])
 
-    def test_hidden_ask_finalize_appends_release_entry_notice_without_mutating_answer_file(self) -> None:
+    def test_hidden_ask_finalize_keeps_release_entry_out_of_answer_critical_path(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.seed_release_bundle(workspace)
@@ -4399,40 +4397,31 @@ class AskHardeningTests(unittest.TestCase):
             "docmason.host_integration.complete_ask_turn",
             side_effect=fake_complete,
         ) as complete_turn:
-            with mock.patch(
-                "docmason.host_integration.maybe_run_release_entry_check",
-                return_value={
-                    "notice": "DocMason update available: v0.2.0.",
-                    "release_entry_status": {
-                        "bundle_detected": True,
-                        "effective_enabled": True,
-                        "distribution_channel": "clean",
-                    },
+            completed = handle_hidden_ask_request(
+                {
+                    "action": "finalize",
+                    "conversation_id": opened["conversation_id"],
+                    "turn_id": opened["turn_id"],
+                    "answer_file_path": opened["answer_file_path"],
+                    "response_excerpt": "The project outline defines the work plan.",
                 },
-            ) as release_entry_check:
-                completed = handle_hidden_ask_request(
-                    {
-                        "action": "finalize",
-                        "conversation_id": opened["conversation_id"],
-                        "turn_id": opened["turn_id"],
-                        "answer_file_path": opened["answer_file_path"],
-                        "response_excerpt": "The project outline defines the work plan.",
-                    },
-                    paths=workspace,
-                )
+                paths=workspace,
+            )
 
         complete_turn.assert_called_once()
-        release_entry_check.assert_called_once()
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(
             answer_path.read_text(encoding="utf-8"),
             "The project outline defines the work plan.\n",
         )
-        self.assertIn("DocMason update available", completed["answer_text"])
-        self.assertEqual(completed["release_entry_notice"], "DocMason update available: v0.2.0.")
-        self.assertEqual(completed["release_entry_status"]["distribution_channel"], "clean")
+        self.assertEqual(
+            completed["answer_text"], "The project outline defines the work plan.\n"
+        )
+        self.assertEqual(completed["user_status_line"], "Completed and verified.")
+        self.assertIsNone(completed["release_entry_notice"])
+        self.assertIsNone(completed["release_entry_status"])
 
-    def test_hidden_ask_finalize_ignores_release_entry_failures(self) -> None:
+    def test_hidden_ask_finalize_returns_clean_answer_without_release_check(self) -> None:
         workspace = self.make_workspace()
         self.mark_environment_ready(workspace)
         self.seed_release_bundle(workspace)
@@ -4481,25 +4470,21 @@ class AskHardeningTests(unittest.TestCase):
             "docmason.host_integration.complete_ask_turn",
             side_effect=fake_complete,
         ):
-            with mock.patch(
-                "docmason.host_integration.maybe_run_release_entry_check",
-                side_effect=OSError("state write failed"),
-            ):
-                completed = handle_hidden_ask_request(
-                    {
-                        "action": "finalize",
-                        "conversation_id": opened["conversation_id"],
-                        "turn_id": opened["turn_id"],
-                        "answer_file_path": opened["answer_file_path"],
-                        "response_excerpt": "The project outline defines the work plan.",
-                    },
-                    paths=workspace,
-                )
+            completed = handle_hidden_ask_request(
+                {
+                    "action": "finalize",
+                    "conversation_id": opened["conversation_id"],
+                    "turn_id": opened["turn_id"],
+                    "answer_file_path": opened["answer_file_path"],
+                    "response_excerpt": "The project outline defines the work plan.",
+                },
+                paths=workspace,
+            )
 
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(
             completed["answer_text"],
-            "The project outline defines the work plan.",
+            "The project outline defines the work plan.\n",
         )
         self.assertIsNone(completed["release_entry_notice"])
         self.assertIsNone(completed["release_entry_status"])
@@ -6273,22 +6258,18 @@ class AskHardeningTests(unittest.TestCase):
             "docmason.host_integration.complete_ask_turn",
             side_effect=fake_complete,
         ) as complete_turn:
-            with mock.patch(
-                "docmason.host_integration.maybe_run_release_entry_check"
-            ) as release_entry_check:
-                waiting = handle_hidden_ask_request(
-                    {
-                        "action": "finalize",
-                        "conversation_id": opened["conversation_id"],
-                        "turn_id": opened["turn_id"],
-                        "answer_file_path": opened["answer_file_path"],
-                        "response_excerpt": "This ask is refreshing shared evidence before it can finish.",
-                    },
-                    paths=workspace,
-                )
+            waiting = handle_hidden_ask_request(
+                {
+                    "action": "finalize",
+                    "conversation_id": opened["conversation_id"],
+                    "turn_id": opened["turn_id"],
+                    "answer_file_path": opened["answer_file_path"],
+                    "response_excerpt": "This ask is refreshing shared evidence before it can finish.",
+                },
+                paths=workspace,
+            )
 
         complete_turn.assert_called_once()
-        release_entry_check.assert_not_called()
         self.assertEqual(waiting["status"], "waiting-shared-job")
         self.assertFalse(waiting["user_reply_allowed"])
         self.assertIsNone(waiting["answer_text"])
@@ -6879,8 +6860,17 @@ class AskHardeningTests(unittest.TestCase):
             paths=workspace,
         )
 
-        self.assertEqual(failed["status"], "blocked")
-        self.assertIn("missing-ask-owned-trace", failed["issue_codes"])
+        self.assertEqual(failed["status"], "completed")
+        self.assertTrue(failed["user_reply_allowed"])
+        self.assertEqual(
+            failed["answer_text"],
+            "The final answer changed after the last trace and needs retracing.\n",
+        )
+        self.assertEqual(len(failed["trace_ids"]), 1)
+        retraced = read_json(
+            workspace.retrieval_traces_dir / f"{failed['trace_ids'][0]}.json"
+        )
+        self.assertEqual(retraced["answer_text"], failed["answer_text"])
         self.assertEqual(failed["answer_file_path"], opened["answer_file_path"])
         self.assertTrue(answer_path.exists())
 

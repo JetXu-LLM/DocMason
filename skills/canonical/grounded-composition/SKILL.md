@@ -35,6 +35,8 @@ If the environment cannot inspect the required evidence, stop and explain the bl
 ## Procedure
 
 1. Start from the canonical `ask` turn metadata and answer-file path.
+   - honor the ask-owned `work_brief`, resolved decisions, accepted scopes, and affected-output
+     boundary; do not silently change the requested medium, method, storyline, or locked scope
    - honor ask-provided `reference_resolution`, `source_scope_policy`, `semantic_analysis.evidence_requirements`, and `support_contract` as the governing first-pass plan for this turn
    - begin with a short support ledger:
      - which source boundary must survive
@@ -72,6 +74,10 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - inspect direct source files or rerender only when the published-artifact plan says the knowledge base is insufficient for style, visual structure, or low-level detail
    - bring in external verification or stable model knowledge only when the composition task genuinely needs it, and keep the support basis explicit
 3. Start complex work with a visible method or plan summary before diving into the deeper evidence loop.
+   - for a high-cost multi-part artifact, lock the framework, storyline, scope ownership, and
+     page or section responsibilities before bulk production
+   - when the expression grammar is still unproven and batch rework would be expensive, create
+     one representative sample and validate it before expanding the set
    - when the workflow enters repository-owned drafting work, record the phase honestly through the hidden run-phase helpers:
      - first drafting pass -> `draft`
      - answer text changed before a follow-on trace -> `rewrite`
@@ -98,7 +104,9 @@ If the environment cannot inspect the required evidence, stop and explain the bl
    - hand the same answer-file path, plus any selected `session_ids` / `trace_ids`, back for hidden `finalize`; prefer the structured `workflow_outcome` handoff when the workflow already knows the correct `support_basis`, selected IDs, bundle linkage, or other finalize-owned facts
    - if finalize returns `status = execute` together with a repairable `support_fulfillment`, do one contract-aware rewrite and retrace on the same turn, then finalize once more
    - if finalize returns `status = execute` together with `admissibility_repair`, use its issue codes and suggested action to rewrite the same answer file, rerun trace, and finalize once more
-   - if terminal finalize returns `result_explanation.show_to_user = true`, keep that explanation separate from the canonical answer file and append it after the main deliverable as concise user-facing closure context, even when the user asked for an exact output shape
+   - do not render terminal closure metadata yourself; return the exact deliverable and
+     workflow-owned support facts to `ask`, which alone decides whether a separate status line or
+     boundary explanation is user-visible
 10. Return the main result plus any relevant bundle paths, support boundary, overall support basis, and next steps to the main agent.
 
 ## Escalation Rules

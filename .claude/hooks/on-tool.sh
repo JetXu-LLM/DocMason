@@ -4,7 +4,8 @@
 
 set -euo pipefail
 
-ROOT="${CLAUDE_PROJECT_DIR:-.}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="${CLAUDE_PROJECT_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)}"
 VENV_CMD="$ROOT/.venv/bin/docmason"
 
 # Read stdin early to avoid broken pipe.
@@ -14,4 +15,5 @@ if [ ! -x "$VENV_CMD" ]; then
     exit 0
 fi
 
-echo "$INPUT" | exec "$VENV_CMD" _hook post-tool-use
+printf '%s' "$INPUT" | DOCMASON_PROJECT_DIR="$ROOT" DOCMASON_HOOK_HOST=claude-code \
+    exec "$VENV_CMD" _hook post-tool-use

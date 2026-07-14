@@ -64,6 +64,14 @@ ASK_TURN_EXPECTATION_KEYS = frozenset(
         "auto_sync_triggered",
         "hybrid_refresh_triggered",
         "hybrid_refresh_completion_status",
+        "work_brief_deliverable_kind",
+        "work_brief_medium",
+        "continuation_type",
+        "decision_frontier_status",
+        "revision_of_present",
+        "reused_previous_evidence",
+        "new_retrieval_executed",
+        "accepted_scope_count",
         "query_session_count",
         "trace_count",
         "required_run_events",
@@ -388,7 +396,28 @@ def _normalize_ask_turn_case(case_id: str, payload: Any) -> dict[str, Any]:
             expectations.get("hybrid_refresh_completion_status"),
             f"{case_id}.ask_replay.expectations.hybrid_refresh_completion_status",
         )
-    for field_name in ("query_session_count", "trace_count"):
+    for field_name in (
+        "work_brief_deliverable_kind",
+        "work_brief_medium",
+        "continuation_type",
+        "decision_frontier_status",
+    ):
+        if field_name in expectations:
+            normalized_expectations[field_name] = _require_string(
+                expectations.get(field_name),
+                f"{case_id}.ask_replay.expectations.{field_name}",
+            )
+    for field_name in (
+        "revision_of_present",
+        "reused_previous_evidence",
+        "new_retrieval_executed",
+    ):
+        if field_name in expectations:
+            normalized_expectations[field_name] = _require_bool_or_none(
+                expectations.get(field_name),
+                f"{case_id}.ask_replay.expectations.{field_name}",
+            )
+    for field_name in ("query_session_count", "trace_count", "accepted_scope_count"):
         if field_name in expectations:
             normalized_expectations[field_name] = _require_int(
                 expectations.get(field_name),
@@ -2004,6 +2033,73 @@ def _case_deterministic_checks(
                     "actual": result.get("hybrid_refresh_completion_status"),
                     "passed": result.get("hybrid_refresh_completion_status")
                     == expectations["hybrid_refresh_completion_status"],
+                }
+            )
+        scalar_work_expectations = {
+            "work_brief_deliverable_kind": (
+                turn_record.get("work_brief", {}).get("deliverable", {}).get("kind")
+                if isinstance(turn_record.get("work_brief"), dict)
+                and isinstance(turn_record.get("work_brief", {}).get("deliverable"), dict)
+                else None
+            ),
+            "work_brief_medium": (
+                turn_record.get("work_brief", {}).get("deliverable", {}).get("medium")
+                if isinstance(turn_record.get("work_brief"), dict)
+                and isinstance(turn_record.get("work_brief", {}).get("deliverable"), dict)
+                else None
+            ),
+            "continuation_type": turn_record.get("continuation_type"),
+            "decision_frontier_status": (
+                turn_record.get("decision_frontier", {}).get("status")
+                if isinstance(turn_record.get("decision_frontier"), dict)
+                else None
+            ),
+        }
+        for field_name, actual in scalar_work_expectations.items():
+            if field_name in expectations:
+                checks.append(
+                    {
+                        "name": field_name,
+                        "expected": expectations[field_name],
+                        "actual": actual,
+                        "passed": actual == expectations[field_name],
+                    }
+                )
+        boolean_work_expectations = {
+            "revision_of_present": bool(turn_record.get("revision_of")),
+            "reused_previous_evidence": bool(turn_record.get("reused_previous_evidence")),
+            "new_retrieval_executed": bool(turn_record.get("new_retrieval_executed")),
+        }
+        for field_name, actual in boolean_work_expectations.items():
+            if field_name in expectations:
+                checks.append(
+                    {
+                        "name": field_name,
+                        "expected": expectations[field_name],
+                        "actual": actual,
+                        "passed": actual == expectations[field_name],
+                    }
+                )
+        if "accepted_scope_count" in expectations:
+            accepted_scopes = turn_record.get("accepted_scopes", [])
+            actual_accepted_scope_count = (
+                len(
+                    [
+                        scope
+                        for scope in accepted_scopes
+                        if isinstance(scope, dict) and scope.get("status") == "accepted"
+                    ]
+                )
+                if isinstance(accepted_scopes, list)
+                else 0
+            )
+            checks.append(
+                {
+                    "name": "accepted_scope_count",
+                    "expected": expectations["accepted_scope_count"],
+                    "actual": actual_accepted_scope_count,
+                    "passed": actual_accepted_scope_count
+                    == expectations["accepted_scope_count"],
                 }
             )
         if "query_session_count" in expectations:

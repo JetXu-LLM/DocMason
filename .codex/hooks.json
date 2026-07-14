@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"$PWD\"; while [ \"$ROOT\" != / ] && [ ! -x \"$ROOT/.codex/hooks/on-prompt.sh\" ]; do ROOT=$(dirname \"$ROOT\"); done; [ -x \"$ROOT/.codex/hooks/on-prompt.sh\" ] && \"$ROOT/.codex/hooks/on-prompt.sh\" || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"$PWD\"; while [ \"$ROOT\" != / ] && [ ! -x \"$ROOT/.codex/hooks/on-stop.sh\" ]; do ROOT=$(dirname \"$ROOT\"); done; [ -x \"$ROOT/.codex/hooks/on-stop.sh\" ] && \"$ROOT/.codex/hooks/on-stop.sh\" || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

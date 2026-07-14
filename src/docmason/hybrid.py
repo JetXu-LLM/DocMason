@@ -970,15 +970,22 @@ def focus_render_contract_complete(source_dir: Path) -> bool:
     artifact_index = read_json(source_dir / "artifact_index.json")
     if not artifact_index:
         return False
+    unit_lookup = _unit_lookup(evidence_manifest)
     artifact_lookup: dict[str, dict[str, Any]] = {}
     for artifact in artifact_index.get("artifacts", []):
         if not isinstance(artifact, dict):
             return False
         artifact_type = str(artifact.get("artifact_type") or "")
         artifact_id = str(artifact.get("artifact_id") or "")
+        unit_id = str(artifact.get("unit_id") or "")
         if artifact_id:
             artifact_lookup[artifact_id] = artifact
         if artifact_type not in HYBRID_HARD_ARTIFACT_TYPES and not artifact.get("graph_promoted"):
+            continue
+        # Hidden PowerPoint slides deliberately have no visible render slot. Their
+        # artifacts therefore cannot carry focus renders and must not make an
+        # otherwise complete source tree look permanently repair-needed.
+        if document_type == "pptx" and bool(unit_lookup.get(unit_id, {}).get("hidden")):
             continue
         focus_assets = artifact.get("focus_render_assets")
         if not isinstance(focus_assets, list) or not focus_assets:

@@ -39,7 +39,11 @@ from .transcript import (
     decode_data_url,
     load_claude_code_transcript,
     load_codex_transcript,
+    locate_claude_code_session,
+    locate_codex_thread,
 )
+
+TRANSCRIPT_CURSOR_SCHEMA_VERSION = 2
 
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z]+|[\u4e00-\u9fff]+")
 UUID_PATTERN = re.compile(
@@ -85,6 +89,243 @@ INTERACTION_REQUIRED_KNOWLEDGE_KEYS = (
 def utc_now() -> str:
     """Return the current UTC timestamp in ISO 8601 form."""
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def _cursor_tail_checksum(path: Path, offset: int) -> str:
+    with path.open("rb") as handle:
+        start = max(offset - 4096, 0)
+        handle.seek(start)
+        tail = handle.read(offset - start)
+    return hashlib.sha256(tail).hexdigest()
+
+
+def _complete_jsonl_offset(path: Path) -> int:
+    size = path.stat().st_size
+    if size == 0:
+        return 0
+    chunk_size = 65536
+    with path.open("rb") as handle:
+        handle.seek(size - 1)
+        if handle.read(1) == b"\n":
+            return size
+        cursor = size
+        while cursor > 0:
+            start = max(cursor - chunk_size, 0)
+            handle.seek(start)
+            chunk = handle.read(cursor - start)
+            last_newline = chunk.rfind(b"\n")
+            if last_newline >= 0:
+                return start + last_newline + 1
+            cursor = start
+    return 0
+
+
+def _complete_jsonl_records(
+    path: Path,
+    *,
+    start_offset: int,
+    end_offset: int,
+) -> list[dict[str, Any]]:
+    """Parse only newline-terminated records inside one byte range."""
+    if end_offset <= start_offset:
+        return []
+    with path.open("rb") as handle:
+        handle.seek(start_offset)
+        payload = handle.read(end_offset - start_offset)
+    records: list[dict[str, Any]] = []
+    for raw_line in payload.splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            candidate = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(candidate, dict):
+            records.append(candidate)
+    return records
+
+
+def _compact_transcript_tail(
+    provider: str,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep only the records required to resume the last native turn."""
+    if provider == "codex":
+        anchor = next(
+            (
+                index
+                for index in range(len(records) - 1, -1, -1)
+                if records[index].get("type") == "event_msg"
+                and isinstance(records[index].get("payload"), dict)
+                and records[index]["payload"].get("type") == "task_started"
+            ),
+            None,
+        )
+        return [dict(record) for record in records[anchor:]] if anchor is not None else records
+
+    session_start = next(
+        (
+            dict(records[index])
+            for index in range(len(records) - 1, -1, -1)
+            if records[index].get("record_type") == "session-start"
+        ),
+        None,
+    )
+    anchor = next(
+        (
+            index
+            for index in range(len(records) - 1, -1, -1)
+            if records[index].get("record_type") == "prompt-submit"
+        ),
+        None,
+    )
+    tail = [dict(record) for record in records[anchor:]] if anchor is not None else []
+    if session_start is not None and (
+        not tail or tail[0].get("record_type") != "session-start"
+    ):
+        tail.insert(0, session_start)
+    return tail or [dict(record) for record in records]
+
+
+def _transcript_records_with_cursor(
+    paths: WorkspacePaths,
+    *,
+    provider: str,
+    host_thread_ref: str,
+    transcript_path: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read only appended JSONL bytes when the private cursor remains valid."""
+    cursor_path = paths.transcript_cursor_path(provider, host_thread_ref)
+    cursor_read_failed = False
+    try:
+        cursor = read_json(cursor_path)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
+        cursor = {}
+        cursor_read_failed = True
+    stat = transcript_path.stat()
+    fallback_reason: str | None = None
+    valid = bool(
+        cursor.get("schema_version") == TRANSCRIPT_CURSOR_SCHEMA_VERSION
+        and cursor.get("provider") == provider
+        and cursor.get("host_thread_ref") == host_thread_ref
+        and cursor.get("device") == stat.st_dev
+        and cursor.get("inode") == stat.st_ino
+        and isinstance(cursor.get("last_byte_offset"), int)
+        and stat.st_size >= int(cursor.get("last_byte_offset", 0))
+        and isinstance(cursor.get("tail_records"), list)
+    )
+    if valid:
+        offset = int(cursor["last_byte_offset"])
+        try:
+            valid = cursor.get("tail_checksum") == _cursor_tail_checksum(
+                transcript_path, offset
+            )
+        except OSError:
+            valid = False
+        if not valid:
+            fallback_reason = "tail-checksum-mismatch"
+    elif cursor:
+        if cursor.get("schema_version") != TRANSCRIPT_CURSOR_SCHEMA_VERSION:
+            fallback_reason = "schema-change"
+        elif cursor.get("device") != stat.st_dev or cursor.get("inode") != stat.st_ino:
+            fallback_reason = "identity-change"
+        elif stat.st_size < int(cursor.get("last_byte_offset", 0) or 0):
+            fallback_reason = "truncation"
+        else:
+            fallback_reason = "corrupt-cursor"
+    else:
+        fallback_reason = "corrupt-cursor" if cursor_read_failed else "missing-cursor"
+
+    if valid and int(
+        cursor.get("observed_file_size", cursor.get("file_size", -1)) or -1
+    ) == stat.st_size:
+        complete_offset = int(cursor["last_byte_offset"])
+    else:
+        complete_offset = _complete_jsonl_offset(transcript_path)
+
+    if valid:
+        offset = int(cursor["last_byte_offset"])
+        appended_records = _complete_jsonl_records(
+            transcript_path,
+            start_offset=offset,
+            end_offset=complete_offset,
+        )
+        window_records = [
+            dict(record) for record in cursor.get("tail_records", []) if isinstance(record, dict)
+        ]
+        window_records.extend(appended_records)
+        mode = "no-change" if complete_offset == offset else "incremental-append"
+        bytes_read = max(complete_offset - offset, 0)
+        previous_turn_count = int(cursor.get("turn_count", 0) or 0)
+        if complete_offset == offset and stat.st_size != cursor.get("observed_file_size"):
+            cursor["observed_file_size"] = stat.st_size
+            cursor["observed_mtime_ns"] = stat.st_mtime_ns
+            cursor["updated_at"] = utc_now()
+            write_json(cursor_path, cursor)
+    else:
+        window_records = _complete_jsonl_records(
+            transcript_path,
+            start_offset=0,
+            end_offset=complete_offset,
+        )
+        mode = "full-fallback"
+        bytes_read = complete_offset
+        previous_turn_count = 0
+    return window_records, {
+        "cursor_path": cursor_path,
+        "mode": mode,
+        "fallback_reason": fallback_reason,
+        "bytes_read": bytes_read,
+        "records_read": (
+            len(window_records)
+            if mode == "full-fallback"
+            else len(appended_records)
+        ),
+        "previous_turn_count": previous_turn_count,
+        "file_size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+        "last_byte_offset": complete_offset,
+        "tail_records": _compact_transcript_tail(provider, window_records),
+        "window_record_count": len(window_records),
+        "transcript_path": str(transcript_path),
+    }
+
+
+def _persist_transcript_cursor(
+    *,
+    provider: str,
+    host_thread_ref: str,
+    transcript: dict[str, Any],
+    cursor_state: dict[str, Any],
+) -> None:
+    cursor_path = Path(cursor_state["cursor_path"])
+    offset = int(cursor_state["last_byte_offset"])
+    transcript_path = Path(str(cursor_state["transcript_path"]))
+    turns = [turn for turn in transcript.get("turns", []) if isinstance(turn, dict)]
+    write_json(
+        cursor_path,
+        {
+            "schema_version": TRANSCRIPT_CURSOR_SCHEMA_VERSION,
+            "provider": provider,
+            "host_thread_ref": host_thread_ref,
+            "device": cursor_state["device"],
+            "inode": cursor_state["inode"],
+            "file_size": cursor_state["file_size"],
+            "observed_file_size": cursor_state["file_size"],
+            "observed_mtime_ns": cursor_state["mtime_ns"],
+            "mtime_ns": cursor_state["mtime_ns"],
+            "last_byte_offset": offset,
+            "last_reconciled_host_turn_id": (
+                turns[-1].get("native_turn_id") if turns else None
+            ),
+            "turn_count": int(cursor_state.get("resulting_turn_count", len(turns)) or 0),
+            "tail_checksum": _cursor_tail_checksum(transcript_path, offset),
+            "tail_records": cursor_state["tail_records"],
+            "updated_at": utc_now(),
+        },
+    )
 
 
 def tokenize_text(text: str) -> list[str]:
@@ -1840,7 +2081,46 @@ def reconcile_codex_thread(
     resolved_thread_id = thread_id or os.environ.get("CODEX_THREAD_ID")
     if not isinstance(resolved_thread_id, str) or not resolved_thread_id:
         return {"status": "not-available", "detail": "No native Codex thread id is available."}
-    transcript = load_codex_transcript(resolved_thread_id)
+    try:
+        location = locate_codex_thread(resolved_thread_id)
+    except (FileNotFoundError, KeyError):
+        transcript = load_codex_transcript(resolved_thread_id)
+        cursor_state: dict[str, Any] | None = None
+    else:
+        window_records, cursor_state = _transcript_records_with_cursor(
+            paths,
+            provider="codex",
+            host_thread_ref=resolved_thread_id,
+            transcript_path=location.rollout_path,
+        )
+        if cursor_state["mode"] == "no-change":
+            host_identity = _resolved_host_identity(
+                provider="codex",
+                host_thread_ref=resolved_thread_id,
+                argument_source="codex_thread_id",
+            )
+            native_ledger_id = _native_ledger_id(host_identity)
+            return {
+                "status": "unchanged",
+                "native_ledger_id": native_ledger_id,
+                "native_ledger_path": str(
+                    _native_ledger_path(paths, native_ledger_id).relative_to(paths.root)
+                ),
+                "canonical_conversation_id": bound_conversation_id_for_host(
+                    paths, host_identity=host_identity
+                ),
+                "captured_interaction_ids": [],
+                "turn_count": int(cursor_state["previous_turn_count"]),
+                "transcript_reconciliation": {
+                    key: value
+                    for key, value in cursor_state.items()
+                    if key not in {"tail_records", "cursor_path"}
+                },
+            }
+        transcript = load_codex_transcript(
+            resolved_thread_id,
+            records_override=window_records,
+        )
     transcript_cwd = transcript.get("cwd")
     if isinstance(transcript_cwd, str) and transcript_cwd:
         try:
@@ -1852,7 +2132,17 @@ def reconcile_codex_thread(
                 }
         except OSError:
             pass
-    return _reconcile_native_transcript(
+    if isinstance(cursor_state, dict):
+        window_turn_count = len(
+            [turn for turn in transcript.get("turns", []) if isinstance(turn, dict)]
+        )
+        cursor_state["resulting_turn_count"] = (
+            window_turn_count
+            if cursor_state["mode"] == "full-fallback"
+            else max(int(cursor_state["previous_turn_count"]) - 1, 0)
+            + window_turn_count
+        )
+    result = _reconcile_native_transcript(
         paths,
         provider="codex",
         host_thread_ref=resolved_thread_id,
@@ -1860,8 +2150,25 @@ def reconcile_codex_thread(
         transcript=transcript,
         reconciliation_metadata={
             "rollout_path": transcript.get("rollout_path"),
+            "cursor_mode": (
+                cursor_state["mode"] if isinstance(cursor_state, dict) else "loader-only"
+            ),
         },
     )
+    if isinstance(cursor_state, dict):
+        _persist_transcript_cursor(
+            provider="codex",
+            host_thread_ref=resolved_thread_id,
+            transcript=transcript,
+            cursor_state=cursor_state,
+        )
+        result["turn_count"] = int(cursor_state["resulting_turn_count"])
+        result["transcript_reconciliation"] = {
+            key: value
+            for key, value in cursor_state.items()
+            if key not in {"tail_records", "cursor_path"}
+        }
+    return result
 
 
 def maybe_reconcile_active_codex_thread(paths: WorkspacePaths) -> dict[str, Any] | None:
@@ -1891,13 +2198,62 @@ def reconcile_claude_code_thread(
     if not isinstance(resolved_session_id, str) or not resolved_session_id:
         return {"status": "not-available", "detail": "No Claude Code session id is available."}
 
-    try:
-        transcript = load_claude_code_transcript(resolved_session_id, paths.root)
-    except FileNotFoundError:
-        return {
-            "status": "not-available",
-            "detail": f"No hook-mirror file found for session {resolved_session_id!r}.",
-        }
+    mirror_path = locate_claude_code_session(resolved_session_id, paths.root)
+    if mirror_path is None:
+        try:
+            transcript = load_claude_code_transcript(resolved_session_id, paths.root)
+        except FileNotFoundError:
+            return {
+                "status": "not-available",
+                "detail": f"No hook-mirror file found for session {resolved_session_id!r}.",
+            }
+        cursor_state: dict[str, Any] | None = None
+    else:
+        window_records, cursor_state = _transcript_records_with_cursor(
+            paths,
+            provider="claude-code",
+            host_thread_ref=resolved_session_id,
+            transcript_path=mirror_path,
+        )
+        if cursor_state["mode"] == "no-change":
+            host_identity = _resolved_host_identity(
+                provider="claude-code",
+                host_thread_ref=resolved_session_id,
+                argument_source="claude_code_session_id",
+            )
+            native_ledger_id = _native_ledger_id(host_identity)
+            return {
+                "status": "unchanged",
+                "native_ledger_id": native_ledger_id,
+                "native_ledger_path": str(
+                    _native_ledger_path(paths, native_ledger_id).relative_to(paths.root)
+                ),
+                "canonical_conversation_id": bound_conversation_id_for_host(
+                    paths, host_identity=host_identity
+                ),
+                "captured_interaction_ids": [],
+                "turn_count": int(cursor_state["previous_turn_count"]),
+                "transcript_reconciliation": {
+                    key: value
+                    for key, value in cursor_state.items()
+                    if key not in {"tail_records", "cursor_path"}
+                },
+            }
+        transcript = load_claude_code_transcript(
+            resolved_session_id,
+            paths.root,
+            records_override=window_records,
+            # The hook mirror is incremental, but native enrichment remains the
+            # authority for attachments, mid-turn messages, and tools that are not
+            # mirrored by PostToolUse.  Re-enriching the small turn window prevents a
+            # lower-fidelity append from overwriting a previously complete record.
+            enrich_native=True,
+            turn_ordinal_offset=(
+                max(int(cursor_state["previous_turn_count"]) - 1, 0)
+                if cursor_state["mode"] == "incremental-append"
+                else 0
+            ),
+        )
 
     # Workspace-root check: skip reconciliation when the session belongs to a
     # different workspace (mirrors the Codex cwd check).
@@ -1912,8 +2268,18 @@ def reconcile_claude_code_thread(
                 }
         except OSError:
             pass
+    if isinstance(cursor_state, dict):
+        window_turn_count = len(
+            [turn for turn in transcript.get("turns", []) if isinstance(turn, dict)]
+        )
+        cursor_state["resulting_turn_count"] = (
+            window_turn_count
+            if cursor_state["mode"] == "full-fallback"
+            else max(int(cursor_state["previous_turn_count"]) - 1, 0)
+            + window_turn_count
+        )
     fidelity = transcript.get("fidelity", {})
-    return _reconcile_native_transcript(
+    result = _reconcile_native_transcript(
         paths,
         provider="claude-code",
         host_thread_ref=resolved_session_id,
@@ -1926,8 +2292,25 @@ def reconcile_claude_code_thread(
                 fidelity.get("has_attachments", False),
             ),
             "has_mid_turn_messages": fidelity.get("has_mid_turn_messages", False),
+            "cursor_mode": (
+                cursor_state["mode"] if isinstance(cursor_state, dict) else "loader-only"
+            ),
         },
     )
+    if isinstance(cursor_state, dict):
+        _persist_transcript_cursor(
+            provider="claude-code",
+            host_thread_ref=resolved_session_id,
+            transcript=transcript,
+            cursor_state=cursor_state,
+        )
+        result["turn_count"] = int(cursor_state["resulting_turn_count"])
+        result["transcript_reconciliation"] = {
+            key: value
+            for key, value in cursor_state.items()
+            if key not in {"tail_records", "cursor_path"}
+        }
+    return result
 
 
 def maybe_reconcile_active_claude_code_thread(
@@ -2297,6 +2680,18 @@ def _prune_orphan_interaction_memories(
         "target": target,
         "removed_memory_ids": removed_memory_ids,
         "removed_count": len(removed_memory_ids),
+    }
+
+
+def repair_interaction_runtime_maintenance(paths: WorkspacePaths) -> dict[str, Any]:
+    """Repair compact interaction indexes without opening the KB publication path."""
+    duplicate_repair = _repair_duplicate_interaction_entries(paths)
+    orphan_repair = _prune_orphan_interaction_memories(paths, target="current")
+    return {
+        "duplicate_entries": duplicate_repair,
+        "orphan_memories": orphan_repair,
+        "repair_count": int(duplicate_repair.get("repaired_groups", 0) or 0)
+        + int(orphan_repair.get("removed_count", 0) or 0),
     }
 
 

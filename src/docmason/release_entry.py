@@ -24,7 +24,11 @@ RELEASE_ENTRY_DISABLED_DNT = "dnt"
 RELEASE_ENTRY_DISABLED_LOCAL_CONFIG = "local-config"
 RELEASE_ENTRY_DISABLED_BUNDLE_UNCONFIGURED = "bundle-unconfigured"
 RELEASE_ENTRY_SUPPORTED_CHANNELS = frozenset({"clean", "demo-ico-gcs"})
-DEFAULT_RELEASE_ENTRY_SCOPE = "canonical-ask"
+DEFAULT_RELEASE_ENTRY_SCOPE = "explicit-update-core"
+LEGACY_RELEASE_ENTRY_SCOPE = "canonical-ask"
+RELEASE_ENTRY_SUPPORTED_SCOPES = frozenset(
+    {DEFAULT_RELEASE_ENTRY_SCOPE, LEGACY_RELEASE_ENTRY_SCOPE}
+)
 DEFAULT_RELEASE_ENTRY_COOLDOWN_HOURS = 20
 DEFAULT_RELEASE_ENTRY_TIMEOUT_SECONDS = 2.0
 RELEASE_ENTRY_USER_AGENT = "DocMasonReleaseEntry/1.0 (+https://github.com/JetXu-LLM/DocMason)"
@@ -171,7 +175,10 @@ def _release_entry_bundle_config(paths: WorkspacePaths) -> dict[str, Any]:
         and distribution_channel in RELEASE_ENTRY_SUPPORTED_CHANNELS
         and current_version
         and update_service_url
-        and automatic_check_scope == DEFAULT_RELEASE_ENTRY_SCOPE
+        # Existing release bundles used `canonical-ask`.  Removing the automatic
+        # post-ask caller must not strand those installations or prevent their
+        # explicit `docmason update-core` migration to the new scope.
+        and automatic_check_scope in RELEASE_ENTRY_SUPPORTED_SCOPES
     )
     return {
         "bundle_detected": bundle_detected,

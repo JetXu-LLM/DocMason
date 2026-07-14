@@ -22,6 +22,15 @@ If the agent cannot run local commands or inspect the resulting artifacts, stop 
 
 1. Start with `docmason status --json` when you need the current stage, pending actions, or control-plane state.
 2. Use `docmason sync --json` as the default build or refresh entry point.
+   - let sync classify the physical cause before staging
+   - `zero-delta` and foreground `interaction-promotion-only` checks return the current legal
+     truth without full staging, validation, or publication; pending interaction promotion stays
+     deferred maintenance rather than an answer-critical invalidation
+   - for a source delta, preserve source-scoped transactional staging, cached validation for
+     unchanged sources, compact global checks, and the existing atomic single-current publish
+     model; do not improvise a parallel full-copy or publication path
+   - use the reported cause, dirty/reused counts, phase timings, cache hits/misses, and physical
+     clone/copy telemetry when diagnosing performance or unexpected work
    - keep workspace commands sequential while the sync lease is active
    - do not overlap `status`, `sync`, `retrieve`, `trace`, or `validate-kb` against the same workspace
 3. Respect the control-plane result before reasoning about later workflow steps.

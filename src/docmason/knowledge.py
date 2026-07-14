@@ -66,6 +66,7 @@ from .interaction import (
     load_promoted_interaction_contexts,
     mark_promoted_interaction_entries,
     repair_interaction_memory_related_sources,
+    repair_interaction_runtime_maintenance,
 )
 from .libreoffice_runtime import run_office_conversion
 from .project import (
@@ -101,12 +102,16 @@ from .source_references import (
 )
 from .text_sources import ParsedUnit, parse_text_source
 from .versioning import (
+    clone_or_copy_path,
     migrate_legacy_publish_storage,
     publish_staging_snapshot,
     publish_storage_summary,
 )
 from .workspace_probe import office_renderer_snapshot
 
+SOURCE_ARTIFACT_CONTRACT_VERSION = 2
+SOURCE_VALIDATOR_VERSION = 2
+STAGING_TRANSACTION_SCHEMA_VERSION = 1
 PLACEHOLDER_TERMS = ("todo", "tbd", "placeholder", "lorem ipsum", "fill in")
 DOCX_ORDERED_STEP_PATTERN = re.compile(r"^\s*(\d+)(?:[.)-])\s+")
 DOCX_CAPTION_PREFIX_PATTERN = re.compile(
@@ -569,9 +574,10 @@ def _compute_source_index(
     seen_source_ids: set[str] = set()
     matched_existing_ids: set[str] = set()
     changes: list[dict[str, Any]] = []
+    fingerprint_cache_hits = 0
+    fingerprint_cache_misses = 0
     for path in supported_source_documents(paths):
         current_path = str(path.relative_to(paths.root))
-        fingerprint = file_sha256(path)
         stat = path.stat()
         file_size = stat.st_size
         definition = source_type_definition_for_path(path)
@@ -579,6 +585,22 @@ def _compute_source_index(
             continue
         document_type = definition.document_type
         existing_entry = path_lookup.get(current_path)
+        cached_fingerprint = (
+            existing_entry.get("source_fingerprint")
+            if isinstance(existing_entry, dict)
+            and existing_entry.get("file_size") == file_size
+            and existing_entry.get("mtime_ns") == stat.st_mtime_ns
+            and existing_entry.get("ctime_ns") == stat.st_ctime_ns
+            and existing_entry.get("device") == stat.st_dev
+            and existing_entry.get("inode") == stat.st_ino
+            else None
+        )
+        if isinstance(cached_fingerprint, str) and cached_fingerprint:
+            fingerprint = cached_fingerprint
+            fingerprint_cache_hits += 1
+        else:
+            fingerprint = file_sha256(path)
+            fingerprint_cache_misses += 1
         identity_basis = "path"
         matched_source_ids: list[str] = []
         change_classification = "unchanged"
@@ -693,6 +715,10 @@ def _compute_source_index(
             "path_history": path_history,
             "source_fingerprint": fingerprint,
             "file_size": file_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "ctime_ns": stat.st_ctime_ns,
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
             "first_seen_at": first_seen_at,
             "last_seen_at": now,
             "identity_confidence": identity_basis,
@@ -761,6 +787,10 @@ def _compute_source_index(
             "ambiguous": classification_counts.get("ambiguous", 0),
         },
         "changes": changes,
+        "fingerprint_cache": {
+            "hits": fingerprint_cache_hits,
+            "misses": fingerprint_cache_misses,
+        },
     }
 
     payload = {
@@ -3396,6 +3426,79 @@ def repair_staging_artifact_contract(
     )
 
 
+def _staging_artifact_contract_cache_state(
+    paths: WorkspacePaths,
+    *,
+    state: dict[str, Any],
+    active_sources: list[dict[str, Any]],
+) -> tuple[bool, list[str], bool]:
+    """Return cache currency, input drift IDs, and validator-contract drift."""
+    report = read_json(paths.staging_validation_report_path)
+    cache = report.get("validation_cache")
+    if not isinstance(cache, dict):
+        return False, [], False
+    legal_staging_header = bool(
+        report.get("status") in {"valid", "warnings"}
+        and report.get("source_signature") == state.get("staging_source_signature")
+    )
+    if not legal_staging_header:
+        return False, [], False
+    validator_contract_drift = bool(
+        cache.get("artifact_contract_version") != SOURCE_ARTIFACT_CONTRACT_VERSION
+        or cache.get("validator_version") != SOURCE_VALIDATOR_VERSION
+        or cache.get("configuration_digest") != _validation_configuration_digest(paths)
+    )
+    if validator_contract_drift:
+        return False, [], True
+    validation_cache = read_json(paths.validation_cache_path)
+    input_digests_by_source_id: dict[str, str] = {}
+    for bucket in validation_cache.get("entries", {}).values():
+        if not isinstance(bucket, dict):
+            continue
+        for source_id, record in bucket.get("source_results", {}).items():
+            if not isinstance(source_id, str) or not isinstance(record, dict):
+                continue
+            input_digest = record.get("validation_input_digest")
+            if isinstance(input_digest, str) and input_digest:
+                input_digests_by_source_id[source_id] = input_digest
+    drift_source_ids: list[str] = []
+    for source in active_sources:
+        if str(source.get("change_classification") or "") != "unchanged":
+            continue
+        source_id = str(source.get("source_id") or "")
+        source_dir = paths.knowledge_base_staging_dir / "sources" / source_id
+        if (
+            not source_id
+            or input_digests_by_source_id.get(source_id)
+            != _source_validation_input_digest(source_dir)
+        ):
+            drift_source_ids.append(source_id)
+    return not drift_source_ids, drift_source_ids, False
+
+
+def _staging_metadata_refresh_source_ids(
+    paths: WorkspacePaths,
+    active_sources: list[dict[str, Any]],
+) -> list[str]:
+    """Return unchanged staging sources whose additive identity metadata is stale."""
+    refresh_source_ids: list[str] = []
+    for source in active_sources:
+        source_id = str(source.get("source_id") or "")
+        if not source_id:
+            continue
+        manifest = read_json(
+            paths.knowledge_base_staging_dir / "sources" / source_id / "source_manifest.json"
+        )
+        if (
+            not isinstance(manifest.get("path_history"), list)
+            or not manifest.get("identity_basis")
+            or manifest.get("change_classification")
+            != source.get("change_classification")
+        ):
+            refresh_source_ids.append(source_id)
+    return refresh_source_ids
+
+
 def classify_rebuild_telemetry(
     paths: WorkspacePaths,
     *,
@@ -3412,10 +3515,32 @@ def classify_rebuild_telemetry(
         int(change_stats.get(key, 0) or 0)
         for key in ("added", "modified", "moved_or_renamed", "deleted", "ambiguous")
     )
+    artifact_contract_cache_hit = False
+    validation_cache_drift_source_ids: list[str] = []
+    validation_contract_drift = False
+    if paths.knowledge_base_staging_dir.exists():
+        (
+            artifact_contract_cache_hit,
+            validation_cache_drift_source_ids,
+            validation_contract_drift,
+        ) = _staging_artifact_contract_cache_state(
+            paths,
+            state=state,
+            active_sources=active_sources,
+        )
     contract_backfill_source_ids = (
-        staging_incomplete_source_ids(paths, active_sources)
-        if paths.knowledge_base_staging_dir.exists()
-        else []
+        []
+        if artifact_contract_cache_hit
+        else (
+            staging_incomplete_source_ids(paths, active_sources)
+            if paths.knowledge_base_staging_dir.exists()
+            else []
+        )
+    )
+    metadata_refresh_source_ids = (
+        []
+        if artifact_contract_cache_hit
+        else _staging_metadata_refresh_source_ids(paths, active_sources)
     )
     pending_promotion_count = int(
         interaction_snapshot.get("pending_promotion_count", 0) or 0
@@ -3427,6 +3552,21 @@ def classify_rebuild_telemetry(
         and not contract_backfill_source_ids
         and state.get("published_source_signature") == current_signature
     )
+    lane_b_summary = state.get("lane_b_follow_up_summary")
+    lane_b_state = (
+        str(lane_b_summary.get("state") or "")
+        if isinstance(lane_b_summary, dict)
+        else ""
+    )
+    lane_b_follow_up_pending = bool(
+        isinstance(lane_b_summary, dict)
+        and lane_b_summary.get("job_id")
+        and lane_b_state not in {"covered", "blocked", "completed"}
+    )
+    published_integrity_ok, published_integrity_reason = _published_current_fast_integrity(
+        paths,
+        expected_source_signature=current_signature,
+    )
     if not paths.knowledge_base_staging_dir.exists():
         rebuild_cause = "missing-staging"
     elif ambiguous_match or int(change_stats.get("ambiguous", 0) or 0) > 0:
@@ -3437,10 +3577,18 @@ def classify_rebuild_telemetry(
         rebuild_cause = "staging-signature-drift"
     elif contract_backfill_source_ids:
         rebuild_cause = "artifact-contract-backfill"
+    elif metadata_refresh_source_ids:
+        rebuild_cause = "staging-repair"
+    elif validation_cache_drift_source_ids or validation_contract_drift:
+        rebuild_cause = "staging-repair"
+    elif state.get("published_source_signature") != current_signature:
+        rebuild_cause = "staging-repair"
+    elif not published_integrity_ok:
+        rebuild_cause = "published-current-repair"
     elif interaction_promotion_only:
         rebuild_cause = "interaction-promotion-only"
     else:
-        rebuild_cause = "none"
+        rebuild_cause = "zero-delta"
     return {
         "rebuild_cause": rebuild_cause,
         "dirty_source_count": dirty_source_count,
@@ -3448,9 +3596,80 @@ def classify_rebuild_telemetry(
         "contract_backfill_source_ids": contract_backfill_source_ids,
         "interaction_promotion_only": interaction_promotion_only,
         "pending_promotion_count": pending_promotion_count,
+        "lane_b_follow_up_pending": lane_b_follow_up_pending,
+        "published_current_integrity": published_integrity_ok,
+        "published_current_integrity_reason": published_integrity_reason,
+        "artifact_contract_cache_hit": artifact_contract_cache_hit,
+        "metadata_refresh_source_ids": metadata_refresh_source_ids,
+        "metadata_refresh_source_count": len(metadata_refresh_source_ids),
+        "validation_cache_drift_source_ids": validation_cache_drift_source_ids,
+        "validation_cache_drift_source_count": len(
+            validation_cache_drift_source_ids
+        ),
+        "validation_contract_drift": validation_contract_drift,
         "scoped_contract_repair_used": False,
         "scoped_contract_repair_source_count": 0,
     }
+
+
+def _published_current_fast_integrity(
+    paths: WorkspacePaths,
+    *,
+    expected_source_signature: str,
+) -> tuple[bool, str]:
+    """Prove the active published surface is legal before a zero-delta exit."""
+    current = paths.knowledge_base_current_dir
+    if not current.is_symlink():
+        return False, "current-is-not-single-current-symlink"
+    try:
+        resolved = current.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        return False, "current-symlink-is-broken"
+    try:
+        if resolved.parent.resolve() != paths.knowledge_base_published_dir.resolve():
+            return False, "current-target-is-outside-published-root"
+    except OSError:
+        return False, "published-root-is-unreadable"
+    required = (
+        "catalog.json",
+        "coverage_manifest.json",
+        "graph_edges.json",
+        "pending_work.json",
+        "hybrid_work.json",
+        "publish_manifest.json",
+        "validation_report.json",
+    )
+    missing = [name for name in required if not (resolved / name).is_file()]
+    if missing:
+        return False, "missing-current-root-artifacts:" + ",".join(missing)
+    validation = read_json(resolved / "validation_report.json")
+    if validation.get("status") not in {"valid", "warnings"}:
+        return False, "current-validation-is-not-legal"
+    if validation.get("source_signature") != expected_source_signature:
+        return False, "current-validation-signature-mismatch"
+    manifest = read_json(resolved / "publish_manifest.json")
+    if manifest.get("published_source_signature") != expected_source_signature:
+        return False, "current-publish-signature-mismatch"
+    if manifest.get("validation_status") not in {"valid", "warnings"}:
+        return False, "current-publish-validation-status-is-not-legal"
+    pointer = read_json(paths.current_publish_pointer_path)
+    if pointer.get("snapshot_id") != manifest.get("snapshot_id"):
+        return False, "current-pointer-snapshot-mismatch"
+    pointer_root = pointer.get("published_root_path")
+    if not isinstance(pointer_root, str) or not pointer_root:
+        return False, "current-pointer-root-is-missing"
+    pointed_path = Path(pointer_root)
+    if not pointed_path.is_absolute():
+        pointed_path = paths.root / pointed_path
+    try:
+        if pointed_path.resolve(strict=True) != resolved:
+            return False, "current-pointer-root-mismatch"
+    except (FileNotFoundError, OSError):
+        return False, "current-pointer-root-is-unreadable"
+    storage = publish_storage_summary(paths)
+    if int(storage.get("published_root_count", 0) or 0) != 1:
+        return False, "published-root-count-is-not-one"
+    return True, "current-published-surface-verified"
 
 
 def write_staging_root_artifacts(
@@ -3677,13 +3896,12 @@ def refresh_source_semantic_outputs(
     evidence_manifest_path = source_dir / "evidence_manifest.json"
     evidence_manifest = read_json(evidence_manifest_path)
     if evidence_manifest:
-        write_json(
-            evidence_manifest_path,
-            sync_optional_sidecar_assets(
-                source_dir,
-                evidence_manifest=evidence_manifest,
-            ),
+        refreshed_evidence_manifest = sync_optional_sidecar_assets(
+            source_dir,
+            evidence_manifest=evidence_manifest,
         )
+        if refreshed_evidence_manifest != evidence_manifest:
+            write_json(evidence_manifest_path, refreshed_evidence_manifest)
     knowledge_path = source_dir / "knowledge.json"
     knowledge = read_json(knowledge_path)
     if not source_manifest or not knowledge:
@@ -4432,16 +4650,38 @@ def build_hybrid_work_queue(
     paths: WorkspacePaths,
     *,
     target: str = "staging",
+    replace_source_ids: set[str] | None = None,
+    active_source_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build the staged hard-artifact hybrid work queue."""
     target_root = paths.knowledge_target_dir(target)
     source_root = target_root / "sources"
-    payload: dict[str, Any] = {"generated_at": utc_now(), "target": target, "sources": []}
+    incremental_source_ids = set(replace_source_ids or ())
+    active_ids = set(active_source_ids or ())
+    reused_sources = [
+        dict(source)
+        for source in read_json(paths.hybrid_work_path(target)).get("sources", [])
+        if incremental_source_ids
+        and isinstance(source, dict)
+        and isinstance(source.get("source_id"), str)
+        and source["source_id"] not in incremental_source_ids
+        and (not active_ids or source["source_id"] in active_ids)
+    ]
+    payload: dict[str, Any] = {
+        "generated_at": utc_now(),
+        "target": target,
+        "sources": reused_sources,
+        "build_mode": "incremental" if incremental_source_ids else "full",
+        "rebuilt_source_count": 0,
+        "reused_source_count": len(reused_sources),
+    }
     if not source_root.exists():
         write_json(paths.hybrid_work_path(target), payload)
         return payload
     for source_dir in sorted(source_root.glob("*")):
         if not source_dir.is_dir():
+            continue
+        if incremental_source_ids and source_dir.name not in incremental_source_ids:
             continue
         evidence_manifest = read_json(source_dir / "evidence_manifest.json")
         source_manifest = read_json(source_dir / "source_manifest.json")
@@ -4455,6 +4695,7 @@ def build_hybrid_work_queue(
         if not source_packet:
             continue
         payload["sources"].append(source_packet)
+        payload["rebuilt_source_count"] += 1
     payload["sources"].sort(
         key=lambda item: (
             -int(item.get("highest_remaining_priority", 0)),
@@ -4467,9 +4708,20 @@ def build_hybrid_work_queue(
     return payload
 
 
-def hybrid_enrichment_status(paths: WorkspacePaths, *, target: str = "staging") -> dict[str, Any]:
+def hybrid_enrichment_status(
+    paths: WorkspacePaths,
+    *,
+    target: str = "staging",
+    replace_source_ids: set[str] | None = None,
+    active_source_ids: set[str] | None = None,
+) -> dict[str, Any]:
     """Describe the current semantic-overlay coverage without blocking publication."""
-    hybrid_work = build_hybrid_work_queue(paths, target=target)
+    hybrid_work = build_hybrid_work_queue(
+        paths,
+        target=target,
+        replace_source_ids=replace_source_ids,
+        active_source_ids=active_source_ids,
+    )
     summary: dict[str, Any] = {
         "target": target,
         "capability_detected": False,
@@ -4516,24 +4768,228 @@ def refresh_change_set_details(
     return {**change_set, "changes": enriched_changes}
 
 
+def _staging_transaction_roots(paths: WorkspacePaths) -> list[Path]:
+    return sorted(paths.knowledge_base_dir.glob(".staging-backup-*"))
+
+
+def _write_staging_transaction_manifest(
+    paths: WorkspacePaths,
+    *,
+    backup_root: Path,
+    source_signature: str,
+    installed_source_ids: list[str],
+    prior_source_ids: list[str] | None = None,
+    status: str = "candidate-installed",
+    physical_costs: dict[str, Any] | None = None,
+) -> None:
+    previous = read_json(backup_root / "transaction.json")
+    write_json(
+        backup_root / "transaction.json",
+        {
+            "schema_version": STAGING_TRANSACTION_SCHEMA_VERSION,
+            "created_at": utc_now(),
+            "source_signature": source_signature,
+            "installed_source_ids": sorted(set(installed_source_ids)),
+            "prior_source_ids": sorted(set(prior_source_ids or [])),
+            "status": status,
+            "physical_costs": (
+                dict(physical_costs)
+                if isinstance(physical_costs, dict)
+                else previous.get("physical_costs", {})
+            ),
+        },
+    )
+
+
+def settle_staging_transaction(
+    paths: WorkspacePaths,
+    backup_root: Path,
+    *,
+    commit: bool,
+) -> dict[str, Any]:
+    """Commit or roll back one installed staging candidate.
+
+    Dirty sources are backed up by directory rename.  Non-source staging state is
+    copied before candidate mutation so retrieval, trace, hybrid, interaction and
+    root manifests can all be restored together.  A blocked candidate may remain
+    installed for bounded repair; the prior legal state remains isolated here.
+    """
+    manifest = read_json(backup_root / "transaction.json")
+    if not backup_root.exists() or not manifest:
+        return {"settled": False, "reason": "missing-transaction"}
+    if commit:
+        try:
+            shutil.rmtree(backup_root)
+        except OSError as error:
+            return {
+                "settled": False,
+                "outcome": "commit-cleanup-degraded",
+                "error": str(error),
+            }
+        return {"settled": True, "outcome": "committed"}
+
+    if manifest.get("status") == "preparing":
+        shutil.rmtree(backup_root)
+        return {"settled": True, "outcome": "discarded-uninstalled-backup"}
+
+    staging = paths.knowledge_base_staging_dir
+    live_sources = staging / "sources"
+    ensure_directory(live_sources)
+    prior_source_ids = {
+        str(source_id)
+        for source_id in manifest.get("prior_source_ids", [])
+        if isinstance(source_id, str) and source_id
+    }
+    backup_sources = backup_root / "sources"
+    backed_up_source_ids = {
+        path.name for path in backup_sources.iterdir() if path.is_dir()
+    } if backup_sources.exists() else set()
+    for source_id in manifest.get("installed_source_ids", []):
+        if not isinstance(source_id, str) or not source_id:
+            continue
+        if source_id in prior_source_ids and source_id not in backed_up_source_ids:
+            continue
+        installed = live_sources / source_id
+        if installed.exists():
+            shutil.rmtree(installed)
+    if backup_sources.exists():
+        for backup_source in sorted(backup_sources.iterdir()):
+            destination = live_sources / backup_source.name
+            if destination.exists():
+                shutil.rmtree(destination)
+            os.replace(backup_source, destination)
+
+    for current in list(staging.iterdir()):
+        if current.name == "sources":
+            continue
+        if current.is_dir() and not current.is_symlink():
+            shutil.rmtree(current)
+        else:
+            current.unlink(missing_ok=True)
+    root_state = backup_root / "root-state"
+    if root_state.exists():
+        for prior in sorted(root_state.iterdir()):
+            os.replace(prior, staging / prior.name)
+    shutil.rmtree(backup_root)
+    staging_build = paths.knowledge_base_dir / ".staging-build"
+    if staging_build.exists():
+        shutil.rmtree(staging_build)
+    return {"settled": True, "outcome": "rolled-back"}
+
+
+def begin_in_place_staging_transaction(
+    paths: WorkspacePaths,
+    *,
+    source_signature: str,
+    affected_source_ids: set[str],
+) -> Path:
+    """Snapshot only mutable staging state before an in-place repair pass."""
+    staging = paths.knowledge_base_staging_dir
+    live_sources = staging / "sources"
+    backup_root = paths.knowledge_base_dir / f".staging-backup-{uuid.uuid4().hex}"
+    backup_sources = backup_root / "sources"
+    root_state = backup_root / "root-state"
+    ensure_directory(backup_sources)
+    ensure_directory(root_state)
+    prior_source_ids = [
+        path.name for path in live_sources.iterdir() if path.is_dir()
+    ] if live_sources.exists() else []
+    _write_staging_transaction_manifest(
+        paths,
+        backup_root=backup_root,
+        source_signature=source_signature,
+        installed_source_ids=sorted(affected_source_ids),
+        prior_source_ids=prior_source_ids,
+        status="preparing",
+    )
+    physical_costs = {
+        "files_copied": 0,
+        "bytes_copied": 0,
+        "files_cloned": 0,
+        "bytes_cloned": 0,
+    }
+    try:
+        for root_entry in staging.iterdir():
+            if root_entry.name == "sources":
+                continue
+            destination = root_state / root_entry.name
+            copy_cost = clone_or_copy_path(root_entry, destination)
+            for key in physical_costs:
+                physical_costs[key] += int(copy_cost.get(key, 0) or 0)
+        _write_staging_transaction_manifest(
+            paths,
+            backup_root=backup_root,
+            source_signature=source_signature,
+            installed_source_ids=sorted(affected_source_ids),
+            prior_source_ids=prior_source_ids,
+            status="prepared",
+            physical_costs=physical_costs,
+        )
+        for source_id in sorted(affected_source_ids):
+            live_source = live_sources / source_id
+            if not live_source.exists():
+                continue
+            backup_source = backup_sources / source_id
+            os.replace(live_source, backup_source)
+            copy_cost = clone_or_copy_path(backup_source, live_source)
+            for key in physical_costs:
+                physical_costs[key] += int(copy_cost.get(key, 0) or 0)
+        _write_staging_transaction_manifest(
+            paths,
+            backup_root=backup_root,
+            source_signature=source_signature,
+            installed_source_ids=sorted(affected_source_ids),
+            prior_source_ids=prior_source_ids,
+            status="candidate-installed",
+            physical_costs=physical_costs,
+        )
+    except Exception:
+        manifest = read_json(backup_root / "transaction.json")
+        if manifest.get("status") == "preparing":
+            shutil.rmtree(backup_root)
+        else:
+            settle_staging_transaction(paths, backup_root, commit=False)
+        raise
+    return backup_root
+
+
 def build_staging_artifacts(
     paths: WorkspacePaths,
     active_sources: list[dict[str, Any]],
     office_binary: str | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, dict[str, int]]:
-    """Assemble a new staging tree with selective reuse plus targeted rebuilds."""
+    *,
+    trusted_unchanged_source_ids: set[str] | None = None,
+    retain_transaction: bool = False,
+    source_signature: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, dict[str, Any]]:
+    """Build dirty sources in isolation and atomically update persistent staging."""
+    build_started = perf_counter()
     staging_temp_dir = paths.knowledge_base_dir / ".staging-build"
     if staging_temp_dir.exists():
         shutil.rmtree(staging_temp_dir)
     ensure_directory(staging_temp_dir / "sources")
+    persistent_staging = paths.knowledge_base_staging_dir.exists()
 
     reused_sources = 0
     rebuilt_sources = 0
+    files_copied = 0
+    bytes_copied = 0
+    files_cloned = 0
+    bytes_cloned = 0
+    source_build_seconds = 0.0
+    trusted_source_ids = set(trusted_unchanged_source_ids or ())
     for source_entry in active_sources:
         source_id = str(source_entry["source_id"])
         source_dir = staging_temp_dir / "sources" / source_id
-        previous_source_dir = locate_previous_source_dir(paths, source_id)
         classification = str(source_entry.get("change_classification", "added"))
+        staging_candidate = paths.knowledge_base_staging_dir / "sources" / source_id
+        previous_source_dir = (
+            staging_candidate
+            if persistent_staging
+            and classification == "unchanged"
+            and staging_candidate.exists()
+            else locate_previous_source_dir(paths, source_id)
+        )
         previous_manifest = (
             read_json(previous_source_dir / "source_manifest.json")
             if previous_source_dir is not None
@@ -4563,26 +5019,46 @@ def build_staging_artifacts(
         if is_email_source and classification == "moved-or-renamed":
             reuse_previous_directory = False
         previous_contract_complete = bool(
-            previous_source_dir is not None
-            and source_tree_artifact_contract_complete(
-                previous_source_dir,
-                document_type=str(source_entry.get("document_type") or "unknown"),
+            source_id in trusted_source_ids
+            or (
+                previous_source_dir is not None
+                and source_tree_artifact_contract_complete(
+                    previous_source_dir,
+                    document_type=str(source_entry.get("document_type") or "unknown"),
+                )
             )
         )
         if reuse_previous_directory and not previous_contract_complete:
             reuse_previous_directory = False
 
         if reuse_previous_directory and previous_source_dir is not None:
-            if is_email_source:
+            if (
+                persistent_staging
+                and classification == "unchanged"
+                and previous_source_dir.parent
+                == paths.knowledge_base_staging_dir / "sources"
+            ):
+                source_dir = previous_source_dir
+            elif is_email_source:
                 _copy_reused_source_tree(
                     paths,
                     source_entry=source_entry,
                     destination_root=staging_temp_dir / "sources",
                 )
+                copied_files = [
+                    path
+                    for path in (staging_temp_dir / "sources").rglob("*")
+                    if path.is_file()
+                ]
+                files_copied += len(copied_files)
+                bytes_copied += sum(path.stat().st_size for path in copied_files)
             else:
                 if source_dir.exists():
                     shutil.rmtree(source_dir)
                 shutil.copytree(previous_source_dir, source_dir)
+                copied_files = [path for path in source_dir.rglob("*") if path.is_file()]
+                files_copied += len(copied_files)
+                bytes_copied += sum(path.stat().st_size for path in copied_files)
                 refresh_reused_source_metadata(paths, source_entry, source_dir)
             source_entry["source_reused"] = True
             source_entry["semantic_outputs_reused"] = True
@@ -4601,6 +5077,7 @@ def build_staging_artifacts(
                 )
             reused_sources += 1
         else:
+            source_build_started = perf_counter()
             if source_dir.exists():
                 shutil.rmtree(source_dir)
             ensure_directory(source_dir)
@@ -4788,17 +5265,137 @@ def build_staging_artifacts(
                                 "semantically stable, so semantic outputs must be refreshed."
                             )
             rebuilt_sources += 1
+            source_build_seconds += perf_counter() - source_build_started
 
         source_entry["change_traits"] = change_traits
         source_manifest = read_json(source_dir / "source_manifest.json")
         evidence_manifest = read_json(source_dir / "evidence_manifest.json")
-    if paths.knowledge_base_staging_dir.exists():
-        shutil.rmtree(paths.knowledge_base_staging_dir)
-    staging_temp_dir.rename(paths.knowledge_base_staging_dir)
-    catalog_sources, source_summaries, ambiguous_match = write_staging_root_artifacts(
-        paths,
-        active_sources,
-    )
+    staging_install_started = perf_counter()
+    if persistent_staging:
+        live_sources_dir = paths.knowledge_base_staging_dir / "sources"
+        ensure_directory(live_sources_dir)
+        temporary_sources = sorted(
+            path for path in (staging_temp_dir / "sources").iterdir() if path.is_dir()
+        )
+        for source_dir in temporary_sources:
+            manifest = read_json(source_dir / "source_manifest.json")
+            if not source_tree_artifact_contract_complete(
+                source_dir,
+                document_type=str(manifest.get("document_type") or "unknown"),
+            ):
+                shutil.rmtree(staging_temp_dir)
+                raise ValueError(
+                    f"Dirty source `{source_dir.name}` failed its local artifact contract."
+                )
+
+        backup_root = paths.knowledge_base_dir / f".staging-backup-{uuid.uuid4().hex}"
+        backup_sources = backup_root / "sources"
+        backup_artifacts = backup_root / "root-state"
+        ensure_directory(backup_sources)
+        ensure_directory(backup_artifacts)
+        prior_source_ids = [
+            path.name for path in live_sources_dir.iterdir() if path.is_dir()
+        ]
+        candidate_source_ids = [path.name for path in temporary_sources]
+        _write_staging_transaction_manifest(
+            paths,
+            backup_root=backup_root,
+            source_signature=source_signature or source_inventory_signature(paths),
+            installed_source_ids=candidate_source_ids,
+            prior_source_ids=prior_source_ids,
+            status="preparing",
+        )
+        for root_entry in paths.knowledge_base_staging_dir.iterdir():
+            if root_entry.name == "sources":
+                continue
+            destination = backup_artifacts / root_entry.name
+            copy_cost = clone_or_copy_path(root_entry, destination)
+            files_copied += int(copy_cost.get("files_copied", 0) or 0)
+            bytes_copied += int(copy_cost.get("bytes_copied", 0) or 0)
+            files_cloned += int(copy_cost.get("files_cloned", 0) or 0)
+            bytes_cloned += int(copy_cost.get("bytes_cloned", 0) or 0)
+        _write_staging_transaction_manifest(
+            paths,
+            backup_root=backup_root,
+            source_signature=source_signature or source_inventory_signature(paths),
+            installed_source_ids=candidate_source_ids,
+            prior_source_ids=prior_source_ids,
+            status="prepared",
+            physical_costs={
+                "files_copied": files_copied,
+                "bytes_copied": bytes_copied,
+                "files_cloned": files_cloned,
+                "bytes_cloned": bytes_cloned,
+            },
+        )
+        installed_source_ids: list[str] = []
+        expected_source_ids = {
+            str(source["source_id"])
+            for source in active_sources
+            if isinstance(source.get("source_id"), str)
+        }
+        for active_source in active_sources:
+            source_id = str(active_source.get("source_id") or "")
+            source_dir = (
+                staging_temp_dir / "sources" / source_id
+                if (staging_temp_dir / "sources" / source_id).exists()
+                else live_sources_dir / source_id
+            )
+            manifest = read_json(source_dir / "source_manifest.json")
+            expected_source_ids.update(
+                child_id
+                for child_id in manifest.get("child_source_ids", [])
+                if isinstance(child_id, str) and child_id
+            )
+        try:
+            for temporary_source in temporary_sources:
+                source_id = temporary_source.name
+                live_source = live_sources_dir / source_id
+                backup_source = backup_sources / source_id
+                if live_source.exists():
+                    os.replace(live_source, backup_source)
+                os.replace(temporary_source, live_source)
+                installed_source_ids.append(source_id)
+            for live_source in sorted(
+                path for path in live_sources_dir.iterdir() if path.is_dir()
+            ):
+                if live_source.name in expected_source_ids:
+                    continue
+                os.replace(live_source, backup_sources / live_source.name)
+            catalog_sources, source_summaries, ambiguous_match = write_staging_root_artifacts(
+                paths,
+                active_sources,
+            )
+            _write_staging_transaction_manifest(
+                paths,
+                backup_root=backup_root,
+                source_signature=source_signature or source_inventory_signature(paths),
+                installed_source_ids=candidate_source_ids,
+                prior_source_ids=prior_source_ids,
+                physical_costs={
+                    "files_copied": files_copied,
+                    "bytes_copied": bytes_copied,
+                    "files_cloned": files_cloned,
+                    "bytes_cloned": bytes_cloned,
+                },
+            )
+        except Exception:
+            settle_staging_transaction(paths, backup_root, commit=False)
+            if staging_temp_dir.exists():
+                shutil.rmtree(staging_temp_dir)
+            raise
+        else:
+            if not retain_transaction:
+                settle_staging_transaction(paths, backup_root, commit=True)
+            shutil.rmtree(staging_temp_dir)
+    else:
+        staging_temp_dir.rename(paths.knowledge_base_staging_dir)
+        catalog_sources, source_summaries, ambiguous_match = write_staging_root_artifacts(
+            paths,
+            active_sources,
+        )
+    staging_install_seconds = perf_counter() - staging_install_started
+    total_seconds = perf_counter() - build_started
     return (
         catalog_sources,
         source_summaries,
@@ -4806,6 +5403,18 @@ def build_staging_artifacts(
         {
             "reused_sources": reused_sources,
             "rebuilt_sources": rebuilt_sources,
+            "files_copied": files_copied,
+            "bytes_copied": bytes_copied,
+            "files_cloned": files_cloned,
+            "bytes_cloned": bytes_cloned,
+            "source_build_seconds": source_build_seconds,
+            "staging_install_seconds": staging_install_seconds,
+            "corpus_overhead_seconds": max(total_seconds - source_build_seconds, 0.0),
+            "staging_transaction_path": (
+                str(backup_root.relative_to(paths.root))
+                if persistent_staging and retain_transaction
+                else None
+            ),
         },
     )
 
@@ -5087,7 +5696,115 @@ def evidence_warning_messages(evidence_manifest: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(messages))
 
 
-def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
+def _validation_configuration_digest(paths: WorkspacePaths) -> str:
+    config_path = paths.root / "docmason.yaml"
+    digest = hashlib.sha256()
+    if config_path.exists():
+        digest.update(config_path.read_bytes())
+    digest.update(str(SOURCE_ARTIFACT_CONTRACT_VERSION).encode("ascii"))
+    digest.update(str(SOURCE_VALIDATOR_VERSION).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _source_validation_cache_key(
+    *,
+    source_manifest: dict[str, Any],
+    configuration_digest: str,
+    validation_input_digest: str = "",
+) -> str | None:
+    fingerprint = source_manifest.get("source_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return None
+    encoded = "\0".join(
+        (
+            fingerprint,
+            str(SOURCE_ARTIFACT_CONTRACT_VERSION),
+            str(SOURCE_VALIDATOR_VERSION),
+            configuration_digest,
+            validation_input_digest,
+        )
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _source_validation_input_digest(source_dir: Path) -> str:
+    """Fingerprint mutable validation inputs without walking immutable render payloads."""
+    digest = hashlib.sha256()
+    if not source_dir.exists():
+        return digest.hexdigest()
+
+    input_paths: set[Path] = set()
+    for filename in (
+        "source_manifest.json",
+        "evidence_manifest.json",
+        "knowledge.json",
+        "summary.md",
+        "artifact_index.json",
+        "pdf_document.json",
+        "derived_affordances.json",
+        "interaction_context.json",
+    ):
+        path = source_dir / filename
+        if path.is_file():
+            input_paths.add(path)
+    evidence_manifest = read_json(source_dir / "evidence_manifest.json")
+    for asset in evidence_manifest.get("semantic_overlay_assets", []):
+        if not isinstance(asset, str) or not asset:
+            continue
+        path = source_dir / asset
+        if path.is_file():
+            input_paths.add(path)
+    for directory_name in (
+        "semantic_overlay",
+        "visual_layout",
+        "extracted",
+        "structure",
+        "sheets",
+        "renders",
+        "artifact_renders",
+        "focus_renders",
+        "media",
+    ):
+        directory = source_dir / directory_name
+        if not directory.exists():
+            continue
+        stat = directory.stat()
+        digest.update(directory_name.encode("utf-8"))
+        digest.update(b"\0")
+        for value in (stat.st_mtime_ns, stat.st_ctime_ns):
+            digest.update(str(value).encode("ascii"))
+            digest.update(b"\0")
+        for child in sorted(directory.rglob("*")):
+            if not child.is_file() and not child.is_symlink():
+                continue
+            child_stat = child.lstat()
+            digest.update(str(child.relative_to(source_dir)).encode("utf-8"))
+            digest.update(b"\0")
+            for value in (
+                child_stat.st_size,
+                child_stat.st_mtime_ns,
+                child_stat.st_ctime_ns,
+            ):
+                digest.update(str(value).encode("ascii"))
+                digest.update(b"\0")
+
+    for path in sorted(input_paths):
+        stat = path.stat()
+        digest.update(str(path.relative_to(source_dir)).encode("utf-8"))
+        digest.update(b"\0")
+        for value in (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns):
+            digest.update(str(value).encode("ascii"))
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def validate_target(
+    paths: WorkspacePaths,
+    target: str,
+    *,
+    dirty_source_ids: set[str] | None = None,
+    use_cache: bool = False,
+) -> dict[str, Any]:
     """Validate a staged or published knowledge-base target and write the report."""
     target_root = paths.knowledge_target_dir(target)
     if not target_root.exists():
@@ -5134,6 +5851,17 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
     else:
         blocking_errors.append("Missing or invalid hybrid_work.json")
     pending_synthesis = False
+    effective_dirty_source_ids = set(dirty_source_ids or ())
+    configuration_digest = _validation_configuration_digest(paths)
+    validation_cache = read_json(paths.validation_cache_path) if use_cache else {}
+    validation_cache_entries = (
+        dict(validation_cache.get("entries", {}))
+        if isinstance(validation_cache.get("entries"), dict)
+        else {}
+    )
+    validation_cache_hits = 0
+    validation_cache_misses = 0
+    used_validation_cache_keys: set[str] = set()
 
     for source in catalog.get("sources", []):
         if not isinstance(source, dict):
@@ -5154,8 +5882,60 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                 source_errors.append(f"Missing {required}")
 
         source_manifest = read_json(source_dir / "source_manifest.json")
+        original_source_manifest = dict(source_manifest)
+        validation_input_digest = _source_validation_input_digest(source_dir)
+        cache_key = _source_validation_cache_key(
+            source_manifest=source_manifest,
+            configuration_digest=configuration_digest,
+            validation_input_digest=validation_input_digest,
+        )
+        cache_bucket = (
+            validation_cache_entries.get(cache_key)
+            if cache_key is not None and source_id not in effective_dirty_source_ids
+            else None
+        )
+        cache_record = None
+        if isinstance(cache_bucket, dict):
+            source_results = cache_bucket.get("source_results")
+            if isinstance(source_results, dict):
+                cache_record = source_results.get(source_id)
+            elif cache_bucket.get("source_id") == source_id:
+                cache_record = cache_bucket
+        if use_cache and isinstance(cache_record, dict):
+            cached_report = cache_record.get("source_report")
+            if isinstance(cached_report, dict):
+                report = dict(cached_report)
+                source_reports.append(report)
+                cached_errors = [
+                    message
+                    for message in report.get("errors", [])
+                    if isinstance(message, str)
+                ]
+                blocking_errors.extend(
+                    f"{source_id}: {message}" for message in cached_errors
+                )
+                cached_edges = cache_record.get("graph_edges", [])
+                graph_edges.extend(
+                    dict(edge) for edge in cached_edges if isinstance(edge, dict)
+                )
+                cached_context = cache_record.get("source_context")
+                if isinstance(cached_context, dict) and not cached_errors:
+                    context = dict(cached_context)
+                    context["artifact_dir"] = source_dir
+                    source_contexts.append(context)
+                pending_synthesis = bool(
+                    pending_synthesis or cache_record.get("pending_synthesis", False)
+                )
+                validation_cache_hits += 1
+                if cache_key is not None:
+                    used_validation_cache_keys.add(cache_key)
+                continue
+        if use_cache:
+            validation_cache_misses += 1
         evidence_manifest = read_json(source_dir / "evidence_manifest.json")
+        original_evidence_manifest = dict(evidence_manifest)
         knowledge = read_json(source_dir / "knowledge.json")
+        source_graph_edge_start = len(graph_edges)
         source_manifest = enrich_source_manifest_reference_fields(
             source_manifest,
             title=knowledge.get("title") if isinstance(knowledge, dict) else None,
@@ -5170,8 +5950,10 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
             source_dir=source_dir,
         )
         if target == "staging":
-            write_json(source_dir / "source_manifest.json", source_manifest)
-            write_json(source_dir / "evidence_manifest.json", evidence_manifest)
+            if source_manifest != original_source_manifest:
+                write_json(source_dir / "source_manifest.json", source_manifest)
+            if evidence_manifest != original_evidence_manifest:
+                write_json(source_dir / "evidence_manifest.json", evidence_manifest)
         affordance_path = source_dir / DEFAULT_AFFORDANCE_FILENAME
         affordances = read_json(affordance_path)
         summary_text = (
@@ -5549,9 +6331,9 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                 "derived_affordances.json is missing; using deterministic fallback affordances"
             )
 
+        source_context: dict[str, Any] | None = None
         if knowledge and summary_text.strip():
-            source_contexts.append(
-                {
+            source_context = {
                     "source_manifest": source_manifest,
                     "evidence_manifest": evidence_manifest,
                     "knowledge": knowledge,
@@ -5561,17 +6343,77 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
                     "source_family": "corpus",
                     "trust_tier": "source",
                 }
-            )
+            source_contexts.append(source_context)
 
-        source_reports.append(
-            {
+        source_report = {
                 "source_id": source_id,
                 "current_path": source_manifest.get("current_path"),
                 "errors": list(dict.fromkeys(source_errors)),
                 "warnings": list(dict.fromkeys(source_warnings)),
             }
-        )
+        source_reports.append(source_report)
         blocking_errors.extend(f"{source_id}: {message}" for message in source_errors)
+        if use_cache and cache_key is not None:
+            final_validation_input_digest = _source_validation_input_digest(source_dir)
+            final_cache_key = _source_validation_cache_key(
+                source_manifest=source_manifest,
+                configuration_digest=configuration_digest,
+                validation_input_digest=final_validation_input_digest,
+            )
+            if final_cache_key is None:
+                continue
+            serializable_context = None
+            if source_context is not None:
+                serializable_context = {
+                    key: value
+                    for key, value in source_context.items()
+                    if key != "artifact_dir"
+                }
+            existing_bucket = validation_cache_entries.get(final_cache_key)
+            existing_source_results = (
+                dict(existing_bucket.get("source_results", {}))
+                if isinstance(existing_bucket, dict)
+                and isinstance(existing_bucket.get("source_results"), dict)
+                else {}
+            )
+            existing_source_results[source_id] = {
+                "source_id": source_id,
+                "source_fingerprint": source_manifest.get("source_fingerprint"),
+                "artifact_contract_version": SOURCE_ARTIFACT_CONTRACT_VERSION,
+                "validator_version": SOURCE_VALIDATOR_VERSION,
+                "configuration_digest": configuration_digest,
+                "validation_input_digest": final_validation_input_digest,
+                "validated_at": utc_now(),
+                "source_report": source_report,
+                "graph_edges": graph_edges[source_graph_edge_start:],
+                "source_context": serializable_context,
+                "pending_synthesis": not bool(knowledge),
+            }
+            validation_cache_entries[final_cache_key] = {
+                "artifact_contract_version": SOURCE_ARTIFACT_CONTRACT_VERSION,
+                "validator_version": SOURCE_VALIDATOR_VERSION,
+                "configuration_digest": configuration_digest,
+                "source_results": existing_source_results,
+            }
+            used_validation_cache_keys.add(final_cache_key)
+
+    if use_cache:
+        validation_cache_entries = {
+            key: validation_cache_entries[key]
+            for key in used_validation_cache_keys
+            if key in validation_cache_entries
+        }
+        write_json(
+            paths.validation_cache_path,
+            {
+                "schema_version": 1,
+                "artifact_contract_version": SOURCE_ARTIFACT_CONTRACT_VERSION,
+                "validator_version": SOURCE_VALIDATOR_VERSION,
+                "configuration_digest": configuration_digest,
+                "updated_at": utc_now(),
+                "entries": validation_cache_entries,
+            },
+        )
 
     interaction_contexts = load_promoted_interaction_contexts(paths, target=target)
     interaction_source_ids = {
@@ -5584,6 +6426,8 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
     for context in interaction_contexts:
         source_manifest = context["source_manifest"]
         evidence_manifest = context["evidence_manifest"]
+        original_source_manifest = dict(source_manifest)
+        original_evidence_manifest = dict(evidence_manifest)
         knowledge = context["knowledge"]
         source_dir = Path(context["artifact_dir"])
         source_manifest = enrich_source_manifest_reference_fields(
@@ -5596,8 +6440,10 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
             source_dir=source_dir,
         )
         if target == "staging":
-            write_json(source_dir / "source_manifest.json", source_manifest)
-            write_json(source_dir / "evidence_manifest.json", evidence_manifest)
+            if source_manifest != original_source_manifest:
+                write_json(source_dir / "source_manifest.json", source_manifest)
+            if evidence_manifest != original_evidence_manifest:
+                write_json(source_dir / "evidence_manifest.json", evidence_manifest)
         affordance_path = source_dir / DEFAULT_AFFORDANCE_FILENAME
         affordances = read_json(affordance_path)
         summary_text = context["summary_text"]
@@ -5759,9 +6605,39 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
             context["affordances"] = derived_affordances
             source_contexts.append(context)
 
+    catalog_ids_in_order = [
+        str(source.get("source_id"))
+        for source in catalog.get("sources", [])
+        if isinstance(source, dict) and isinstance(source.get("source_id"), str)
+    ]
+    if len(catalog_ids_in_order) != len(set(catalog_ids_in_order)):
+        blocking_errors.append("catalog.json contains duplicate source_id values")
+    for edge_index, edge in enumerate(graph_edges):
+        source_id = edge.get("source_id") if isinstance(edge, dict) else None
+        related_source_id = edge.get("related_source_id") if isinstance(edge, dict) else None
+        if source_id not in all_known_source_ids:
+            blocking_errors.append(
+                f"graph edge {edge_index} references unknown source_id `{source_id}`"
+            )
+        if related_source_id not in all_known_source_ids:
+            blocking_errors.append(
+                "graph edge "
+                f"{edge_index} references unknown related_source_id `{related_source_id}`"
+            )
+
     write_json(target_root / "graph_edges.json", {"generated_at": utc_now(), "edges": graph_edges})
     retrieval_manifest: dict[str, Any] | None = None
     trace_manifest: dict[str, Any] | None = None
+    incremental_index_source_ids: set[str] | None = None
+    if (
+        use_cache
+        and effective_dirty_source_ids
+        and validation_cache_hits > 0
+        and validation_cache_misses <= len(effective_dirty_source_ids)
+        and paths.retrieval_manifest_path(target).exists()
+        and paths.trace_manifest_path(target).exists()
+    ):
+        incremental_index_source_ids = set(effective_dirty_source_ids)
     if not pending_synthesis and not blocking_errors:
         retrieval_manifest = build_retrieval_artifacts(
             paths,
@@ -5769,6 +6645,8 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
             source_contexts=source_contexts,
             graph_edges=graph_edges,
             source_signature=catalog.get("source_signature"),
+            replace_source_ids=incremental_index_source_ids,
+            active_source_ids=all_known_source_ids,
         )
         trace_manifest = build_trace_artifacts(
             paths,
@@ -5776,6 +6654,8 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
             source_contexts=source_contexts,
             graph_edges=graph_edges,
             source_signature=catalog.get("source_signature"),
+            replace_source_ids=incremental_index_source_ids,
+            active_source_ids=all_known_source_ids,
         )
 
     status = "valid"
@@ -5798,6 +6678,17 @@ def validate_target(paths: WorkspacePaths, target: str) -> dict[str, Any]:
         "interaction_memory_count": len(interaction_contexts),
         "retrieval_artifacts_built": retrieval_manifest is not None,
         "trace_artifacts_built": trace_manifest is not None,
+        "index_build_mode": (
+            "incremental" if incremental_index_source_ids is not None else "full"
+        ),
+        "validation_cache": {
+            "hits": validation_cache_hits,
+            "misses": validation_cache_misses,
+            "entry_count": len(validation_cache_entries),
+            "artifact_contract_version": SOURCE_ARTIFACT_CONTRACT_VERSION,
+            "validator_version": SOURCE_VALIDATOR_VERSION,
+            "configuration_digest": configuration_digest,
+        },
     }
     write_json(target_root / "validation_report.json", report)
     update_dependency_state(
@@ -6175,68 +7066,12 @@ def sync_workspace(
         "stage": 0.0,
         "repair": 0.0,
         "author": 0.0,
+        "hybrid": 0.0,
         "validate": 0.0,
         "publish": 0.0,
         "projection_enqueue": 0.0,
     }
     repair_actions: list[dict[str, Any]] = []
-
-    pdf_snapshot = pdf_renderer_snapshot()
-    if (
-        any(path.suffix.lower() == ".pdf" for path in supported_source_documents(paths))
-        and not pdf_snapshot["ready"]
-    ):
-        return {
-            "status": "action-required",
-            "detail": pdf_snapshot["detail"],
-            "pending_sources": [],
-            "validation": None,
-            "published": False,
-            "auto_repairs": {"repair_count": 0},
-            "auto_authoring": {"attempted": 0, "authored": [], "authored_count": 0},
-            "autonomous_steps": [
-                {
-                    "step": "detect",
-                    "status": "blocked",
-                    "detail": pdf_snapshot["detail"],
-                }
-            ],
-            "required_capabilities": ["pdf-rendering"],
-            "phase_costs": phase_costs,
-            "publish_skipped": False,
-            "publish_skip_reason": None,
-            "repair_actions": repair_actions,
-            "projection_state": projection_state_summary(paths),
-            "publish_storage": {},
-            "lane_b_follow_up": {},
-        }
-
-    office_snapshot = office_renderer_snapshot(paths)
-    if office_snapshot["required"] and not office_snapshot["ready"]:
-        return {
-            "status": "action-required",
-            "detail": office_snapshot["detail"],
-            "pending_sources": [],
-            "validation": None,
-            "published": False,
-            "auto_repairs": {"repair_count": 0},
-            "auto_authoring": {"attempted": 0, "authored": [], "authored_count": 0},
-            "autonomous_steps": [
-                {
-                    "step": "detect",
-                    "status": "blocked",
-                    "detail": office_snapshot["detail"],
-                }
-            ],
-            "required_capabilities": ["office-rendering"],
-            "phase_costs": phase_costs,
-            "publish_skipped": False,
-            "publish_skip_reason": None,
-            "repair_actions": repair_actions,
-            "projection_state": projection_state_summary(paths),
-            "publish_storage": {},
-            "lane_b_follow_up": {},
-        }
     with workspace_lease(paths, "sync", timeout_seconds=600.0):
         if paths.knowledge_base_dir.joinpath(".staging-build").exists():
             shutil.rmtree(paths.knowledge_base_dir / ".staging-build")
@@ -6269,7 +7104,74 @@ def sync_workspace(
         repair_actions.extend(repair_stale_active_runs(paths))
         detect_started = perf_counter()
         current_signature = source_inventory_signature(paths)
+        active_staging_transaction: Path | None = None
+        transaction_roots = _staging_transaction_roots(paths)
+        if len(transaction_roots) > 1:
+            transaction_roots.sort(
+                key=lambda path: str(
+                    read_json(path / "transaction.json").get("created_at") or ""
+                ),
+                reverse=True,
+            )
+            for transaction_root in transaction_roots:
+                outcome = settle_staging_transaction(
+                    paths,
+                    transaction_root,
+                    commit=False,
+                )
+                repair_actions.append(
+                    {
+                        "kind": "rolled-back-overlapping-staging-transaction",
+                        "path": str(transaction_root.relative_to(paths.root)),
+                        **outcome,
+                    }
+                )
+        elif transaction_roots:
+            candidate_root = transaction_roots[0]
+            transaction_manifest = read_json(candidate_root / "transaction.json")
+            if not transaction_manifest:
+                shutil.rmtree(candidate_root)
+                repair_actions.append(
+                    {
+                        "kind": "removed-incomplete-staging-transaction",
+                        "path": str(candidate_root.relative_to(paths.root)),
+                    }
+                )
+            elif transaction_manifest.get("status") == "preparing":
+                outcome = settle_staging_transaction(
+                    paths,
+                    candidate_root,
+                    commit=False,
+                )
+                repair_actions.append(
+                    {
+                        "kind": "discarded-uninstalled-staging-transaction",
+                        "path": str(candidate_root.relative_to(paths.root)),
+                        **outcome,
+                    }
+                )
+            elif transaction_manifest.get("source_signature") != current_signature:
+                outcome = settle_staging_transaction(
+                    paths,
+                    candidate_root,
+                    commit=False,
+                )
+                repair_actions.append(
+                    {
+                        "kind": "rolled-back-stale-staging-transaction",
+                        "path": str(candidate_root.relative_to(paths.root)),
+                        **outcome,
+                    }
+                )
+            else:
+                active_staging_transaction = candidate_root
         state = sync_state(paths)
+        if active_staging_transaction is not None:
+            state = {
+                **state,
+                "staging_source_signature": current_signature,
+                "last_validation_status": "pending-candidate-validation",
+            }
         index_payload, active_sources, ambiguous_match, change_set = update_source_index(paths)
         active_source_ids = {
             str(source["source_id"])
@@ -6293,6 +7195,16 @@ def sync_workspace(
             }
         )
         phase_costs["detect"] = perf_counter() - detect_started
+        interaction_maintenance: dict[str, Any] = {}
+        if run_id is None:
+            interaction_maintenance = repair_interaction_runtime_maintenance(paths)
+            if int(interaction_maintenance.get("repair_count", 0) or 0) > 0:
+                repair_actions.append(
+                    {
+                        "kind": "interaction-runtime-maintenance",
+                        **interaction_maintenance,
+                    }
+                )
         interaction_snapshot = interaction_ingest_snapshot(paths)
         rebuild_telemetry = classify_rebuild_telemetry(
             paths,
@@ -6303,6 +7215,12 @@ def sync_workspace(
             ambiguous_match=ambiguous_match,
             interaction_snapshot=interaction_snapshot,
         )
+        if active_staging_transaction is not None:
+            rebuild_telemetry["rebuild_cause"] = "staging-repair"
+            rebuild_telemetry["resumed_staging_transaction"] = True
+            rebuild_telemetry["staging_transaction_path"] = str(
+                active_staging_transaction.relative_to(paths.root)
+            )
         rebuild_required = rebuild_telemetry["rebuild_cause"] in {
             "missing-staging",
             "staging-signature-drift",
@@ -6316,7 +7234,205 @@ def sync_workspace(
         }
         scoped_contract_repair_used = False
 
+        foreground_interaction_deferred = bool(
+            rebuild_telemetry["rebuild_cause"] == "interaction-promotion-only"
+            and isinstance(run_id, str)
+            and run_id
+        )
+        if (
+            rebuild_telemetry["rebuild_cause"] == "zero-delta"
+            or foreground_interaction_deferred
+        ):
+            validation_report = read_json(paths.current_validation_report_path)
+            validation_status = str(validation_report.get("status") or "valid")
+            retained_lane_b_summary = (
+                dict(state.get("lane_b_follow_up_summary", {}))
+                if isinstance(state.get("lane_b_follow_up_summary"), dict)
+                else {}
+            )
+            early_exit_reason = (
+                "Pending interaction promotion is deferred maintenance and does not invalidate "
+                "the current published KB."
+                if rebuild_telemetry["interaction_promotion_only"]
+                else "Source fingerprints, required contracts, and published truth are unchanged."
+            )
+            build_stats = {
+                "reused_sources": len(active_sources),
+                "rebuilt_sources": 0,
+                "scoped_repaired_sources": 0,
+            }
+            autonomous_steps.append(
+                {
+                    "step": "early-exit",
+                    "status": "completed",
+                    "detail": early_exit_reason,
+                }
+            )
+            if rebuild_telemetry.get("lane_b_follow_up_pending"):
+                autonomous_steps.append(
+                    {
+                        "step": "lane-b-follow-up",
+                        "status": "degraded",
+                        "detail": (
+                            retained_lane_b_summary.get("detail")
+                            or "A previously governed Lane B follow-up remains pending."
+                        ),
+                    }
+                )
+            return {
+                "status": validation_status,
+                "detail": early_exit_reason,
+                "pending_sources": [],
+                "validation": validation_report or None,
+                "published": False,
+                "rebuilt": False,
+                "build_stats": build_stats,
+                "rebuild_cause": rebuild_telemetry["rebuild_cause"],
+                "dirty_source_count": 0,
+                "contract_backfill_source_count": 0,
+                "interaction_promotion_only": rebuild_telemetry[
+                    "interaction_promotion_only"
+                ],
+                "scoped_contract_repair_used": False,
+                "rebuild_telemetry": rebuild_telemetry,
+                "auto_repairs": {"repair_count": 0},
+                "auto_authoring": {
+                    "attempted": 0,
+                    "authored": [],
+                    "authored_count": 0,
+                    "mode": "not-required",
+                },
+                "hybrid_enrichment": {"mode": "not-required"},
+                "autonomous_steps": autonomous_steps,
+                "required_capabilities": [],
+                "interaction_ingest": {
+                    **interaction_snapshot,
+                    "promoted_memory_count": 0,
+                    "promotion_ready": bool(
+                        rebuild_telemetry["interaction_promotion_only"]
+                    ),
+                    "runtime_maintenance": interaction_maintenance,
+                },
+                "change_set": change_set,
+                "source_index": index_payload,
+                "phase_costs": phase_costs,
+                "physical_costs": {
+                    "files_copied": 0,
+                    "bytes_copied": 0,
+                    "files_cloned": 0,
+                    "bytes_cloned": 0,
+                },
+                "validation_cache": {"hits": 0, "misses": 0, "skipped": True},
+                "transcript_reconciliation": {},
+                "publish_skipped": True,
+                "publish_skip_reason": early_exit_reason,
+                "repair_actions": repair_actions,
+                "projection_state": projection_state_summary(paths),
+                "publish_storage": publish_storage_summary(paths),
+                "lane_b_follow_up": retained_lane_b_summary,
+                "lane_b_follow_up_summary": retained_lane_b_summary,
+            }
+
+        pdf_snapshot = pdf_renderer_snapshot()
+        if (
+            any(path.suffix.lower() == ".pdf" for path in supported_source_documents(paths))
+            and not pdf_snapshot["ready"]
+        ):
+            return {
+                "status": "action-required",
+                "detail": pdf_snapshot["detail"],
+                "pending_sources": [],
+                "validation": None,
+                "published": False,
+                "auto_repairs": {"repair_count": 0},
+                "auto_authoring": {"attempted": 0, "authored": [], "authored_count": 0},
+                "autonomous_steps": [
+                    {
+                        "step": "detect",
+                        "status": "blocked",
+                        "detail": pdf_snapshot["detail"],
+                    }
+                ],
+                "required_capabilities": ["pdf-rendering"],
+                "phase_costs": phase_costs,
+                "publish_skipped": False,
+                "publish_skip_reason": None,
+                "repair_actions": repair_actions,
+                "projection_state": projection_state_summary(paths),
+                "publish_storage": {},
+                "lane_b_follow_up": {},
+            }
+
+        office_snapshot = office_renderer_snapshot(paths)
+        if office_snapshot["required"] and not office_snapshot["ready"]:
+            return {
+                "status": "action-required",
+                "detail": office_snapshot["detail"],
+                "pending_sources": [],
+                "validation": None,
+                "published": False,
+                "auto_repairs": {"repair_count": 0},
+                "auto_authoring": {"attempted": 0, "authored": [], "authored_count": 0},
+                "autonomous_steps": [
+                    {
+                        "step": "detect",
+                        "status": "blocked",
+                        "detail": office_snapshot["detail"],
+                    }
+                ],
+                "required_capabilities": ["office-rendering"],
+                "phase_costs": phase_costs,
+                "publish_skipped": False,
+                "publish_skip_reason": None,
+                "repair_actions": repair_actions,
+                "projection_state": projection_state_summary(paths),
+                "publish_storage": {},
+                "lane_b_follow_up": {},
+            }
+
         stage_started = perf_counter()
+        trusted_unchanged_source_ids = (
+            {
+                str(source["source_id"])
+                for source in active_sources
+                if source.get("change_classification") == "unchanged"
+                and isinstance(source.get("source_id"), str)
+            }
+            if rebuild_telemetry.get("artifact_contract_cache_hit")
+            else set()
+        )
+        if active_staging_transaction is None and not rebuild_required:
+            affected_transaction_source_ids = {
+                str(source_id)
+                for key in (
+                    "contract_backfill_source_ids",
+                    "metadata_refresh_source_ids",
+                    "validation_cache_drift_source_ids",
+                )
+                for source_id in rebuild_telemetry.get(key, [])
+                if isinstance(source_id, str) and source_id
+            }
+            if rebuild_telemetry.get("validation_contract_drift"):
+                affected_transaction_source_ids.update(active_source_ids)
+            active_staging_transaction = begin_in_place_staging_transaction(
+                paths,
+                source_signature=current_signature,
+                affected_source_ids=affected_transaction_source_ids,
+            )
+            rebuild_telemetry["staging_transaction_path"] = str(
+                active_staging_transaction.relative_to(paths.root)
+            )
+            transaction_costs = read_json(
+                active_staging_transaction / "transaction.json"
+            ).get("physical_costs", {})
+            if isinstance(transaction_costs, dict):
+                for key in (
+                    "files_copied",
+                    "bytes_copied",
+                    "files_cloned",
+                    "bytes_cloned",
+                ):
+                    build_stats[key] = int(transaction_costs.get(key, 0) or 0)
         if rebuild_telemetry["rebuild_cause"] == "artifact-contract-backfill":
             scoped_contract_repair = repair_staging_artifact_contract(
                 paths,
@@ -6340,6 +7456,9 @@ def sync_workspace(
                         paths,
                         active_sources,
                         office_snapshot["binary"],
+                        trusted_unchanged_source_ids=trusted_unchanged_source_ids,
+                        retain_transaction=True,
+                        source_signature=current_signature,
                     )
                 )
         elif rebuild_required:
@@ -6347,9 +7466,30 @@ def sync_workspace(
                 paths,
                 active_sources,
                 office_snapshot["binary"],
+                trusted_unchanged_source_ids=trusted_unchanged_source_ids,
+                retain_transaction=True,
+                source_signature=current_signature,
             )
+            transaction_path = build_stats.get("staging_transaction_path")
+            if isinstance(transaction_path, str) and transaction_path:
+                active_staging_transaction = paths.root / transaction_path
         else:
-            refresh_staging_source_metadata(paths, active_sources)
+            metadata_refresh_source_ids = set(
+                str(source_id)
+                for source_id in rebuild_telemetry.get(
+                    "metadata_refresh_source_ids", []
+                )
+                if isinstance(source_id, str)
+            )
+            if metadata_refresh_source_ids:
+                refresh_staging_source_metadata(
+                    paths,
+                    [
+                        source
+                        for source in active_sources
+                        if source.get("source_id") in metadata_refresh_source_ids
+                    ],
+                )
             _catalog_sources, _source_summaries, _ambiguous = write_staging_root_artifacts(
                 paths,
                 active_sources,
@@ -6359,6 +7499,27 @@ def sync_workspace(
         rebuild_telemetry["scoped_contract_repair_source_count"] = int(
             build_stats.get("scoped_repaired_sources", 0) or 0
         )
+        if scoped_contract_repair_used:
+            repaired_source_ids = {
+                str(source_id)
+                for source_id in rebuild_telemetry.get(
+                    "contract_backfill_source_ids", []
+                )
+                if isinstance(source_id, str)
+            }
+            remaining_drift_source_ids = [
+                str(source_id)
+                for source_id in rebuild_telemetry.get(
+                    "validation_cache_drift_source_ids", []
+                )
+                if isinstance(source_id, str) and source_id not in repaired_source_ids
+            ]
+            rebuild_telemetry["validation_cache_drift_source_ids"] = (
+                remaining_drift_source_ids
+            )
+            rebuild_telemetry["validation_cache_drift_source_count"] = len(
+                remaining_drift_source_ids
+            )
         staging_mode = "refreshed"
         if scoped_contract_repair_used:
             staging_mode = "scoped-repaired"
@@ -6447,7 +7608,36 @@ def sync_workspace(
             )
         phase_costs["author"] = perf_counter() - author_started
 
-        hybrid_enrichment = hybrid_enrichment_status(paths, target="staging")
+        hybrid_refresh_source_ids = {
+            str(change.get("source_id"))
+            for change in change_set.get("changes", [])
+            if isinstance(change, dict)
+            and change.get("change_classification") != "unchanged"
+            and isinstance(change.get("source_id"), str)
+        }
+        for key in (
+            "contract_backfill_source_ids",
+            "metadata_refresh_source_ids",
+            "validation_cache_drift_source_ids",
+        ):
+            hybrid_refresh_source_ids.update(
+                str(source_id)
+                for source_id in rebuild_telemetry.get(key, [])
+                if isinstance(source_id, str)
+            )
+        hybrid_started = perf_counter()
+        hybrid_enrichment = hybrid_enrichment_status(
+            paths,
+            target="staging",
+            replace_source_ids=(
+                hybrid_refresh_source_ids
+                if hybrid_refresh_source_ids
+                and not rebuild_telemetry.get("validation_contract_drift")
+                else None
+            ),
+            active_source_ids=active_source_ids,
+        )
+        phase_costs["hybrid"] = perf_counter() - hybrid_started
         autonomous_steps.append(
             {
                 "step": "hybrid-enrichment",
@@ -6592,7 +7782,38 @@ def sync_workspace(
             }
 
         validate_started = perf_counter()
-        validation_report = validate_target(paths, target="staging")
+        dirty_validation_source_ids = {
+            str(change.get("source_id"))
+            for change in change_set.get("changes", [])
+            if isinstance(change, dict)
+            and change.get("change_classification") != "unchanged"
+            and isinstance(change.get("source_id"), str)
+        }
+        dirty_validation_source_ids.update(
+            str(source_id)
+            for source_id in rebuild_telemetry.get("contract_backfill_source_ids", [])
+            if isinstance(source_id, str)
+        )
+        dirty_validation_source_ids.update(
+            str(source_id)
+            for source_id in rebuild_telemetry.get("metadata_refresh_source_ids", [])
+            if isinstance(source_id, str)
+        )
+        dirty_validation_source_ids.update(
+            str(source_id)
+            for source_id in rebuild_telemetry.get(
+                "validation_cache_drift_source_ids", []
+            )
+            if isinstance(source_id, str)
+        )
+        if rebuild_telemetry.get("validation_contract_drift"):
+            dirty_validation_source_ids.update(active_source_ids)
+        validation_report = validate_target(
+            paths,
+            target="staging",
+            dirty_source_ids=dirty_validation_source_ids,
+            use_cache=True,
+        )
         phase_costs["validate"] = perf_counter() - validate_started
         autonomous_steps.append(
             {
@@ -6622,6 +7843,14 @@ def sync_workspace(
                 not rebuild_required
                 and int(auto_repairs.get("repair_count", 0) or 0) == 0
                 and int(interaction_snapshot.get("pending_promotion_count", 0) or 0) == 0
+                and int(rebuild_telemetry.get("metadata_refresh_source_count", 0) or 0)
+                == 0
+                and int(
+                    rebuild_telemetry.get("validation_cache_drift_source_count", 0)
+                    or 0
+                )
+                == 0
+                and not rebuild_telemetry.get("validation_contract_drift")
                 and state.get("published_source_signature") == current_signature
             ):
                 publish_skipped = True
@@ -6713,6 +7942,20 @@ def sync_workspace(
                             "detail": lane_b_follow_up.get("detail"),
                         }
                     )
+            if active_staging_transaction is not None:
+                transaction_outcome = settle_staging_transaction(
+                    paths,
+                    active_staging_transaction,
+                    commit=True,
+                )
+                repair_actions.append(
+                    {
+                        "kind": "committed-staging-transaction",
+                        "path": str(active_staging_transaction.relative_to(paths.root)),
+                        **transaction_outcome,
+                    }
+                )
+                active_staging_transaction = None
         else:
             autonomous_steps.append(
                 {
@@ -6789,6 +8032,45 @@ def sync_workspace(
             "change_set": change_set,
             "source_index": index_payload,
             "phase_costs": phase_costs,
+            "physical_costs": {
+                "files_copied": int(build_stats.get("files_copied", 0) or 0)
+                + int(
+                    (published_manifest or {}).get("publish_copy", {}).get(
+                        "files_copied", 0
+                    )
+                    or 0
+                ),
+                "bytes_copied": int(build_stats.get("bytes_copied", 0) or 0)
+                + int(
+                    (published_manifest or {}).get("publish_copy", {}).get(
+                        "bytes_copied", 0
+                    )
+                    or 0
+                ),
+                "files_cloned": int(
+                    build_stats.get("files_cloned", 0) or 0
+                )
+                + int(
+                    (published_manifest or {}).get("publish_copy", {}).get(
+                        "files_cloned", 0
+                    )
+                    or 0
+                ),
+                "bytes_cloned": int(
+                    build_stats.get("bytes_cloned", 0) or 0
+                )
+                + int(
+                    (published_manifest or {}).get("publish_copy", {}).get(
+                        "bytes_cloned", 0
+                    )
+                    or 0
+                ),
+                "publication_method": (published_manifest or {}).get(
+                    "publish_copy", {}
+                ).get("method"),
+            },
+            "validation_cache": validation_report.get("validation_cache", {}),
+            "transcript_reconciliation": {},
             "publish_skipped": publish_skipped,
             "publish_skip_reason": publish_skip_reason,
             "repair_actions": repair_actions,
@@ -6796,6 +8078,14 @@ def sync_workspace(
             "publish_storage": publish_storage,
             "lane_b_follow_up": lane_b_follow_up,
             "lane_b_follow_up_summary": lane_b_follow_up_summary,
+            "staging_transaction": (
+                {
+                    "state": "candidate-retained-for-repair",
+                    "path": str(active_staging_transaction.relative_to(paths.root)),
+                }
+                if active_staging_transaction is not None
+                else {"state": "settled", "path": None}
+            ),
         }
 
 

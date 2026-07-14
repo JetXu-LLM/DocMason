@@ -10,20 +10,10 @@ It does not change the default behavior of the canonical source repository or a 
 ## Default Networking Posture
 
 - source repository and fresh clone: no automatic DocMason network check
-- generated bundles: bounded release-entry check only
+- generated bundles: bounded release-entry check only for an explicit core update
 - host agents such as Codex, Claude Code, and GitHub Copilot have their own network behavior outside this contract
 
 ## When DocMason Can Contact The Release-Entry Service
-
-### Automatic Post-Ask Check
-
-An automatic check is allowed only when all of the following are true:
-
-- the workspace is a generated `clean` or `demo-ico-gcs` bundle
-- canonical `ask` has already completed
-- at least 20 hours have passed since the last automatic check
-- automatic checks are still enabled locally
-- `DO_NOT_TRACK=1` is not set
 
 ### Explicit Update Request
 
@@ -45,7 +35,6 @@ The release-entry client sends only:
 
 Current trigger values are:
 
-- `ask-auto`
 - `update-core`
 
 The client compares the returned `latest_version` against the local bundle version.
@@ -77,21 +66,11 @@ Local bundle state is stored in:
 
 - `runtime/state/release-client.json`
 
-To disable automatic checks for the current bundle, set:
-
-```json
-{
-  "automatic_check_enabled": false
-}
-```
-
-`DO_NOT_TRACK=1` disables the automatic post-ask check and the bundle-level daily-activity accounting that piggybacks on it.
-It does not block an explicit `docmason update-core` request, because that is a direct user action.
+Canonical `ask`, status, doctor, sync, retrieval, trace, and finalization do not call the release-entry service. `DO_NOT_TRACK=1` does not block an explicit `docmason update-core` request, because that is a direct user action.
 
 ## User-Visible Behavior
 
-- a final host-visible ask reply may include a short update notice when a newer bundle exists
-- the canonical answer file is not rewritten by that notice
+- ordinary ask and artifact completion never displays or appends an update notice
 - `docmason update-core` downloads the latest clean core, verifies published checksums, preserves local workspace state, and replaces the updatable top-level core surface
 
 For bundle contents and channel boundaries, read [Distribution And Public Bundles](../product/distribution-and-benchmarks.md).
