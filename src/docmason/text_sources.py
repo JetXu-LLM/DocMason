@@ -827,7 +827,22 @@ def _parse_delimited_source(
     delimiter = "\t" if document_type == "tsv" else ","
     lines = text.splitlines()
     reader = csv.reader(lines, delimiter=delimiter)
-    rows = [row for row in reader]
+    try:
+        rows = [row for row in reader]
+    except csv.Error as exc:
+        # A field wider than csv's default size limit (131072), an unterminated
+        # quoted field, or similar malformed delimited content makes csv.reader
+        # raise. This parser's contract is to surface a failure, not crash the
+        # caller, so degrade the same way _read_source_text does on a bad read.
+        return ParsedTextSource(
+            document_type=document_type,
+            source_title=None,
+            source_language="unknown",
+            units=[],
+            document_media=[],
+            warnings=[],
+            failures=[f"Could not parse delimited source: {exc}"],
+        )
     warnings: list[str] = []
     header_names = [value.strip() for value in rows[0]] if rows else []
     sample_rows = rows[1:21] if len(rows) > 1 else rows[:20]
